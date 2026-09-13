@@ -1163,6 +1163,99 @@ leaves it nil, which is what an unhosted session looks like."
     (should-not (string-match-p "fold failed" (agent-river-test--hud)))))
 
 
+;;; Notes -- state produced from outside the hook stream
+
+(ert-deftest agent-river-test-a-signal-goes-through-the-fold ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "signal" :text "told the agent something"))
+    ;; It used to be pushed onto the slot from `agent-river-observe', which
+    ;; made observe a second writer to a state the fold is supposed to own
+    ;; alone.  Folding it is what keeps that ownership true.
+    (should (= (length (agent-river-state-signals state)) 1))
+    (should (equal (cdr (car (agent-river-state-signals state)))
+                   "told the agent something"))))
+
+(ert-deftest agent-river-test-a-signal-event-measures-nothing ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"))
+    (agent-river-test--fail state 2)
+    (agent-river-fold state '(:kind "signal" :text "3 consecutive failures"))
+    ;; Something that happened *to* the session, not something it did: a
+    ;; signal that moved the step count or the streak would make the agent
+    ;; look busier the more often it was spoken to.
+    (should (= (agent-river-state-steps state) 1))
+    (should (= (agent-river-state-fail-streak state) 2))
+    (should-not (gethash "signal" (agent-river-state-tools state)))))
+
+(ert-deftest agent-river-test-observing-still-counts-its-signals ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (dotimes (_ 3)
+      (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash"
+                                   :detail "Bash")))
+    (let ((state (gethash "s1" agent-river-registry)))
+      ;; The route changed, the reading must not.
+      (should (= (length (agent-river-state-signals state)) 1))
+      (should (= (plist-get (agent-river-report "s1") :signals) 1)))))
+
+(ert-deftest agent-river-test-a-note-is-folded-and-counted ()
+  (agent-river-test--with-observers
+    (agent-river-observe '(:kind "act" :session "s1" :file "a.el" :detail "Edit"))
+    (agent-river-note "a.el changed under the agent" "s1")
+    (let ((state (gethash "s1" agent-river-registry)))
+      (should (= (length (agent-river-state-notes state)) 1))
+      (should (equal (cdr (car (agent-river-state-notes state)))
+                     "a.el changed under the agent"))
+      ;; Observable in the report for the same reason signals are: how often
+      ;; something happened to a session is itself worth knowing.
+      (should (= (plist-get (agent-river-report "s1") :notes) 1))
+      ;; And it measures nothing about the agent's own work.
+      (should (= (agent-river-state-steps state) 1)))))
+
+(ert-deftest agent-river-test-a-note-reaches-the-observers ()
+  (agent-river-test--with-observers
+    (let (kinds)
+      (agent-river-observe '(:kind "act" :session "s1" :detail "Edit a.el"))
+      (add-hook 'agent-river-observers
+                (lambda (_state event) (push (plist-get event :kind) kinds)))
+      (agent-river-note "something happened" "s1")
+      ;; A note is an event like any other downstream; a consumer that had to
+      ;; find out some other way would be reading the state behind its back.
+      (should (equal kinds '("note"))))))
+
+(ert-deftest agent-river-test-a-note-about-a-note-is-refused ()
+  (agent-river-test--with-observers
+    (let ((calls 0))
+      (add-hook 'agent-river-observers
+                (lambda (_state _event)
+                  (setq calls (1+ calls))
+                  (agent-river-note "noting again" "s1")))
+      (agent-river-observe '(:kind "act" :session "s1" :detail "Edit a.el"))
+      ;; Once for the act, once for the note it made.  The note made while
+      ;; that note was being handled is refused, or two observers noting at
+      ;; each other would loop without bound -- and a log of single lines is
+      ;; a bad place to notice that from.
+      (should (= calls 2))
+      (should (= (length (agent-river-state-notes
+                          (gethash "s1" agent-river-registry)))
+                 1))
+      ;; Refusal is not failure: the observer must survive it.
+      (should agent-river-observers))))
+
+(ert-deftest agent-river-test-a-refused-note-says-so-by-returning-nil ()
+  (agent-river-test--with-observers
+    (agent-river-observe '(:kind "act" :session "s1" :detail "Edit a.el"))
+    (should (equal (agent-river-note "first" "s1") "first"))
+    (let ((agent-river--noting t))
+      (should-not (agent-river-note "second" "s1")))))
+
+(ert-deftest agent-river-test-a-note-needs-a-session ()
+  (agent-river-test--with-observers
+    (let ((agent-river--current nil))
+      (should-error (agent-river-note "nobody to attach this to")
+                    :type 'user-error))))
+
+
 ;;; Heat, derived for dired
 ;;
 ;; The derivation is tested, the rendering is not.  Everything that can be

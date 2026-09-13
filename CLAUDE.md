@@ -17,7 +17,7 @@ wiring).
 ## Commands
 
 ```sh
-# Full suite (102 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (110 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -96,7 +96,14 @@ These are load-bearing; the tests enforce most of them.
   observation closes the loop). They age out via `agent-river--intent-stale-p`.
 - **Signals state facts, never instructions**, stay a single line with no control
   characters (the response is JSON-serialized), and fold back in as a `signals`
-  count so "how often was the agent told something" is itself observable.
+  count so "how often was the agent told something" is itself observable. They go
+  back in *through* `agent-river-fold` as a `signal` event — `observe` used to
+  push straight onto the slot, which made it a second writer to a state the fold
+  is supposed to own alone.
+- **The fold is the only writer.** Nothing else `setf`s a slot. The fold's
+  docstring promises a state can be rebuilt by replaying its events; a second
+  writer puts transitions in the state that no event accounts for, and the
+  promise stops being true without anything failing.
 - **`PreToolUse` and `PostToolUseFailure` must not set `"async": true`.** An async
   hook's stdout is never read, so only a synchronous hook can inject
   `additionalContext`; and a synchronous `act` orders its log line before its own
@@ -136,7 +143,16 @@ What a consumer must respect:
 - **Return values are ignored.** Signals are the only channel back into the
   agent's context and they are kept narrow and factual on purpose; a side
   effect must not speak through it.
-- **Never mutate STATE.** The state is the one account of what happened.
+- **Never `setf` STATE — but an observer may still produce state**, via
+  `agent-river-note`, which folds it as a `note` event. The rule is about the
+  *mechanism*, not the effect: a note is in the event stream, logged, counted
+  and attributable, where a direct write is none of those. Note only what a
+  hook cannot see and the state cannot derive (a human editing a file under the
+  agent); anything recomputable is derived where it is read. A note is a
+  measurement, so it may feed a signal — which means an observer noting its own
+  opinions closes exactly the loop the `intent*` slots are kept apart to
+  prevent. Observers run for a note too, but one level deep: a note made while
+  a note is being handled is refused and returns nil.
 - **The state cannot address a file on disk** — `agent-river--rel` sees to that,
   and it must keep doing so. Two ways out, both in the heat code: look the file
   up *from* the consumer's side by basename (what `agent-river-touching`

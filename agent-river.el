@@ -175,6 +175,9 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
 (defface agent-river-stale '((t :inherit shadow :slant italic))
   "Face for a claim the measured state has overtaken.")
 
+(defface agent-river-note '((t :inherit font-lock-builtin-face))
+  "Face for something observed outside the hook stream.")
+
 (defconst agent-river-kinds
   '(("prompt" "◆" agent-river-prompt)
     ("act"    "▸" agent-river-act)
@@ -182,6 +185,7 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
     ("reason" "◇" agent-river-reason)
     ("intent" "◈" agent-river-intent)
     ("fail"   "✗" agent-river-fail)
+    ("note"   "◉" agent-river-note)
     ("signal" "!" agent-river-signal)
     ("done"   "□" agent-river-idle)
     ("idle"   "■" agent-river-idle))
@@ -213,7 +217,13 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
   intent intent-at intent-step intent-hottest
   tasks             ; finished tasks, newest first
   done              ; set by SubagentStop: finished, as a fact not a guess
-  signals)          ; observations handed back, newest first
+  signals           ; observations handed back, newest first
+  ;; Observations made outside the hook stream, newest first -- see
+  ;; `agent-river-note'.  A third category next to the measurements above and
+  ;; the claims before them: something that was genuinely seen, but not by a
+  ;; hook, so it could never be recomputed from the event stream and has to be
+  ;; carried rather than derived.
+  notes)
 
 (defun agent-river-key (session &optional agent)
   "Return the registry key for SESSION, or for AGENT running under it.
@@ -485,6 +495,17 @@ replaying a session's events from the start."
         (if cell
             (setcdr cell (1+ (cdr cell)))
           (push (cons tool 1) (agent-river-state-fail-tools state)))))
+
+     ;; Both of the below record something that happened *to* the session
+     ;; rather than something it did, which is why neither touches the step,
+     ;; the streak or the artifacts.
+     ((equal kind "signal")
+      (push (cons (current-time) (plist-get event :text))
+            (agent-river-state-signals state)))
+
+     ((equal kind "note")
+      (push (cons (current-time) (plist-get event :text))
+            (agent-river-state-notes state)))
 
      ((equal kind "intent")
       (setf (agent-river-state-intent state) (plist-get event :text)
@@ -942,7 +963,12 @@ often the agent had to be told something is itself part of the state."
       (agent-river--ensure-timer)
       (let ((signal (agent-river--signal state)))
         (when signal
-          (push (cons (current-time) signal) (agent-river-state-signals state))
+          ;; Through the fold, not around it.  This used to push straight onto
+          ;; the slot, which made `agent-river-observe' a second writer to a
+          ;; state the fold is supposed to own alone -- and left the fold's
+          ;; promise that a state can be rebuilt by replaying its events true
+          ;; only by accident, because a signal happens to be derivable.
+          (agent-river-fold state (list :kind "signal" :text signal))
           (agent-river-log "signal" signal label))
         signal))))
 
@@ -1002,6 +1028,51 @@ defaults to the session that most recently acted."
         (agent-river--update-panel state)
         (agent-river-log "intent" text (agent-river-state-label state))
         text))))
+
+(defvar agent-river--noting nil
+  "Non-nil while a note is being folded.
+Bounds observer re-entry to a single level; see `agent-river-note'.")
+
+;;;###autoload
+(defun agent-river-note (text &optional id)
+  "Fold TEXT as an observation about session ID made outside the hook stream.
+
+The way a side effect is allowed to produce state.  An observer must not
+write to the struct -- the fold owns it, and a second writer would put
+transitions in the state that no event accounts for, which is how the
+replay promise on `agent-river-fold' quietly stops being true.  A note is
+an event instead: it goes through the fold, it is logged, it is counted in
+the report, and where it came from stays visible.
+
+What belongs here is what a hook cannot see and the state cannot derive --
+the file changing under the agent because a human edited it, a build
+finishing elsewhere.  Anything recomputable from the event stream should
+be derived at the point it is read, not stored here.
+
+It is a measurement, not a claim: unlike `agent-river-set-intent' this is
+something that was observed, so it may feed a signal.  Which means an
+observer minting notes about itself would close the same loop the intent
+slots are kept apart to prevent -- note what happened, never what you
+think about it.
+
+Observers run for a note as they do for a hook event, but only one level
+deep: a note made while a note is being handled is refused and returns
+nil.  Two observers noting at each other is otherwise an unbounded loop,
+and one that is hard to see in a log of single lines.  ID defaults to the
+session that most recently acted."
+  (let* ((key (or id agent-river--current))
+         (state (and key (gethash key agent-river-registry))))
+    (cond
+     ((null state) (user-error "No session to attach a note to"))
+     (agent-river--noting nil)
+     (t
+      (let ((agent-river--noting t)
+            (event (list :kind "note" :text text :session key)))
+        (agent-river-fold state event)
+        (agent-river--update-panel state)
+        (agent-river-log "note" text (agent-river-state-label state))
+        (agent-river--run-observers state event)
+        text)))))
 
 
 ;;; Queries -- the meta level
@@ -1074,7 +1145,8 @@ and through the main checkout counts as one artifact."
                :session-elapsed (and (agent-river-state-started state)
                                      (agent-river--ago
                                       (agent-river-state-started state)))
-               :signals (length (agent-river-state-signals state)))
+               :signals (length (agent-river-state-signals state))
+               :notes (length (agent-river-state-notes state)))
          ;; Subagents fold separately so their failures stay theirs, but the
          ;; parent still has to be able to see what it set in motion.
          (when kids
