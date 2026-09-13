@@ -2315,8 +2315,62 @@ the evidence exists is tuned on a guess."
          (plist-get step :file)
          (equal (file-name-nondirectory (plist-get step :file)) name))))
 
+(defun agent-river--frame-word (&optional scope)
+  "Return the name SCOPE goes by in a sentence.
+Said rather than assumed: the frame used to be written into the note as
+\"this task\" whatever `agent-river-foreign-save-scope' was set to, so
+one of the two settings put a number under the wrong heading."
+  (if (eq (or scope agent-river-foreign-save-scope) 'session)
+      "this session"
+    "this task"))
+
+(defun agent-river--touch-phrase (who touches)
+  "Return TOUCHES by WHO as a phrase, WHO nil for the session itself."
+  (format "%s%d touch%s"
+          (if who (concat who " ") "")
+          touches
+          (if (= touches 1) "" "es")))
+
+(defun agent-river--family-in-file (state name)
+  "Return who in STATE's family is working in the file called NAME.
+
+A list of plists -- the session itself first, its subagents after -- each
+carrying `:who' (nil for the session, the agent type for a subagent),
+`:touches' and `:in-flight'.
+
+The family rather than the session alone, because a delegated file lands
+in the *subagent's* task frame and never in its parent's.  Asking the root
+only meant that a human saving a file a subagent was editing produced no
+note whatsoever -- silence in the case with the least supervision in it.
+
+Finished and stale subagents drop out: the question is who is in the file
+now, and a child that has stopped cannot be about to overwrite anything."
+  (let ((scope agent-river-foreign-save-scope)
+        parties)
+    (let ((own (agent-river--frame-touches state name scope)))
+      (when own
+        (push (list :who nil :touches own
+                    :in-flight (agent-river--agent-in-flight-p state name))
+              parties)))
+    (dolist (child (agent-river-children (agent-river-state-id state)))
+      (when (agent-river--active-p child)
+        (let ((touches (agent-river--frame-touches child name scope)))
+          (when touches
+            (push (list :who (or (agent-river-state-agent-type child) "subagent")
+                        :touches touches
+                        :in-flight (agent-river--agent-in-flight-p child name))
+                  parties)))))
+    (nreverse parties)))
+
 (defun agent-river-note-foreign-save (file)
-  "Note FILE as saved outside any session that is working in it.
+  "Note FILE as saved outside any session, or subagent, working in it.
+
+The note is addressed to the root session even when it is a subagent that
+holds the file, because a root is the only thing that can be told
+anything -- see `agent-river--answerable-p', where that is measured rather
+than assumed.  Which is exactly why the note has to name who is in there:
+addressed to the parent and silent about the child, it would read as a
+statement about the parent's own work.
 
 Returns the ids noted, so the caller can tell silence from a miss.  Takes
 the name rather than reading `buffer-file-name' itself: that makes the
@@ -2325,18 +2379,25 @@ whole decision testable without a buffer, a file on disk or a save."
         noted)
     (maphash
      (lambda (id state)
-       ;; Subagents are skipped: they are counted on their parent and have no
-       ;; line of their own, so a note against one would be addressed to
-       ;; something nothing displays.
        (when (and (null (agent-river-state-parent state))
-                  (agent-river--active-p state)
-                  (not (agent-river--agent-in-flight-p state name)))
-         (let ((touches (agent-river--frame-touches
-                         state name agent-river-foreign-save-scope)))
-           (when touches
+                  (agent-river--active-p state))
+         (let ((parties (agent-river--family-in-file state name)))
+           ;; An open call on this file anywhere in the family makes the save
+           ;; ambiguous -- it may be that agent's own write landing -- and the
+           ;; family is the right scope for the guard now that it is the scope
+           ;; for the question.
+           (when (and parties
+                      (not (seq-some (lambda (party) (plist-get party :in-flight))
+                                     parties)))
              (agent-river-note
-              (format "%s saved outside the session (%d touch%s this task)"
-                      name touches (if (= touches 1) "" "es"))
+              (format "%s saved outside the session (%s: %s)"
+                      name
+                      (agent-river--frame-word)
+                      (mapconcat (lambda (party)
+                                   (agent-river--touch-phrase
+                                    (plist-get party :who)
+                                    (plist-get party :touches)))
+                                 parties ", "))
               id)
              (push id noted)))))
      agent-river-registry)

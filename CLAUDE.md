@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (142 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (146 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -256,7 +256,7 @@ What may be noted is narrower than "anything from outside":
   it where it is read (`buffer-modified-p`); a note would go stale the moment
   it is folded.
 
-Two things a producer owes:
+Three things a producer owes:
 
 - **A relevance filter.** `after-save-hook` fires on every save you make.
   Without a filter the log becomes a list of your keystrokes. The filter is a
@@ -266,6 +266,20 @@ Two things a producer owes:
   `agent-river--agent-in-flight-p` is the guard here, and it is deliberately
   narrow: it suppresses only while a tool call is open on that exact file.
   Widening it before there is evidence of noise would be tuning on a guess.
+- **The family, not the session** (`agent-river--family-in-file`). A delegated
+  file lands in the *subagent's* task frame and never in its parent's, so
+  asking the root alone produced no note at all when a subagent held the file
+  — silence in the case with the least supervision in it. Both the relevance
+  filter and the provenance guard therefore range over the root and its live
+  children.
+
+Where a note is **addressed** is forced by the invariant above: only a root can
+be told anything, so the note goes to the root even when a subagent holds the
+file — which is exactly why it has to name the holder. Addressed to the parent
+and silent about the child, "shared.el saved outside the session" reads as a
+statement about the parent's own work. Say which frame the count came from too
+(`agent-river--frame-word`); the text used to read "this task" whatever
+`agent-river-foreign-save-scope` was set to.
 
 Reading notes back and deciding what to tell the agent is a separate step, and
 is deliberately not built: `agent-river--signal` still fires on fail streaks

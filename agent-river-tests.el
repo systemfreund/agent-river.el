@@ -1819,16 +1819,83 @@ CALL overrides fields of the tool call record."
       (should (= (length (agent-river-state-notes (gethash id agent-river-registry)))
                  1)))))
 
-(ert-deftest agent-river-test-a-subagent-is-not-noted-at ()
-  (agent-river-test--with-observers
-    (agent-river-observe '(:kind "act" :session "s1" :agent "a1"
-                                 :agent-type "Explore" :file "a.el"
-                                 :detail "Read a.el"))
+(defun agent-river-test--delegating-session (&optional child-file)
+  "Set up a root that worked in main.el and a subagent in CHILD-FILE."
+  (agent-river-observe '(:kind "prompt" :session "s1" :text "do it" :detail "do it"))
+  (agent-river-observe '(:kind "act" :session "s1" :file "main.el" :detail "Edit"))
+  (agent-river-observe '(:kind "think" :session "s1" :tool "Edit" :detail "Edit"))
+  (when child-file
+    (agent-river-observe (list :kind "act" :session "s1" :agent "a1"
+                               :agent-type "Explore" :file child-file
+                               :detail "Edit"))
     (agent-river-observe '(:kind "think" :session "s1" :agent "a1"
-                                 :tool "Read" :detail "Read"))
-    ;; Subagents are counted on their parent and have no line of their own,
-    ;; so a note against one would be addressed to something nothing shows.
-    (should-not (agent-river-note-foreign-save "/repo/a.el"))))
+                                 :tool "Edit" :detail "Edit"))))
+
+(ert-deftest agent-river-test-a-file-a-subagent-holds-is-noted-to-the-root ()
+  (agent-river-test--with-observers
+    (agent-river-test--delegating-session "shared.el")
+    ;; A delegated file lands in the subagent's task frame and never in its
+    ;; parent's, so asking the root alone produced no note at all -- silence
+    ;; in the case with the least supervision in it.
+    (should (equal (agent-river-note-foreign-save "/repo/shared.el") '("s1")))
+    (let ((root (gethash "s1" agent-river-registry))
+          (child (gethash "s1/a1" agent-river-registry)))
+      ;; Addressed to the root, because a root is the only thing that can be
+      ;; told anything -- and never to the subagent, which cannot.
+      (should (= (length (agent-river-state-notes root)) 1))
+      (should-not (agent-river-state-notes child)))))
+
+(ert-deftest agent-river-test-a-note-says-who-is-in-the-file ()
+  (agent-river-test--with-observers
+    (agent-river-test--delegating-session "main.el")
+    (agent-river-note-foreign-save "/repo/main.el")
+    (let ((text (cdr (car (agent-river-state-notes
+                           (gethash "s1" agent-river-registry))))))
+      ;; Addressed to the parent and silent about the child, this would read
+      ;; as a statement about the parent's own work.
+      (should (string-match-p "1 touch," text))
+      (should (string-match-p "Explore 1 touch" text))
+      ;; And it labels the frame rather than saying "this task" whatever the
+      ;; scope happens to be.
+      (should (string-match-p "this task" text)))))
+
+(ert-deftest agent-river-test-a-note-labels-the-frame-it-counted ()
+  (agent-river-test--with-observers
+    (let ((agent-river-foreign-save-scope 'session))
+      (agent-river-test--delegating-session)
+      (agent-river-observe '(:kind "prompt" :session "s1" :text "next" :detail "next"))
+      (agent-river-note-foreign-save "/repo/main.el")
+      (let ((text (cdr (car (agent-river-state-notes
+                             (gethash "s1" agent-river-registry))))))
+        ;; The touch survived the new prompt only in the session frame, so
+        ;; calling it "this task" would put the number under a heading that
+        ;; cleared it.
+        (should (string-match-p "this session" text))
+        (should-not (string-match-p "this task" text))))))
+
+(ert-deftest agent-river-test-an-open-call-anywhere-in-the-family-suppresses ()
+  (agent-river-test--with-observers
+    (agent-river-test--delegating-session "shared.el")
+    ;; The subagent opens a call on the file and does not close it: the save
+    ;; may be that write landing, and the guard has to reach the whole family
+    ;; now that the question does.
+    (agent-river-observe '(:kind "act" :session "s1" :agent "a1"
+                                 :agent-type "Explore" :file "shared.el"
+                                 :detail "Edit"))
+    (should-not (agent-river-note-foreign-save "/repo/shared.el"))
+    (agent-river-observe '(:kind "think" :session "s1" :agent "a1"
+                                 :tool "Edit" :detail "Edit"))
+    (should (agent-river-note-foreign-save "/repo/shared.el"))))
+
+(ert-deftest agent-river-test-a-finished-subagent-holds-nothing ()
+  (agent-river-test--with-observers
+    (agent-river-test--delegating-session "shared.el")
+    (agent-river-observe '(:kind "done" :session "s1" :agent "a1"
+                                 :agent-type "Explore" :detail "Explore finished"))
+    ;; The question is who is in the file now.  A child that has stopped
+    ;; cannot be about to overwrite anything, and SubagentStop says so as a
+    ;; fact rather than a guess.
+    (should-not (agent-river-note-foreign-save "/repo/shared.el"))))
 
 (ert-deftest agent-river-test-watching-saves-is-off-until-asked-for ()
   (should-not (default-value 'agent-river-watch-saves-mode))
