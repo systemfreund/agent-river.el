@@ -446,7 +446,7 @@ Implementation notes:
   necessarily the language of the conversation.
 
 It is driven by Claude Code hooks, not by the agent choosing to call
-something — this repo's `.claude/settings.json` wires five events to
+something — this repo's `.claude/settings.json` wires six events to
 `~/src/agent-river/agent-river-hook.sh`, which turns the hook's JSON
 payload into an `agent-river-observe` call over `emacsclient`:
 
