@@ -2077,6 +2077,11 @@ long as Emacs does."
 (declare-function dired-move-to-filename "dired" (&optional raise-error eol))
 (declare-function dired-move-to-end-of-filename "dired" (&optional no-error))
 (declare-function pulse-momentary-highlight-region "pulse" (start end &optional face))
+;; Special variables, bound around a pulse to set its length.  Declared so
+;; the byte-compiler treats them as the dynamic bindings pulse.el reads
+;; rather than as unused lexicals the `let' would silently drop.
+(defvar pulse-iterations)
+(defvar pulse-delay)
 
 (defface agent-river-heat-1
   '((((background light)) :background "#edf2fa")
@@ -2092,6 +2097,34 @@ long as Emacs does."
   '((((background light)) :background "#f7e2c9" :weight bold)
     (((background dark))  :background "#4a3724" :weight bold))
   "Face for the dired entry the agent is living in.")
+
+(defface agent-river-pulse
+  '((((background light)) :background "#ffd34d" :foreground "#3a2a00" :weight bold)
+    (((background dark))  :background "#ffcf5c" :foreground "#241a00" :weight bold))
+  "Face a just-touched entry flashes in, briefly, when an event names it.
+
+Separate from `agent-river-heat-3' on purpose, and brighter.  The heat is a
+steady reading -- \"the agent works here\" -- and is meant to be lived with,
+so its shades stay muted.  The pulse is a one-off \"look here\" that has a
+second to do its job, so it has to stand out against every heat level,
+including the hottest; reusing heat-3's shade made a flash on the hottest
+file indistinguishable from the file just sitting there.")
+
+(defcustom agent-river-pulse-iterations 20
+  "How many times a pulse fades in and out.
+`pulse-momentary-highlight-region' runs `pulse-iterations' cycles with
+`pulse-delay' seconds between them, so the two together set how long the
+highlight lasts.  The defaults (10, 0.03) make about a third of a second,
+which is easy to miss when the file being pulsed is not where the eye
+already is -- which is the whole point of pulsing it."
+  :type 'integer)
+
+(defcustom agent-river-pulse-delay 0.06
+  "Seconds between a pulse's fade cycles, with `agent-river-pulse-iterations'.
+Raised from the `pulse' default of 0.03 so a touched file stays lit long
+enough to catch: the pulse points the eye at the file an event just named,
+and an animation that is over before the glance arrives points at nothing."
+  :type 'number)
 
 (defcustom agent-river-heat-levels
   '((6 . agent-river-heat-3)
@@ -2357,7 +2390,10 @@ show what the agent has written."
 ;; readable at once.
 
 (defun agent-river--pulse-dired (path)
-  "Pulse PATH's entry in the first visible dired buffer that lists it."
+  "Pulse PATH's entry in the first visible dired buffer that lists it.
+The pulse's length comes from `agent-river-pulse-iterations' and
+`agent-river-pulse-delay' rather than pulse.el's terse defaults, so a
+file an event just named stays lit long enough for the eye to find it."
   (when (and path (require 'pulse nil t))
     (catch 'pulsed
       (dolist (buffer (agent-river--dired-buffers))
@@ -2367,10 +2403,12 @@ show what the agent has written."
             ;; the file is not in this listing, which is also the answer for
             ;; a file the agent created a moment ago.
             (when (ignore-errors (dired-goto-file path))
-              (let ((bounds (agent-river--heat-bounds)))
+              (let ((bounds (agent-river--heat-bounds))
+                    (pulse-iterations agent-river-pulse-iterations)
+                    (pulse-delay agent-river-pulse-delay))
                 (when bounds
                   (pulse-momentary-highlight-region
-                   (car bounds) (cdr bounds) 'agent-river-heat-3)
+                   (car bounds) (cdr bounds) 'agent-river-pulse)
                   (throw 'pulsed buffer))))))))))
 
 (defun agent-river--dired-observe (_state event)
