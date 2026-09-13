@@ -400,16 +400,40 @@ emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 
-86 tests covering the state transitions, streak accounting, signal
+94 tests covering the state transitions, streak accounting, signal
 threshold and throttle, the phase, subagent isolation, the registry and its
-TTL, the cross-session `touching` query, and the payload derivation — which
-argument of a call is the interesting one, how a duration is formatted,
-what counts as an interrupted call.
+TTL, the cross-session `touching` query, the reasoning stream — chunk
+accumulation, the sentence boundary, which path serves a hosted session —
+and the payload derivation: which argument of a call is the interesting
+one, how a duration is formatted, what counts as an interrupted call.
 
 Verified to actually fail rather than merely pass: mutating the streak
-reset in a scratch copy turns exactly the two responsible tests red.
+reset in a scratch copy turns exactly the two responsible tests red, and
+the three mutations of the reasoning path — accepting an incomplete
+sentence, dropping the end-of-run flush, removing the guard that keeps the
+transcript fallback off a hosted session — turn three, one and one.
 
-## Trailing reasoning: the `◇` lines
+## The `◇` lines: reasoning
+
+Where agent-shell hosts the session, the reasoning comes off the ACP stream
+that already drives the shell. `agent_thought_chunk` notifications carry it,
+`agent-shell--state` hands over the client, and the handler is attached the
+first time a session folds an event.
+
+That makes the order chronological rather than arranged: a thought arrives
+when the agent thinks it, which is before the tool call it explains. The
+difference is visible in the timestamps — the fallback below emits its line
+*inside* the `act` hook, so `◇` and `▸` share a second; a streamed thought
+carries its own.
+
+A thought arrives in chunks, which is the one thing this path makes harder.
+Only the first sentence is shown, so a run is emitted as soon as one is
+complete and the rest of it is dropped; a run that ends without a sentence
+boundary is flushed by the next notification that is not a thought. Waiting
+for the boundary is the point — a chunk usually ends mid-clause, and showing
+that would put a truncated sentence on screen and never correct it.
+
+### Without agent-shell: lifting it out of the transcript
 
 The payload carries no thinking text. It does carry `transcript_path`,
 pointing at the session's full JSONL — and that file holds the reasoning as

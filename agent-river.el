@@ -772,7 +772,11 @@ explains.  A session met for the first time is fast-forwarded rather than
 replayed, or its first tool call would dump the whole backlog."
   (let ((path (alist-get 'transcript_path payload))
         (from (agent-river-state-transcript-pos state)))
-    (when (and path (file-readable-p path))
+    (when (and path (file-readable-p path)
+               ;; Not where agent-shell hosts the session: there
+               ;; `agent_thought_chunk` already delivered this reasoning live,
+               ;; and without the lag this path has to arrange its line around.
+               (not (agent-river--acp-client (agent-river-state-id state))))
       (let ((tail (agent-river--transcript-tail path (or from 0))))
         (when tail
           (setf (agent-river-state-transcript-pos state) (cdr tail))
@@ -783,6 +787,119 @@ replayed, or its first tool call would dump the whole backlog."
         (unless tail
           (setf (agent-river-state-transcript-pos state)
                 (or from (file-attribute-size (file-attributes path)) 0)))))))
+
+
+;;; Live reasoning, from the ACP stream
+;;
+;; Where agent-shell hosts the session, the reasoning never has to be lifted
+;; out of the transcript: the same ACP stream that drives the shell carries
+;; `agent_thought_chunk' notifications, and the client is reachable from the
+;; buffer this file already locates by session id.
+;;
+;; That removes the lag instead of arranging around it.  The transcript can
+;; only ever yield the *previous* step's reasoning -- the record for the
+;; current tool call is still unflushed when the hook fires -- so
+;; `agent-river--emit-reasoning' compensates by where it puts the line.  A
+;; thought chunk arrives when the agent thinks it, which is before the tool
+;; call it explains, so the order is chronological rather than staged.
+;;
+;; What gets harder: a thought arrives in chunks rather than whole.  Only the
+;; first sentence is shown, so a run is emitted the moment one is complete
+;; and the rest of that run is dropped; a run that ends without a sentence
+;; boundary is flushed by the next notification that is not a thought.
+
+(defconst agent-river-thought-width 110
+  "How much of a thought's first sentence the HUD shows.")
+
+(defvar agent-river--thought-runs (make-hash-table :test 'equal)
+  "Session id -> (:text ACCUMULATED :done EMITTED-P) for the thought in flight.
+
+Deliberately not a slot on `agent-river-state': this is decoding state for
+one ingestion path, nothing folds it and no query reads it, and putting it
+in the struct would mean every reload demanded `agent-river-reset'.")
+
+(defvar agent-river--subscribed (make-hash-table :test 'equal)
+  "Session id -> the ACP client its notification handler is attached to.
+
+Subscribing twice would double every reasoning line, and a session whose
+client was rebuilt needs attaching again -- so the client is compared
+rather than a flag being set.")
+
+(defun agent-river--thought-chunk (notification)
+  "Return the thinking text carried by NOTIFICATION, or nil for anything else."
+  (let ((update (alist-get 'update (alist-get 'params notification))))
+    (when (equal (alist-get 'sessionUpdate update) "agent_thought_chunk")
+      (alist-get 'text (alist-get 'content update)))))
+
+(defun agent-river--first-sentence (text)
+  "Return the first complete sentence of TEXT, or nil when it has none.
+Completeness is the point: mid-stream a chunk usually ends inside a
+sentence, and showing that would put a truncated clause on screen and then
+never correct it."
+  (let ((parts (split-string (agent-river--squish text) "\\. ")))
+    (when (cdr parts) (car parts))))
+
+(defun agent-river--emit-thought (id text)
+  "Log TEXT as the reasoning of session ID."
+  (let ((one (agent-river--clip (agent-river--squish text)
+                                agent-river-thought-width))
+        (state (gethash id agent-river-registry)))
+    (unless (string-empty-p one)
+      (agent-river-log "reason" one (and state (agent-river-state-label state))))))
+
+(defun agent-river--thought-arrived (id chunk)
+  "Add CHUNK to session ID's thought in flight, emitting once it says enough."
+  (let* ((run (gethash id agent-river--thought-runs))
+         (text (concat (plist-get run :text) chunk)))
+    (cond
+     ;; The first sentence is already on screen; the rest of this run is
+     ;; paragraphs, and showing them would bury the tool-call rhythm.
+     ((plist-get run :done))
+     ((agent-river--first-sentence text)
+      (agent-river--emit-thought id (agent-river--first-sentence text))
+      (puthash id (list :text text :done t) agent-river--thought-runs))
+     (t (puthash id (list :text text :done nil) agent-river--thought-runs)))))
+
+(defun agent-river--thought-ended (id)
+  "Close session ID's thought run, emitting one that never reached a sentence."
+  (let ((run (gethash id agent-river--thought-runs)))
+    (when run
+      (unless (plist-get run :done)
+        (agent-river--emit-thought id (plist-get run :text)))
+      (remhash id agent-river--thought-runs))))
+
+(defun agent-river--on-notification (id notification)
+  "Route NOTIFICATION for session ID into the reasoning line."
+  (let ((chunk (agent-river--thought-chunk notification)))
+    (if chunk
+        (agent-river--thought-arrived id chunk)
+      ;; Anything that is not a thought ends the run: the agent stopped
+      ;; thinking and did something.
+      (agent-river--thought-ended id))))
+
+(defun agent-river--acp-client (id)
+  "Return the ACP client of session ID, or nil when agent-shell is not hosting it."
+  (let ((buffer (agent-river--shell-buffer id)))
+    (when buffer
+      (with-current-buffer buffer
+        (alist-get :client (bound-and-true-p agent-shell--state))))))
+
+(defun agent-river--ensure-subscribed (id)
+  "Attach the reasoning handler to session ID's ACP client, at most once.
+
+A no-op where agent-shell is absent or does not host this session: the
+transcript path still covers those, so nothing is lost by staying quiet."
+  (when (fboundp 'acp-subscribe-to-notifications)
+    (let ((client (agent-river--acp-client id)))
+      (when (and client (not (eq client (gethash id agent-river--subscribed))))
+        (acp-subscribe-to-notifications
+         :client client
+         :on-notification (lambda (notification)
+                            ;; Never let the HUD break the shell it rides on.
+                            (condition-case nil
+                                (agent-river--on-notification id notification)
+                              (error nil))))
+        (puthash id client agent-river--subscribed)))))
 
 
 ;;; Entry points -- how state gets in
@@ -814,6 +931,10 @@ often the agent had to be told something is itself part of the state."
                                    type))
          (kind (or (plist-get event :kind) "act"))
          (detail (or (plist-get event :detail) "")))
+    ;; Before anything that can fail: where agent-shell hosts this session the
+    ;; reasoning arrives on its ACP stream rather than through us, and the
+    ;; subscription has to exist before the first thought is streamed.
+    (agent-river--ensure-subscribed session)
     ;; The fold must not be able to take the HUD dark without saying so.
     ;; Reloading this file after changing the struct leaves older states
     ;; short a slot, and the resulting error used to abort `observe' before

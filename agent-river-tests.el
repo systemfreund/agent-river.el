@@ -696,7 +696,10 @@
 (defvar agent-shell--state)
 
 (defmacro agent-river-test--with-shell (specs &rest body)
-  "Run BODY with fake agent-shell buffers for SPECS, a list of (NAME ID)."
+  "Run BODY with fake agent-shell buffers for SPECS, a list of (NAME ID CLIENT).
+
+CLIENT is optional and stands in for the ACP client; a two-element spec
+leaves it nil, which is what an unhosted session looks like."
   (declare (indent 1))
   `(let ((buffers nil))
      (unwind-protect
@@ -708,7 +711,8 @@
                  (setq major-mode 'agent-shell-mode)
                  (setq-local agent-shell--state
                              (list (cons :session
-                                         (list (cons :id (cadr spec)))))))))
+                                         (list (cons :id (cadr spec))))
+                                   (cons :client (caddr spec)))))))
            ,@body)
        (mapc #'kill-buffer buffers))))
 
@@ -1044,6 +1048,127 @@
       ;; often did the agent have to be told" stays observable.
       (should (= 1 (length (agent-river-state-signals
                             (gethash "s1" agent-river-registry))))))))
+
+;;; Live reasoning, from the ACP stream
+
+(defun agent-river-test--thought (text)
+  "Return an `agent_thought_chunk' notification carrying TEXT."
+  `((params . ((update . ((sessionUpdate . "agent_thought_chunk")
+                          (content . ((type . "text") (text . ,text)))))))))
+
+(defun agent-river-test--update (kind)
+  "Return a session update notification of KIND, carrying no thought."
+  `((params . ((update . ((sessionUpdate . ,kind)))))))
+
+(defun agent-river-test--hud ()
+  "Return the text of the HUD buffer."
+  (with-current-buffer (agent-river--buffer)
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defmacro agent-river-test--with-stream (&rest body)
+  "Run BODY against an empty HUD and a fresh thought-run table."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river--thought-runs (make-hash-table :test 'equal))
+         (agent-river-auto-display nil))
+     (agent-river-clear)
+     ,@body))
+
+(ert-deftest agent-river-test-thought-waits-for-a-complete-sentence ()
+  (agent-river-test--with-stream
+    (agent-river--on-notification "s1" (agent-river-test--thought "Joining on tool_use_id"))
+    ;; Mid-stream a chunk ends inside a sentence.  Showing that would put a
+    ;; truncated clause on screen and never correct it.
+    (should-not (string-match-p "Joining" (agent-river-test--hud)))
+    (agent-river--on-notification "s1" (agent-river-test--thought " is more precise. Then"))
+    (should (string-match-p "Joining on tool_use_id is more precise"
+                            (agent-river-test--hud)))))
+
+(ert-deftest agent-river-test-only-the-first-sentence-of-a-thought-is-shown ()
+  (agent-river-test--with-stream
+    (agent-river--on-notification "s1" (agent-river-test--thought "First one. Second one."))
+    (agent-river--on-notification "s1" (agent-river-test--thought " Third one."))
+    ;; Thinking blocks are paragraphs; unabridged they would bury the
+    ;; tool-call rhythm the log exists to show.
+    (should (string-match-p "First one" (agent-river-test--hud)))
+    (should-not (string-match-p "Second one" (agent-river-test--hud)))
+    (should-not (string-match-p "Third one" (agent-river-test--hud)))))
+
+(ert-deftest agent-river-test-a-thought-without-a-sentence-is-flushed-at-the-end ()
+  (agent-river-test--with-stream
+    (agent-river--on-notification "s1" (agent-river-test--thought "Short unfinished thought"))
+    (should-not (string-match-p "Short unfinished" (agent-river-test--hud)))
+    ;; The agent stopped thinking and acted.  Swallowing the run because it
+    ;; never reached a full stop would lose the reasoning entirely.
+    (agent-river--on-notification "s1" (agent-river-test--update "tool_call"))
+    (should (string-match-p "Short unfinished thought" (agent-river-test--hud)))))
+
+(ert-deftest agent-river-test-a-non-thought-notification-says-nothing ()
+  (agent-river-test--with-stream
+    (let ((before (agent-river-test--hud)))
+      ;; Tool calls are the hooks' job.  Folding them here as well would
+      ;; double every step in the log and in the counts.
+      (agent-river--on-notification "s1" (agent-river-test--update "tool_call"))
+      (agent-river--on-notification "s1" (agent-river-test--update "agent_message_chunk"))
+      (should (equal before (agent-river-test--hud))))))
+
+(ert-deftest agent-river-test-thought-runs-are-per-session ()
+  (agent-river-test--with-stream
+    (agent-river--on-notification "s1" (agent-river-test--thought "Alpha thinking"))
+    (agent-river--on-notification "s2" (agent-river-test--thought "Beta thinking"))
+    ;; Two agents think side by side; concatenating their chunks would
+    ;; produce a sentence neither of them had.
+    (agent-river--on-notification "s1" (agent-river-test--thought " about a. x"))
+    (should (string-match-p "Alpha thinking about a" (agent-river-test--hud)))
+    (should-not (string-match-p "Beta thinking about" (agent-river-test--hud)))))
+
+(ert-deftest agent-river-test-thought-chunk-reads-only-thoughts ()
+  (should (equal (agent-river--thought-chunk (agent-river-test--thought "x")) "x"))
+  (should-not (agent-river--thought-chunk (agent-river-test--update "tool_call")))
+  (should-not (agent-river--thought-chunk '((params . nil))))
+  (should-not (agent-river--thought-chunk nil)))
+
+(ert-deftest agent-river-test-transcript-path-stands-down-when-hosted ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        (file (make-temp-file "af-tr")))
+    (unwind-protect
+        (agent-river-test--with-shell '(("Claude Agent @ repo" "s1" fake-client))
+          (let ((state (agent-river-state "s1" "repo"))
+                (payload (list (cons 'transcript_path file))))
+            ;; Fast-forward past the backlog first, so the only reason
+            ;; nothing appears below is the guard.
+            (with-temp-file file (insert "{\"type\":\"user\"}\n"))
+            (agent-river--emit-reasoning state payload)
+            (agent-river-clear)
+            (with-temp-buffer
+              (insert "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"Scraped thought.\"}]}}\n")
+              (append-to-file (point-min) (point-max) file))
+            (agent-river--emit-reasoning state payload)
+            ;; agent_thought_chunk already delivered this live.  Both paths
+            ;; running would print every thought twice.
+            (should-not (string-match-p "Scraped thought" (agent-river-test--hud)))))
+      (delete-file file))))
+
+(ert-deftest agent-river-test-transcript-path-still-serves-an-unhosted-session ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        (file (make-temp-file "af-tr")))
+    (unwind-protect
+        (let ((state (agent-river-state "s1" "repo"))
+              (payload (list (cons 'transcript_path file))))
+          (with-temp-file file (insert "{\"type\":\"user\"}\n"))
+          (agent-river--emit-reasoning state payload)
+          (agent-river-clear)
+          (with-temp-buffer
+            (insert "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"Scraped thought.\"}]}}\n")
+            (append-to-file (point-min) (point-max) file))
+          (agent-river--emit-reasoning state payload)
+          ;; A terminal session has no ACP stream, so the old path is all
+          ;; there is -- taking it away would silence its reasoning.
+          (should (string-match-p "Scraped thought" (agent-river-test--hud))))
+      (delete-file file))))
+
 
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here
