@@ -1433,6 +1433,48 @@ CALL overrides fields of the tool call record."
 
 ;;; Notes -- state produced from outside the hook stream
 
+(ert-deftest agent-river-test-an-event-that-cannot-answer-does-not-signal ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (dotimes (_ 3)
+      (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash" :detail "Bash")))
+    ;; idle is Stop, wired async, so its stdout is never read.  This used to
+    ;; produce a second signal into a pipe nobody reads -- the streak is
+    ;; unchanged by idling, so the threshold simply fired again.
+    (should-not (agent-river-observe '(:kind "idle" :session "s1" :detail "waiting")))
+    (let ((state (gethash "s1" agent-river-registry)))
+      ;; The tally exists to make "how often was the agent told something"
+      ;; observable; counting an undelivered one is the tally lying about the
+      ;; only thing it measures.
+      (should (= (length (agent-river-state-signals state)) 1))
+      (should (= (plist-get (agent-river-report "s1") :signals) 1)))))
+
+(ert-deftest agent-river-test-the-answering-kinds-are-the-gate ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        ;; Not a hardcoded pair of kinds: wire idle synchronously and it may
+        ;; answer.  The list is what must be kept in step with the config.
+        (agent-river-answering-kinds '("idle")))
+    (dotimes (_ 3)
+      (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash" :detail "Bash")))
+    (should-not (agent-river-state-signals (gethash "s1" agent-river-registry)))
+    (should (agent-river-observe '(:kind "idle" :session "s1" :detail "waiting")))))
+
+(ert-deftest agent-river-test-suppression-leaves-the-throttle-alone ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (dotimes (_ 3)
+      (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash" :detail "Bash")))
+    (agent-river-observe '(:kind "idle" :session "s1" :detail "waiting"))
+    ;; The throttle counts failures, not signals, so a suppressed one must
+    ;; not shift the rhythm: the repeat is still due three failures on.
+    (should-not (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash"
+                                             :detail "Bash")))
+    (should-not (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash"
+                                             :detail "Bash")))
+    (should (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash"
+                                        :detail "Bash")))))
+
 (ert-deftest agent-river-test-a-signal-goes-through-the-fold ()
   (agent-river-test--with-session state
     (agent-river-fold state '(:kind "signal" :text "told the agent something"))

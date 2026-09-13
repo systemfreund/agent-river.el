@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (134 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (137 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -125,6 +125,17 @@ These are load-bearing; the tests enforce most of them.
   `PostToolUse` line rather than racing it. On Claude Code that means `PreToolUse`
   and `PostToolUseFailure`; on Codex and Gemini CLI the post-tool hook joins them,
   because there it is the event a `fail` is refined out of.
+- **Only an answering event may signal** (`agent-river-answering-kinds`, default
+  `act` and `fail`). `observe` asks `agent-river--signal` only for those kinds.
+  It used to ask on every event, so a fail streak still standing at the end of a
+  turn signalled again on `idle` — whose hook is async, so nothing read it — and
+  that phantom was logged and folded all the same, leaving the `signals` count
+  claiming the agent had been told twice what it was told once. The tally exists
+  to make "how often was the agent told something" observable and must not be
+  the thing misreporting it. The list decides which events may answer and the
+  wiring must mark exactly those non-`async`; Emacs cannot read settings.json,
+  so the two are kept in step by this invariant, not by inspection. Anything
+  that later reads notes back to the agent hangs off the same gate.
 - **Never fail a tool call over the HUD, but never go quiet either.** Every step in
   the script degrades to a no-op; a payload that reaches Emacs and then throws
   writes a `hook failed` / `fold failed` line into the buffer. Silent failure is

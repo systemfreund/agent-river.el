@@ -79,6 +79,22 @@ Without this the agent would be told on every single failure, and a
 signal that arrives constantly stops being a signal."
   :type 'integer)
 
+(defcustom agent-river-answering-kinds '("act" "fail")
+  "Event kinds whose hook is wired synchronously and can carry a signal.
+
+Only a synchronous hook's stdout is read, so only those events can put an
+observation into the agent's context.  An observation produced on any
+other event is written into a pipe nobody reads -- and worse, it used to
+be logged and counted as though it had arrived, which made the `signals'
+tally state something false about the one thing it exists to measure.
+
+The direction is deliberate: this list decides which events may answer,
+and the hook wiring must then mark exactly those as not `async'.  The
+config cannot be read from here, so the two are kept in step by the
+invariant rather than by inspection.  Add a kind here only after making
+its hook synchronous."
+  :type '(repeat string))
+
 (defcustom agent-river-label-width 8
   "Width of the session column shown when several sessions are active."
   :type 'integer)
@@ -1304,7 +1320,16 @@ often the agent had to be told something is itself part of the state."
       (unless (string-empty-p detail)
         (agent-river-log kind detail label))
       (agent-river--ensure-timer)
-      (let ((signal (agent-river--signal state)))
+      ;; Only ask for an observation on an event that can actually deliver
+      ;; one.  Computing it regardless meant a fail streak still standing when
+      ;; the turn ended produced a signal on `idle' -- whose hook is async, so
+      ;; its stdout is never read.  It was logged and folded all the same, and
+      ;; the `signals' count then claimed the agent had been told twice what
+      ;; it had been told once.  A tally that exists to make "how often was
+      ;; the agent told something" observable must not be the thing that
+      ;; misreports it.
+      (let ((signal (and (member kind agent-river-answering-kinds)
+                         (agent-river--signal state))))
         (when signal
           ;; Through the fold, not around it.  This used to push straight onto
           ;; the slot, which made `agent-river-observe' a second writer to a
