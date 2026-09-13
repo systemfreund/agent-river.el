@@ -1488,7 +1488,7 @@ defaults to the session that most recently acted."
 Bounds observer re-entry to a single level; see `agent-river-note'.")
 
 ;;;###autoload
-(defun agent-river-note (text &optional id)
+(defun agent-river-note (text &optional id path)
   "Fold TEXT as an observation about session ID made outside the hook stream.
 
 The way a side effect is allowed to produce state.  An observer must not
@@ -1502,6 +1502,14 @@ What belongs here is what a hook cannot see and the state cannot derive --
 the file changing under the agent because a human edited it, a build
 finishing elsewhere.  Anything recomputable from the event stream should
 be derived at the point it is read, not stored here.
+
+PATH, when given, is the absolute name of a file the note is *about*.  It
+is carried on the event exactly as `:path' is on a hook event -- beside
+the fold, never in it: the `note' branch stores the text and the time and
+nothing else, and the artifact tables are left alone, so a note can never
+warm a file the agent did not touch.  It is there for observers that need
+to reach the file on disk, which is how a foreign save can pulse its dired
+entry without the note claiming the agent acted on it.
 
 It is a measurement, not a claim: unlike `agent-river-set-intent' this is
 something that was observed, so it may feed a signal.  Which means an
@@ -1521,7 +1529,7 @@ session that most recently acted."
      (agent-river--noting nil)
      (t
       (let ((agent-river--noting t)
-            (event (list :kind "note" :text text :session key)))
+            (event (list :kind "note" :text text :session key :path path)))
         (agent-river-fold state event)
         (agent-river--update-panel state)
         (agent-river-log "note" text (agent-river-state-label state))
@@ -2379,9 +2387,15 @@ worth seeing."
   ;; overlay fell below the threshold there was nothing to cool.  Restart it
   ;; here, where an event has just proven there is something to draw.
   (agent-river--ensure-heat-timer)
-  ;; Only an act names a file that was touched at that moment; a think or a
-  ;; fail reports on a call whose pulse has already been shown.
-  (when (equal (plist-get event :kind) "act")
+  ;; An act names a file that was touched at that moment; a think or a fail
+  ;; reports on a call whose pulse has already been shown.  A note can name
+  ;; one too -- a foreign save points at its file through `:path' -- and it
+  ;; pulses for the same reason: something happened to this file just now,
+  ;; even though the agent is not the one that did it.  The note still does
+  ;; not warm the entry; the pulse says "look here", the heat says "the agent
+  ;; works here", and running them together would blur the two.
+  (when (and (member (plist-get event :kind) '("act" "note"))
+             (plist-get event :path))
     (agent-river--pulse-dired (plist-get event :path))))
 
 ;; Removal is not enough of a retirement here: the overlays would stay where
@@ -2515,6 +2529,11 @@ than assumed.  Which is exactly why the note has to name who is in there:
 addressed to the parent and silent about the child, it would read as a
 statement about the parent's own work.
 
+The file is carried as the note's `:path' as well as named in its text, so
+an observer can reach it on disk -- the dired view pulses the entry a save
+landed in.  It warms nothing: the agent did not touch this file, and a note
+that shaded its entry would draw a claim the state cannot support.
+
 Returns the ids noted, so the caller can tell silence from a miss.  Takes
 the name rather than reading `buffer-file-name' itself: that makes the
 whole decision testable without a buffer, a file on disk or a save."
@@ -2541,7 +2560,7 @@ whole decision testable without a buffer, a file on disk or a save."
                                     (plist-get party :who)
                                     (plist-get party :touches)))
                                  parties ", "))
-              id)
+              id file)
              (push id noted)))))
      agent-river-registry)
     noted))

@@ -1687,6 +1687,49 @@ CALL overrides fields of the tool call record."
       (should-error (agent-river-note "nobody to attach this to")
                     :type 'user-error))))
 
+(ert-deftest agent-river-test-a-note-carries-its-file-beside-the-fold ()
+  (agent-river-test--with-observers
+    (agent-river-observe '(:kind "act" :session "s1" :file "a.el" :detail "Edit"))
+    (let (event)
+      (add-hook 'agent-river-observers
+                (lambda (_state e) (setq event e)))
+      (agent-river-note "b.el saved outside the session" "s1" "/repo/b.el")
+      ;; The absolute name rides on the event for the observers that have to
+      ;; reach the file on disk, exactly as `:path' does on a hook event.
+      (should (equal (plist-get event :path) "/repo/b.el"))
+      ;; And it is kept out of the fold: the note names the file, the agent
+      ;; did not touch it, so the artifact table must not gain an entry.
+      (should-not (gethash "b.el"
+                           (agent-river-state-task-artifacts
+                            (gethash "s1" agent-river-registry)))))))
+
+(ert-deftest agent-river-test-a-noted-save-pulses-the-file-it-names ()
+  (agent-river-test--with-observers
+    (agent-river-observe '(:kind "act" :session "s1" :file "a.el" :detail "Edit"))
+    ;; The observer routes a note's `:path' to the pulse, and an act's too.
+    ;; The pulse is rendering, so this asserts the routing -- which file the
+    ;; observer hands over -- not the highlight itself.
+    (let ((agent-river-heat-mode t)
+          pulsed)
+      (cl-letf (((symbol-function 'agent-river--pulse-dired)
+                 (lambda (path) (push path pulsed))))
+        (agent-river--dired-observe (gethash "s1" agent-river-registry)
+                                    (list :kind "note" :text "x" :path "/repo/b.el")))
+      (should (equal pulsed '("/repo/b.el"))))))
+
+(ert-deftest agent-river-test-a-note-without-a-file-pulses-nothing ()
+  (agent-river-test--with-observers
+    (agent-river-observe '(:kind "act" :session "s1" :detail "Edit a.el"))
+    (let ((agent-river-heat-mode t)
+          pulsed)
+      (cl-letf (((symbol-function 'agent-river--pulse-dired)
+                 (lambda (path) (push path pulsed))))
+        (agent-river--dired-observe (gethash "s1" agent-river-registry)
+                                    (list :kind "note" :text "just an observation")))
+      ;; Nothing to point at, so nothing to pulse -- the observer must not
+      ;; invent a path or hand a nil to the pulse.
+      (should-not pulsed))))
+
 
 ;;; Heat, derived for dired
 ;;
@@ -1901,7 +1944,12 @@ CALL overrides fields of the tool call record."
   (agent-river-test--with-observers
     (agent-river-observe '(:kind "act" :session "s1" :file "a.el" :detail "Edit"))
     (agent-river-observe '(:kind "think" :session "s1" :tool "Edit" :detail "Edit"))
-    (should (equal (agent-river-note-foreign-save "/repo/a.el") '("s1")))
+    (let (event)
+      (add-hook 'agent-river-observers (lambda (_state e) (setq event e)))
+      (should (equal (agent-river-note-foreign-save "/repo/a.el") '("s1")))
+      ;; The save names its file on the event so the dired view can pulse it,
+      ;; giving the human's write the same "look here" the agent's gets.
+      (should (equal (plist-get event :path) "/repo/a.el")))
     (let ((state (gethash "s1" agent-river-registry)))
       (should (= (length (agent-river-state-notes state)) 1))
       (should (string-match-p "a\\.el saved outside the session"
