@@ -707,14 +707,26 @@
 ;;; Hosted by agent-shell
 
 (defvar agent-shell--state)
+(defvar agent-river-test--shell-default)
 
 (defmacro agent-river-test--with-shell (specs &rest body)
-  "Run BODY with fake agent-shell buffers for SPECS, a list of (NAME ID CLIENT).
+  "Run BODY with fake agent-shell buffers for SPECS.
 
-CLIENT is optional and stands in for the ACP client; a two-element spec
-leaves it nil, which is what an unhosted session looks like."
+A spec is (NAME ID CLIENT DEFAULT).  CLIENT is optional and stands in
+for the ACP client; a two-element spec leaves it nil, which is what an
+unhosted session looks like.  DEFAULT, when given, is the name
+agent-shell's formatter would produce -- a NAME that differs from it is
+a human rename.  Omitted, DEFAULT equals NAME, so the buffer looks
+untouched, which is the common case.
+
+The two agent-shell functions the label derivation borrows from are
+stubbed here so the tests do not depend on agent-shell being installed."
   (declare (indent 1))
-  `(let ((buffers nil))
+  `(let ((buffers nil)
+         ;; Both are sticky for the Emacs session in real use; a test is a
+         ;; session of its own, so it starts with neither.
+         (agent-river--shell-seen nil)
+         (agent-river--teardown-hooked (make-hash-table :test 'eq)))
      (unwind-protect
          (progn
            (dolist (spec ,specs)
@@ -725,8 +737,18 @@ leaves it nil, which is what an unhosted session looks like."
                  (setq-local agent-shell--state
                              (list (cons :session
                                          (list (cons :id (cadr spec))))
-                                   (cons :client (caddr spec)))))))
-           ,@body)
+                                   (cons :agent-config
+                                         (list (cons :buffer-name "fake")))
+                                   (cons :client (caddr spec))))
+                 (setq-local agent-river-test--shell-default
+                             (or (nth 3 spec) (car spec))))))
+           (cl-letf (((symbol-function 'agent-shell--format-buffer-name)
+                      (lambda (&rest _)
+                        (buffer-local-value 'agent-river-test--shell-default
+                                            (current-buffer))))
+                     ((symbol-function 'agent-shell--project-name)
+                      (lambda () "repo")))
+             ,@body))
        (mapc #'kill-buffer buffers))))
 
 (ert-deftest agent-river-test-shell-buffer-found-by-session-id ()
@@ -748,6 +770,25 @@ leaves it nil, which is what an unhosted session looks like."
       ;; changes working directory.
       (should (equal (agent-river-state-label (agent-river-state "s2" "repo"))
                      "repo<2>")))))
+
+(ert-deftest agent-river-test-a-renamed-shell-keeps-its-new-name ()
+  (agent-river-test--with-shell '(("my scratch notes" "s1"
+                                   nil "Claude Agent @ repo"))
+    (let ((agent-river-registry (make-hash-table :test 'equal)))
+      ;; The name no longer matches what agent-shell's formatter would
+      ;; produce, so it is a human rename and is taken whole -- not parsed
+      ;; for a project part that is not there.
+      (should (equal (agent-river-state-label (agent-river-state "s1" "repo"))
+                     "my scratch notes")))))
+
+(ert-deftest agent-river-test-a-rename-may-itself-contain-at ()
+  (agent-river-test--with-shell '(("notes @ home" "s1"
+                                   nil "Claude Agent @ repo"))
+    (let ((agent-river-registry (make-hash-table :test 'equal)))
+      ;; The old `" @ "' split would have rendered "home": a rename is
+      ;; whatever the human typed, `" @ "' in it or not.
+      (should (equal (agent-river-state-label (agent-river-state "s1" "repo"))
+                     "notes @ home")))))
 
 (ert-deftest agent-river-test-liveness-comes-from-the-buffer ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -797,6 +838,55 @@ leaves it nil, which is what an unhosted session looks like."
     ;; Nothing to jump to, so the line must not pretend otherwise.
     (let ((line (agent-river--panel (gethash "s1" agent-river-registry))))
       (should-not (get-text-property 1 'agent-river-session line)))))
+
+(ert-deftest agent-river-test-a-dying-shell-drops-its-line-from-the-block ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
+      (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                   :detail "Edit a.el"))
+      ;; The session is live, so the block offers the jump.
+      (should (string-match-p "repo"
+                              (with-current-buffer (agent-river--buffer)
+                                (buffer-substring-no-properties
+                                 (point-min) (point-max)))))
+      ;; `agent-shell-restart' kills the buffer and starts a new session.
+      ;; No hook event ever addresses the old id again, so the block has to
+      ;; be redrawn by the buffer's own death or the line lingers,
+      ;; unopenable, for the rest of the Emacs session.
+      (kill-buffer (agent-river--shell-buffer "s1"))
+      ;; The redraw is deferred by a tick: `kill-buffer-hook' runs while the
+      ;; buffer is still live, so doing it inline would find the dying
+      ;; buffer and draw the session straight back in.
+      (sleep-for 0.05)
+      (should-not (string-match-p "repo"
+                                  (with-current-buffer (agent-river--buffer)
+                                    (buffer-substring-no-properties
+                                     (point-min) (point-max)))))
+      ;; The state is kept: `agent-river-status' still reports on it.
+      (should (gethash "s1" agent-river-registry)))))
+
+(ert-deftest agent-river-test-visiting-a-restarted-away-session-says-so ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        line)
+    (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
+      (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                   :detail "Edit a.el"))
+      ;; Captured while the session is still hosted, so the line carries the
+      ;; jump affordance -- which is exactly what is left behind when
+      ;; `agent-shell-restart' kills the buffer and hands the next event to
+      ;; a new session id.
+      (setq line (agent-river--panel (gethash "s1" agent-river-registry))))
+    (with-temp-buffer
+      (insert line)
+      (goto-char (point-min))
+      (should (equal (get-text-property (point) 'agent-river-session) "s1"))
+      (should-error (agent-river-visit-session) :type 'user-error)
+      (should (string-match-p "no longer hosted"
+                              (condition-case err
+                                  (progn (agent-river-visit-session) "")
+                                (user-error (error-message-string err))))))))
 
 
 ;;; Refresh timer

@@ -259,6 +259,9 @@ this needs no locking.")
 ;;
 ;; All of it degrades to the old behaviour when agent-shell is absent.
 
+(declare-function agent-shell--project-name "agent-shell-project" ())
+(declare-function agent-shell--format-buffer-name "agent-shell" (agent-name project-name))
+
 (defun agent-river--shell-buffer-p ()
   "Return non-nil when the current buffer hosts an agent-shell session."
   ;; The mode is the whole test: where agent-shell is not loaded there is no
@@ -283,16 +286,48 @@ this needs no locking.")
               (with-current-buffer buffer (agent-river--shell-buffer-p)))
             (buffer-list)))
 
+(defvar agent-river--shell-seen nil
+  "Non-nil once agent-shell has been seen hosting a session here.
+
+Sticky on purpose, where `agent-river--shell-hosted-p' is a snapshot of the
+buffers alive right now.  Liveness takes the buffer as authoritative only
+when agent-shell is in play -- but asking \"is one hosting *now*\" makes the
+last buffer's death flip the answer, and every state it left behind falls
+back to the TTL.  A session that `agent-shell-restart' killed then reads as
+active for the whole TTL, so its panel line lingers, unopenable.  Seen once,
+agent-shell stays the authority for as long as this Emacs runs.")
+
+(defun agent-river--shell-default-name (buffer)
+  "Return the name agent-shell would give BUFFER, or nil.
+Reconstructed with agent-shell's own formatter rather than guessed
+at, so a customised `agent-shell-buffer-name-format' is honoured --
+the `\" @ \"' split cannot tell a default name from a renamed one, and
+a rename may itself contain `\" @ \"'."
+  (when (fboundp 'agent-shell--format-buffer-name)
+    (with-current-buffer buffer
+      (let ((config (alist-get :agent-config (bound-and-true-p agent-shell--state))))
+        (agent-shell--format-buffer-name (alist-get :buffer-name config)
+                                         (agent-shell--project-name))))))
+
 (defun agent-river--shell-label (id)
   "Return the name agent-shell gives session ID, or nil.
-Taken from the buffer name, so the numbering that distinguishes two
-sessions in one directory is agent-shell's rather than a second,
-parallel scheme of ours."
+
+The default name is reduced to the project part -- the numbering that
+distinguishes two sessions in one directory is agent-shell's rather than
+a second, parallel scheme of ours, and it is already numbered.  A buffer
+the human renamed with `rename-buffer' no longer matches what
+agent-shell's formatter would produce, and is taken whole: the new name
+is what they want to see, whatever it looks like."
   (let ((buffer (agent-river--shell-buffer id)))
     (when buffer
       (let* ((name (buffer-name buffer))
+             (default (agent-river--shell-default-name buffer))
              (at (string-match " @ " name)))
-        (if at (substring name (+ at 3)) name)))))
+        (if (and at default
+                 (equal (agent-river--label-base name)
+                        (agent-river--label-base default)))
+            (substring name (+ at 3))
+          name)))))
 
 (defun agent-river--label-base (label)
   "Strip any uniquifying suffix from LABEL."
@@ -364,7 +399,7 @@ something we could not see."
   (cond
    ((agent-river-state-done state) nil)
    ((and (null (agent-river-state-parent state))
-         (agent-river--shell-hosted-p))
+         (or agent-river--shell-seen (agent-river--shell-hosted-p)))
     (and (agent-river--shell-buffer (agent-river-state-id state)) t))
    (t (let ((seen (agent-river-state-last-seen state)))
         (and seen (< (float-time (time-subtract (current-time) seen))
@@ -920,6 +955,43 @@ thinking text, so there is nothing else to read them from."
                               (error nil))))
         (puthash id client agent-river--subscribed)))))
 
+(defvar agent-river--teardown-hooked (make-hash-table :test 'eq)
+  "Shell buffers agent-river has put its teardown on, so it goes on once.")
+
+(defun agent-river--shell-died (buffer)
+  "Note BUFFER's session as gone and redraw the block.
+Called from BUFFER's `kill-buffer-hook'.
+
+`agent-shell-restart' kills the shell buffer and starts a new session with
+a new id, so the state the old id folded to can no longer be jumped to --
+and it is kept, not dropped, because `agent-river-status' still reports on
+a session that has ended.  What must not survive is the *view*: the block
+is drawn on the next event, and after a restart no event ever addresses
+the old id again, so without this the line sits there inviting a RET that
+can only fail.  The state is left to `agent-river--active-p', which already
+calls a hosted session whose buffer is gone by what it is.
+
+Deferred by a tick, because `kill-buffer-hook' runs while the buffer is
+still live: redrawn inline, `agent-river--shell-buffer' would still find
+the dying buffer and draw the session straight back in."
+  (remhash buffer agent-river--teardown-hooked)
+  (run-at-time 0 nil #'agent-river--redraw-block))
+
+(defun agent-river--ensure-shell-teardown (id)
+  "Ensure BUFFER's session teardown is installed for session ID at most once.
+Where agent-shell hosts ID, its buffer dying is how a restart or a kill
+reaches us -- no hook event reports it, and a watched session sees only
+`clean-up', which folds nothing."
+  (let ((buffer (agent-river--shell-buffer id)))
+    (when buffer
+      (setq agent-river--shell-seen t)
+      (unless (gethash buffer agent-river--teardown-hooked)
+        (puthash buffer t agent-river--teardown-hooked)
+        (with-current-buffer buffer
+          (add-hook 'kill-buffer-hook
+                    (apply-partially #'agent-river--shell-died buffer)
+                    nil t))))))
+
 
 ;;; A second way in, for sessions no hook reaches
 ;;
@@ -1210,8 +1282,11 @@ often the agent had to be told something is itself part of the state."
          (detail (or (plist-get event :detail) "")))
     ;; Before anything that can fail: where agent-shell hosts this session the
     ;; reasoning arrives on its ACP stream rather than through us, and the
-    ;; subscription has to exist before the first thought is streamed.
+    ;; subscription has to exist before the first thought is streamed.  Its
+    ;; buffer dying is likewise how a restart reaches us, and no hook event
+    ;; says so.
     (agent-river--ensure-subscribed session)
+    (agent-river--ensure-shell-teardown session)
     ;; The fold must not be able to take the HUD dark without saying so.
     ;; Reloading this file after changing the struct leaves older states
     ;; short a slot, and the resulting error used to abort `observe' before
