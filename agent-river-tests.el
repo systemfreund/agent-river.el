@@ -1664,42 +1664,78 @@ CALL overrides fields of the tool call record."
 ;; its own filenames are.
 
 (ert-deftest agent-river-test-heat-counts-touches-by-basename ()
-  (agent-river-test--with-session state
-    (agent-river-fold state '(:kind "act" :file "src/a.el"))
-    (agent-river-fold state '(:kind "act" :file "src/a.el"))
-    (agent-river-fold state '(:kind "act" :file "b.el"))
-    (let ((table (agent-river--heat-table)))
-      ;; Keyed on the bare name because that is the only key a dired buffer
-      ;; can ask with: it holds absolute paths, the state holds normalised
-      ;; ones, and the basename is where the two meet.
-      (should (equal (gethash "a.el" table) 2))
-      (should (equal (gethash "b.el" table) 1))
-      (should-not (gethash "never-touched.el" table)))))
+  ;; The raw count is what is aggregated; the half-life is exercised
+  ;; separately, so switch the weighting off and read whole numbers here.
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-session state
+      (agent-river-fold state '(:kind "act" :file "src/a.el"))
+      (agent-river-fold state '(:kind "act" :file "src/a.el"))
+      (agent-river-fold state '(:kind "act" :file "b.el"))
+      (let ((table (agent-river--heat-table)))
+        ;; Keyed on the bare name because that is the only key a dired buffer
+        ;; can ask with: it holds absolute paths, the state holds normalised
+        ;; ones, and the basename is where the two meet.
+        (should (equal (gethash "a.el" table) 2))
+        (should (equal (gethash "b.el" table) 1))
+        (should-not (gethash "never-touched.el" table))))))
 
 (ert-deftest agent-river-test-heat-reads-the-frame-it-is-asked-for ()
-  (agent-river-test--with-session state
-    (agent-river-fold state '(:kind "act" :file "a.el"))
-    (agent-river-fold state '(:kind "act" :file "a.el"))
-    (agent-river-fold state '(:kind "prompt" :text "next"))
-    (agent-river-fold state '(:kind "act" :file "a.el"))
-    ;; The two frames answer different questions and the shading must not
-    ;; blur them: the task frame says what this turn is about, the session
-    ;; frame says what the agent has been in all afternoon.
-    (should (equal (gethash "a.el" (agent-river--heat-table 'task)) 1))
-    (should (equal (gethash "a.el" (agent-river--heat-table 'session)) 3))
-    ;; No scope is the task frame, matching the panel.
-    (should (equal (gethash "a.el" (agent-river--heat-table)) 1))))
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-session state
+      (agent-river-fold state '(:kind "act" :file "a.el"))
+      (agent-river-fold state '(:kind "act" :file "a.el"))
+      (agent-river-fold state '(:kind "prompt" :text "next"))
+      (agent-river-fold state '(:kind "act" :file "a.el"))
+      ;; The two frames answer different questions and the shading must not
+      ;; blur them: the task frame says what this turn is about, the session
+      ;; frame says what the agent has been in all afternoon.
+      (should (equal (gethash "a.el" (agent-river--heat-table 'task)) 1))
+      (should (equal (gethash "a.el" (agent-river--heat-table 'session)) 3))
+      ;; No scope is the task frame, matching the panel.
+      (should (equal (gethash "a.el" (agent-river--heat-table)) 1)))))
 
 (ert-deftest agent-river-test-heat-sums-two-sessions-on-one-file ()
-  (agent-river-test--with-session state
-    (let ((other (agent-river-state "s2" "beta")))
-      (agent-river-fold state '(:kind "act" :file "shared.el"))
-      (agent-river-fold other '(:kind "act" :file "worktree/shared.el"))
-      (agent-river-fold other '(:kind "act" :file "worktree/shared.el"))
-      ;; Two agents in one file is the case worth seeing, and the same file
-      ;; reached from a worktree must not read as a second one -- which is
-      ;; exactly what `agent-river-touching' already promises.
-      (should (equal (gethash "shared.el" (agent-river--heat-table)) 3)))))
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-session state
+      (let ((other (agent-river-state "s2" "beta")))
+        (agent-river-fold state '(:kind "act" :file "shared.el"))
+        (agent-river-fold other '(:kind "act" :file "worktree/shared.el"))
+        (agent-river-fold other '(:kind "act" :file "worktree/shared.el"))
+        ;; Two agents in one file is the case worth seeing, and the same file
+        ;; reached from a worktree must not read as a second one -- which is
+        ;; exactly what `agent-river-touching' already promises.
+        (should (equal (gethash "shared.el" (agent-river--heat-table)) 3))))))
+
+(ert-deftest agent-river-test-heat-cools-with-age ()
+  ;; The point of the weighting: a file the agent has moved away from must
+  ;; sink below one still being touched, even when its raw count is higher.
+  ;; Were the shading read from the cumulative tally it would never move.
+  (let ((agent-river-heat-half-life 100)
+        (state (agent-river-state "s1" "alpha")))
+    ;; One touch at a time an hour before "now", and three touches now.
+    (puthash "old.el" (list :touches 20 :last (time-subtract (current-time) 3600))
+             (agent-river-state-task-artifacts state))
+    (puthash "hot.el" (list :touches 3 :last (current-time))
+             (agent-river-state-task-artifacts state))
+    (let ((table (agent-river--heat-table 'task)))
+      ;; Twenty touches an hour old, at a 100s half-life, weigh a fraction of
+      ;; one -- where the raw tally would put old.el far on top.
+      (should (< (gethash "old.el" table) 1))
+      (should (> (gethash "hot.el" table) (gethash "old.el" table)))
+      ;; And the face follows the weight, not the count: old.el earns none.
+      (should-not (agent-river--heat-face (gethash "old.el" table)))
+      (should (eq (agent-river--heat-face (gethash "hot.el" table))
+                  'agent-river-heat-1)))))
+
+(ert-deftest agent-river-test-heat-fresh-touch-weighs-the-raw-count ()
+  ;; Off is off and fresh is fresh: with no elapsed time the weight is the
+  ;; count, so the thresholds keep meaning what they always meant.
+  (let ((agent-river-heat-half-life 60)
+        (entry (list :touches 4 :last (current-time))))
+    (should (< (agent-river--heat-weight entry) 4))
+    (should (> (agent-river--heat-weight entry) 3.99))
+    (let ((agent-river-heat-half-life nil))
+      (should (equal (agent-river--heat-weight entry) 4)))))
 
 (ert-deftest agent-river-test-heat-face-escalates-with-touches ()
   (let ((agent-river-heat-levels '((6 . agent-river-heat-3)
@@ -1746,6 +1782,59 @@ CALL overrides fields of the tool call record."
   ;; Writing overlays into buffers the user did not point this at is the one
   ;; thing here that needs consent, so the default has to stay off.
   (should-not (default-value 'agent-river-heat-mode)))
+
+(ert-deftest agent-river-test-heat-visible-p-follows-the-thresholds ()
+  (let ((agent-river-heat-half-life nil)
+        (state (agent-river-state "s1" "alpha")))
+    (puthash "warm.el" (list :touches 1 :last (current-time))
+             (agent-river-state-task-artifacts state))
+    ;; One touch reaches the lowest threshold, so there is something drawn
+    ;; and something to cool.
+    (let ((agent-river-registry
+           (let ((h (make-hash-table :test 'equal)))
+             (puthash "s1" state h) h)))
+      (should (agent-river--heat-visible-p))
+      ;; Empty the frame and the answer turns, which is what lets the timer
+      ;; retire instead of redrawing nothing forever.
+      (clrhash (agent-river-state-task-artifacts state))
+      (should-not (agent-river--heat-visible-p)))))
+
+(ert-deftest agent-river-test-heat-timer-retires-once-nothing-cools ()
+  (let ((agent-river-heat-half-life 9999)
+        (agent-river-heat-mode t)
+        (agent-river--heat-timer nil)
+        (agent-river-heat-refresh-interval 60)
+        (state (agent-river-state "s1" "alpha")))
+    (puthash "warm.el" (list :touches 1 :last (current-time))
+             (agent-river-state-task-artifacts state))
+    (let ((agent-river-registry
+           (let ((h (make-hash-table :test 'equal)))
+             (puthash "s1" state h) h)))
+      (agent-river--ensure-heat-timer)
+      (should (timerp agent-river--heat-timer))
+      ;; Starting twice must not leave a second timer running unnoticed.
+      (let ((first agent-river--heat-timer))
+        (agent-river--ensure-heat-timer)
+        (should (eq first agent-river--heat-timer)))
+      (clrhash (agent-river-state-task-artifacts state))
+      (agent-river--heat-tick)
+      (should-not agent-river--heat-timer)
+      (cancel-function-timers #'agent-river--heat-tick))))
+
+(ert-deftest agent-river-test-heat-timer-needs-a-half-life ()
+  ;; With the weighting off the shading never fades, so a timer would redraw
+  ;; the same picture forever -- it must not start at all.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-heat-mode t)
+        (agent-river--heat-timer nil)
+        (state (agent-river-state "s1" "alpha")))
+    (puthash "warm.el" (list :touches 6 :last (current-time))
+             (agent-river-state-task-artifacts state))
+    (let ((agent-river-registry
+           (let ((h (make-hash-table :test 'equal)))
+             (puthash "s1" state h) h)))
+      (agent-river--ensure-heat-timer)
+      (should-not agent-river--heat-timer))))
 
 
 ;;; Foreign saves, noted from Emacs

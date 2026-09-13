@@ -2077,6 +2077,38 @@ package refuses to blur them anywhere else, so the choice is explicit
 here too rather than being whichever frame was convenient."
   :type '(choice (const task) (const session)))
 
+(defcustom agent-river-heat-half-life 120
+  "Seconds after which a touch counts half as much as a fresh one.
+
+The raw touch count is cumulative and never forgets, so after a long task
+the file with the most historical touches keeps the top shading even when
+the agent moved on ten minutes ago -- exactly the shift in attention the
+view is for, drawn backwards.  Weighting each touch by its age turns the
+reading into \"where is the work now\": a touch `agent-river-heat-half-life'
+seconds old weighs 1/2, two half-lives old 1/4, and so on.
+
+Nothing is mutated as it cools.  `:last' already holds the time of every
+touch, so the weighting is recomputed from it on each redraw and the view
+is correct whenever the next refresh happens to look.  `agent-river-heat-
+refresh-interval' is what makes the cooling visible while the agent sits
+idle; the overlay itself carries no decaying state.  Nil disables the
+weighting and shades by raw count."
+  :type '(choice (const :tag "Off, shade by raw count" nil) (number :tag "Half-life in seconds")))
+
+(defcustom agent-river-heat-refresh-interval 5
+  "Seconds between redraws of the heat while something is still cooling.
+
+The state block's timer (`agent-river-refresh-interval') stops the moment
+no agent is mid-task, which is exactly when the shading has the most to
+show: the work has moved on and the old file should be fading.  Rather
+than leave that to the next event, this timer keeps the dired shading
+honest on its own -- slowly, since a fade is not a clock.
+
+It runs only while `agent-river-heat-mode' is on and stops itself on the
+first tick that finds nothing left above the lowest threshold, so an idle
+Emacs pays for no redraws."
+  :type 'number)
+
 ;; Defined before the functions that read it, so the byte-compiler sees the
 ;; variable rather than taking it for a free one.
 ;;;###autoload
@@ -2092,19 +2124,41 @@ overlays with it."
       (progn
         (add-hook 'agent-river-observers #'agent-river--dired-observe)
         (add-hook 'dired-after-readin-hook #'agent-river--heat-after-readin)
-        (agent-river-heat-refresh))
+        (agent-river-heat-refresh)
+        (agent-river--ensure-heat-timer))
     (remove-hook 'agent-river-observers #'agent-river--dired-observe)
     (remove-hook 'dired-after-readin-hook #'agent-river--heat-after-readin)
+    (agent-river--stop-heat-timer)
     (dolist (buffer (agent-river--dired-buffers t))
       (agent-river--heat-clear buffer))))
 
+(defun agent-river--heat-weight (entry)
+  "Return ENTRY's age-weighted touch count.
+
+Fresh touches count fully and older ones fade by `agent-river-heat-half-life',
+so a file the agent left alone sinks through the thresholds and the shading
+follows the work rather than the history.  With the half-life off, or an
+entry carrying no `:last' time, this is the plain count."
+  (let ((touches (or (plist-get entry :touches) 0))
+        (last (plist-get entry :last)))
+    (if (or (null agent-river-heat-half-life)
+            (null last)
+            (<= agent-river-heat-half-life 0))
+        touches
+      (let ((age (float-time (time-subtract (current-time) last))))
+        (* touches (expt 0.5 (/ age agent-river-heat-half-life)))))))
+
 (defun agent-river--heat-table (&optional scope)
-  "Return a hash of basename to touch count across every folded session.
+  "Return a hash of basename to weighted touch count across every folded session.
 
 Aggregated rather than kept per session on purpose: one file that two
 agents are both in is the case worth seeing, and summing them is the same
 reading `agent-river-touching' gives.  SCOPE is `session' for the whole
-session, `task' or nil for the current task."
+session, `task' or nil for the current task.
+
+The value is `agent-river--heat-weight', not the raw count: a file still
+being touched keeps its shading, one the agent has moved away from cools
+toward the thresholds and eventually loses its overlay entirely."
   (let ((table (make-hash-table :test 'equal)))
     (maphash
      (lambda (_id state)
@@ -2112,7 +2166,7 @@ session, `task' or nil for the current task."
                   (let ((name (file-name-nondirectory path)))
                     (puthash name
                              (+ (or (gethash name table) 0)
-                                (or (plist-get entry :touches) 0))
+                                (agent-river--heat-weight entry))
                              table)))
                 (if (eq scope 'session)
                     (agent-river-state-artifacts state)
@@ -2121,9 +2175,24 @@ session, `task' or nil for the current task."
     table))
 
 (defun agent-river--heat-face (touches)
-  "Return the face a file touched TOUCHES times earns, or nil for none."
+  "Return the face a file weighing TOUCHES earns, or nil for none.
+TOUCHES is the age-weighted reading from `agent-river--heat-table', so it
+is a float while a half-life is set; the thresholds stay whole numbers."
   (cdr (seq-find (lambda (cell) (>= touches (car cell)))
                  agent-river-heat-levels)))
+
+(defun agent-river--heat-visible-p (&optional scope)
+  "Return non-nil while some artifact still weighs enough to be shaded.
+Read from the same weighted table the overlays are, so \"is there anything
+left to cool\" and \"is anything drawn\" cannot disagree.  Once this is nil
+the cooling timer has nothing to show and stops."
+  (let ((table (agent-river--heat-table scope))
+        found)
+    (maphash (lambda (_name weight)
+               (when (agent-river--heat-face weight)
+                 (setq found t)))
+             table)
+    found))
 
 (defun agent-river--heat-clear (buffer)
   "Remove every heat overlay this package put into BUFFER."
@@ -2186,6 +2255,48 @@ whether or not `agent-river-heat-mode' is driving the redraws."
     (dolist (buffer (agent-river--dired-buffers))
       (agent-river--heat-dired buffer table))))
 
+;; The cooling timer, kept deliberately separate from the state block's.
+;; `agent-river--ensure-timer' runs only while an agent is mid-task; the
+;; moment it goes idle the shading has the most to say -- the work moved and
+;; the old file should be fading -- so it needs a tick the block does not.
+;; Slower, too: an elapsed-time clock wants a second, a fade does not.
+
+(defvar agent-river--heat-timer nil
+  "Repeating timer fading the dired shading, or nil while none runs.")
+
+(defun agent-river--stop-heat-timer ()
+  "Stop the heat cooling timer."
+  (when (timerp agent-river--heat-timer)
+    (cancel-timer agent-river--heat-timer))
+  (setq agent-river--heat-timer nil))
+
+(defun agent-river--heat-tick ()
+  "Redraw the shading, or stop the timer once nothing is left to cool."
+  (condition-case err
+      (if (and agent-river-heat-mode
+               (agent-river--heat-visible-p agent-river-heat-scope))
+          (agent-river-heat-refresh)
+        (agent-river--stop-heat-timer))
+    ;; Same reasoning as the block's tick: a timer that throws every few
+    ;; seconds would bury Emacs in messages, so a broken redraw retires
+    ;; rather than repeats.
+    (error (agent-river--stop-heat-timer)
+           (message "agent-river: heat refresh stopped (%s)"
+                    (error-message-string err)))))
+
+(defun agent-river--ensure-heat-timer ()
+  "Start the cooling timer if anything is still cooling and none runs.
+Called on mode entry and from the event observer, so a session that keeps
+working never loses its faintest overlay between ticks."
+  (when (and agent-river-heat-mode
+             agent-river-heat-half-life
+             (null agent-river--heat-timer)
+             (agent-river--heat-visible-p agent-river-heat-scope))
+    (setq agent-river--heat-timer
+          (run-at-time agent-river-heat-refresh-interval
+                       agent-river-heat-refresh-interval
+                       #'agent-river--heat-tick))))
+
 (defun agent-river--heat-after-readin ()
   "Reapply the shading to a dired buffer that was just listed or reverted.
 A revert replaces the buffer text and takes every overlay with it, so
@@ -2236,6 +2347,11 @@ ignored because the heat is aggregated across every session rather than
 read from the one that just acted -- two agents in one file is the case
 worth seeing."
   (agent-river-heat-refresh)
+  ;; A working agent keeps its heat fresh, but the timer it started on some
+  ;; earlier quiet moment may already have stopped itself -- once the last
+  ;; overlay fell below the threshold there was nothing to cool.  Restart it
+  ;; here, where an event has just proven there is something to draw.
+  (agent-river--ensure-heat-timer)
   ;; Only an act names a file that was touched at that moment; a think or a
   ;; fail reports on a call whose pulse has already been shown.
   (when (equal (plist-get event :kind) "act")
