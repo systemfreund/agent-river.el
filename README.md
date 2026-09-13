@@ -22,9 +22,11 @@ Emacs 28.1 or later with native JSON, a running Emacs server
 (`M-x server-start`), and Claude Code. No external tools: the shell bridge
 only moves bytes.
 
-Optional: [`agent-shell`](https://github.com/xenodium/agent-shell). When it
-hosts the sessions, agent-river takes liveness and session names from it
-instead of estimating them.
+[`agent-shell`](https://github.com/xenodium/agent-shell) is optional for the
+HUD and required for the `◇` lines. When it hosts the sessions, agent-river
+takes liveness and session names from it instead of estimating them, and
+reads the agent's reasoning off the ACP stream — which the hooks do not
+carry at all.
 
 ## Installing
 
@@ -400,7 +402,7 @@ emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 
-94 tests covering the state transitions, streak accounting, signal
+89 tests covering the state transitions, streak accounting, signal
 threshold and throttle, the phase, subagent isolation, the registry and its
 TTL, the cross-session `touching` query, the reasoning stream — chunk
 accumulation, the sentence boundary, which path serves a hosted session —
@@ -409,9 +411,9 @@ one, how a duration is formatted, what counts as an interrupted call.
 
 Verified to actually fail rather than merely pass: mutating the streak
 reset in a scratch copy turns exactly the two responsible tests red, and
-the three mutations of the reasoning path — accepting an incomplete
-sentence, dropping the end-of-run flush, removing the guard that keeps the
-transcript fallback off a hosted session — turn three, one and one.
+three mutations of the reasoning path — accepting an incomplete sentence,
+dropping the end-of-run flush, letting two sessions share one thought run —
+turn three, one and three.
 
 ## The `◇` lines: reasoning
 
@@ -433,41 +435,16 @@ boundary is flushed by the next notification that is not a thought. Waiting
 for the boundary is the point — a chunk usually ends mid-clause, and showing
 that would put a truncated sentence on screen and never correct it.
 
-### Without agent-shell: lifting it out of the transcript
+The reasoning is in whatever language the agent thinks in, which is not
+necessarily the language of the conversation.
 
-The payload carries no thinking text. It does carry `transcript_path`,
-pointing at the session's full JSONL — and that file holds the reasoning as
-`thinking` content blocks. The HUD lifts them out.
-
-The catch is timing. Measured on 2026-09-13: at both `PreToolUse` and
-`PostToolUse` the assistant record holding the current `tool_use_id` is
-still absent from the transcript; it is flushed afterwards. The newest
-readable reasoning always belongs to the *previous* step, and no amount of
-watching the file changes that — it is a property of when the transcript is
-written, not of the hook.
-
-What makes it work anyway is *where* the line is placed. `PreToolUse` emits
-any new reasoning immediately before its own act line, so the `◇` lands
-directly beneath the step it explains:
-
-```
-16:31:03 · Grep ✓  40ms
-16:31:05 ◇ Joining on tool_use_id is more precise than timestamps…
-16:31:05 ▸ Edit  supersonic-mpv.el
-```
-
-Implementation notes:
-
-- Progress is a byte offset on the session state, so only the bytes added
-  since last time are read — the transcript is megabytes and rescanning it
-  on every tool call would be waste. Reading stops at the last newline, so
-  a half-written line is never consumed.
-- A session seen for the first time is fast-forwarded to the end instead of
-  replayed — otherwise the first tool call would dump the whole backlog.
-- Only the first sentence is shown, capped at 110 characters. Thinking
-  blocks are paragraphs; unabridged they would bury the tool-call rhythm.
-- The reasoning is in whatever language the agent thinks in, which is not
-  necessarily the language of the conversation.
+This is the one thing agent-shell is *required* for rather than merely
+better with. It replaced lifting the thinking out of the session
+transcript, which the hooks point at but which is always one step behind:
+the record holding the current `tool_use_id` is still unflushed when the
+hook fires. That path compensated by placing its line inside the `act`
+hook; it is gone, and a session this Emacs does not host now gets no `◇`
+lines at all.
 
 It is driven by Claude Code hooks, not by the agent choosing to call
 something — this repo's `.claude/settings.json` wires six events to
@@ -484,14 +461,15 @@ payload into an `agent-river-observe` call over `emacsclient`:
 | `Stop`               | `idle`   | turn over                                 |
 
 `PreToolUse` runs **synchronously**, which is not a detail. Both it and
-`PostToolUse` used to be async, and the `act` path is the slower of the two
-(17 ms against 11 ms — it scans the transcript for reasoning), so a line
-could lose the race against its own completion and the buffer showed
-`· Read ✓` *above* `▸ Read Makefile`. Running `act` before the tool starts
-orders the pair by construction instead of by luck. The cost is ~17 ms on
-the critical path of every tool call, and `emacsclient` is wrapped in
-`timeout` (`AGENT_RIVER_TIMEOUT`, 2 s) so a wedged Emacs cannot stall the
-stream.
+`PostToolUse` used to be async, and the `act` path was then the slower of
+the two (17 ms against 11 ms, because it scanned the transcript for
+reasoning), so a line could lose the race against its own completion and
+the buffer showed `· Read ✓` *above* `▸ Read Makefile`. That scan is gone
+now, but the ordering argument does not depend on it: running `act` before
+the tool starts orders the pair by construction rather than by luck, and
+nothing about two async hooks guarantees which lands first.
+`emacsclient` is wrapped in `timeout` (`AGENT_RIVER_TIMEOUT`, 2 s) so a
+wedged Emacs cannot stall the stream.
 
 The gap between a `think` line and the next `act` line *is* the thinking
 window. Hooks carry no thinking text, so tool-call granularity is the finest

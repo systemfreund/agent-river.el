@@ -17,7 +17,7 @@ wiring).
 ## Commands
 
 ```sh
-# Full suite (94 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (89 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -115,22 +115,19 @@ These are load-bearing; the tests enforce most of them.
 - **agent-shell integration** (`agent-river.el`, "when it is hosting the sessions"):
   `agent-shell--state` carries the ACP session id verbatim as the hooks' `session_id`,
   so liveness, labels and uniquifying come from the buffer rather than being
-  estimated. Everything degrades to the TTL-based path when agent-shell is absent —
-  keep it optional.
-- **Reasoning (`◇` lines) has two sources, and the ACP one is primary.** Where
-  agent-shell hosts the session, `agent_thought_chunk` notifications carry the
-  reasoning live (`agent-river--ensure-subscribed`, attached on the session's
-  first folded event). Chunks accumulate in `agent-river--thought-runs` until a
-  sentence is complete; the run is then emitted and the rest dropped, and a run
-  with no sentence boundary is flushed by the next non-thought notification.
-  Deliberately not a struct slot: reload would otherwise demand a reset.
-  Otherwise the transcript fallback applies — byte offset in `transcript-pos`,
-  stopping at the last newline, first-seen session fast-forwarded rather than
-  replayed. Its line is emitted inside the `act` hook because the record for the
-  *current* `tool_use_id` is always still unflushed, so what it can read belongs
-  to the previous step. The two must never both run for one session, or every
-  thought prints twice; `agent-river--emit-reasoning` guards on
-  `agent-river--acp-client`.
+  estimated. These degrade to the TTL-based path when agent-shell is absent — keep
+  that optional. The reasoning lines below are the one exception: they have no
+  fallback.
+- **Reasoning (`◇` lines) comes only from the ACP stream.** `agent_thought_chunk`
+  notifications carry it; `agent-river--ensure-subscribed` attaches the handler on
+  a session's first folded event, via `agent-river--acp-client`. Chunks accumulate
+  in `agent-river--thought-runs` until a sentence is complete — the run is then
+  emitted and its remainder dropped — and a run with no sentence boundary is
+  flushed by the next non-thought notification. Waiting for the boundary is the
+  point: a chunk usually ends mid-clause. Deliberately not a struct slot, so a
+  reload does not demand `agent-river-reset`. The hooks carry no thinking text, so
+  a session agent-shell does not host gets no `◇` lines; that is accepted, not a
+  bug to route around.
 - **The buffer is newest-first** with the state block pinned at the top
   (`agent-river--block-end`), so nothing has to be tailed and trimming takes from
   the bottom. The block is deliberately *not* `header-line-format` (single-line,

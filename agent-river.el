@@ -161,7 +161,7 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
   "Face for a tool call that errored.")
 
 (defface agent-river-reason '((t :inherit font-lock-doc-face :slant italic))
-  "Face for the agent's own reasoning, lifted from the session transcript.")
+  "Face for the agent's own reasoning, as it streams in.")
 
 (defface agent-river-signal '((t :inherit warning :weight bold))
   "Face for an observation handed back to the agent.")
@@ -205,7 +205,6 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
   fail-tools        ; alist tool -> count, for the current streak only
   task-failures     ; failures during this task, not just the current run
   recent            ; newest-first (TOOL . DETAIL), the window phase reads
-  transcript-pos    ; bytes of the session transcript already read for ◇
   idle              ; the turn ended; nothing is in progress right now
   ;; Everything above is measured.  The four below are a *claim* the agent
   ;; made about itself, kept apart on purpose: this state is fed back to the
@@ -721,87 +720,20 @@ so the view does not have to re-derive which argument mattered."
           :detail (agent-river--detail kind payload))))
 
 
-;;; Trailing reasoning, lifted from the transcript
-
-(defun agent-river--transcript-tail (path from)
-  "Return (TEXT . NEXT) for whole lines of PATH after byte FROM.
-Reads only the new bytes rather than rescanning the file, and stops at
-the last newline so a half-written line is never consumed."
-  (let ((size (file-attribute-size (file-attributes path))))
-    (when (and size (> size from))
-      (with-temp-buffer
-        (set-buffer-multibyte nil)
-        (insert-file-contents-literally path nil from size)
-        (goto-char (point-max))
-        (when (search-backward "\n" nil t)
-          (let ((end (1+ (point))))
-            (cons (decode-coding-string
-                   (buffer-substring-no-properties (point-min) end) 'utf-8)
-                  (+ from (- end (point-min))))))))))
-
-(defun agent-river--thinking (text)
-  "Return the reasoning excerpts in the transcript lines TEXT."
-  (delq nil
-        (mapcar
-         (lambda (line)
-           (let* ((record (ignore-errors
-                            (json-parse-string line :object-type 'alist
-                                               :null-object nil
-                                               :false-object nil)))
-                  (blocks (and (equal (alist-get 'type record) "assistant")
-                               (alist-get 'content (alist-get 'message record))))
-                  (thought (seq-some (lambda (b)
-                                       (and (equal (alist-get 'type b) "thinking")
-                                            (alist-get 'thinking b)))
-                                     (or blocks []))))
-             (when thought
-               ;; First sentence only: thinking blocks are paragraphs, and
-               ;; unabridged they would bury the tool-call rhythm.
-               (let ((one (car (split-string (agent-river--squish thought) "\\. "))))
-                 (unless (string-empty-p one)
-                   (agent-river--clip one 110))))))
-         (split-string text "\n" t))))
-
-(defun agent-river--emit-reasoning (state payload)
-  "Log reasoning added to STATE's transcript, named by PAYLOAD, since last read.
-
-The record for the current tool call is not flushed yet when the hook
-fires, so the newest readable reasoning always belongs to the previous
-step; emitting it just before the act line puts it under the step it
-explains.  A session met for the first time is fast-forwarded rather than
-replayed, or its first tool call would dump the whole backlog."
-  (let ((path (alist-get 'transcript_path payload))
-        (from (agent-river-state-transcript-pos state)))
-    (when (and path (file-readable-p path)
-               ;; Not where agent-shell hosts the session: there
-               ;; `agent_thought_chunk` already delivered this reasoning live,
-               ;; and without the lag this path has to arrange its line around.
-               (not (agent-river--acp-client (agent-river-state-id state))))
-      (let ((tail (agent-river--transcript-tail path (or from 0))))
-        (when tail
-          (setf (agent-river-state-transcript-pos state) (cdr tail))
-          (when from
-            (dolist (thought (agent-river--thinking (car tail)))
-              (agent-river-log "reason" thought
-                               (agent-river-state-label state)))))
-        (unless tail
-          (setf (agent-river-state-transcript-pos state)
-                (or from (file-attribute-size (file-attributes path)) 0)))))))
-
 
 ;;; Live reasoning, from the ACP stream
 ;;
-;; Where agent-shell hosts the session, the reasoning never has to be lifted
-;; out of the transcript: the same ACP stream that drives the shell carries
-;; `agent_thought_chunk' notifications, and the client is reachable from the
-;; buffer this file already locates by session id.
+;; The reasoning rides the same ACP stream that drives the shell:
+;; `agent_thought_chunk' notifications carry it, and the client is reachable
+;; from the buffer this file already locates by session id.
 ;;
-;; That removes the lag instead of arranging around it.  The transcript can
-;; only ever yield the *previous* step's reasoning -- the record for the
-;; current tool call is still unflushed when the hook fires -- so
-;; `agent-river--emit-reasoning' compensates by where it puts the line.  A
-;; thought chunk arrives when the agent thinks it, which is before the tool
-;; call it explains, so the order is chronological rather than staged.
+;; This is the one thing here that agent-shell is required for rather than
+;; merely better with.  It replaced lifting the reasoning out of the session
+;; transcript, which could only ever yield the *previous* step's thinking --
+;; the record for the current tool call is still unflushed when the hook
+;; fires -- and so had to compensate by where it placed its line.  A thought
+;; chunk arrives when the agent thinks it, which is before the tool call it
+;; explains, so the order is now chronological rather than staged.
 ;;
 ;; What gets harder: a thought arrives in chunks rather than whole.  Only the
 ;; first sentence is shown, so a run is emitted the moment one is complete
@@ -887,8 +819,9 @@ never correct it."
 (defun agent-river--ensure-subscribed (id)
   "Attach the reasoning handler to session ID's ACP client, at most once.
 
-A no-op where agent-shell is absent or does not host this session: the
-transcript path still covers those, so nothing is lost by staying quiet."
+A no-op where agent-shell is absent or does not host this session, which is
+the one case that gets no reasoning lines at all -- the hooks carry no
+thinking text, so there is nothing else to read them from."
   (when (fboundp 'acp-subscribe-to-notifications)
     (let ((client (agent-river--acp-client id)))
       (when (and client (not (eq client (gethash id agent-river--subscribed))))
@@ -976,12 +909,6 @@ IN-FILE is deleted afterwards, whatever happens."
                            (json-parse-buffer :object-type 'alist
                                               :null-object nil
                                               :false-object nil))))
-            (when (equal kind "act")
-              (agent-river--emit-reasoning
-               (agent-river-state (agent-river-key
-                                   (or (alist-get 'session_id payload) "unknown")
-                                   (alist-get 'agent_id payload)))
-               payload))
             (let ((signal (agent-river-observe (agent-river--event kind payload)))
                   (event (alist-get 'hook_event_name payload)))
               (when (and signal event)

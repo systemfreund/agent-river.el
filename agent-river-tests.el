@@ -5,7 +5,7 @@
 ;; The fold is the part of agent-river that is real logic rather than string
 ;; formatting: state transitions, streak accounting, thresholds, liveness.
 ;; It is also deterministic given an event order, which makes it cheap to
-;; test -- no Emacs frame, no hooks, no transcript.
+;; test -- no Emacs frame, no hooks, no live session.
 ;;
 ;; Run:
 ;;   emacs -Q --batch -l agent-river.el -l agent-river-tests.el \
@@ -639,58 +639,6 @@
       (ignore-errors (delete-file out)))))
 
 
-;;; Trailing reasoning
-
-(ert-deftest agent-river-test-transcript-tail-stops-at-whole-lines ()
-  (let ((file (make-temp-file "af-tr")))
-    (unwind-protect
-        (progn
-          (with-temp-file file (insert "one\ntwo\nhalf-writ"))
-          (let ((tail (agent-river--transcript-tail file 0)))
-            ;; The partial trailing line must not be consumed, or it would
-            ;; be parsed as truncated JSON and lost when completed.
-            (should (equal (car tail) "one\ntwo\n"))
-            (should (= (cdr tail) 8))
-            (should-not (agent-river--transcript-tail file (cdr tail)))))
-      (delete-file file))))
-
-(ert-deftest agent-river-test-thinking-extracted-from-transcript-lines ()
-  (let ((text (concat
-               "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"First thought. Second one.\"},{\"type\":\"tool_use\"}]}}\n"
-               "{\"type\":\"user\"}\n"
-               "not json at all\n"
-               "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\"}]}}\n")))
-    (should (equal (agent-river--thinking text) '("First thought")))))
-
-(ert-deftest agent-river-test-first-sight-of-a-session-is-not-replayed ()
-  (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-auto-display nil)
-        (file (make-temp-file "af-tr")))
-    (unwind-protect
-        (let ((state (agent-river-state "s1" "repo"))
-              (payload (list (cons 'transcript_path file))))
-          (with-temp-file file
-            (insert "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"Old backlog.\"}]}}\n"))
-          (agent-river--emit-reasoning state payload)
-          ;; The first tool call of a session must not dump its whole
-          ;; history into the buffer.
-          (with-current-buffer (agent-river--buffer)
-            (should-not (string-match-p
-                         "Old backlog"
-                         (buffer-substring-no-properties (point-min) (point-max)))))
-          (should (> (agent-river-state-transcript-pos state) 0))
-          ;; What appears afterwards is shown.
-          (with-temp-buffer
-            (insert "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"Fresh thought.\"}]}}\n")
-            (append-to-file (point-min) (point-max) file))
-          (agent-river--emit-reasoning state payload)
-          (with-current-buffer (agent-river--buffer)
-            (should (string-match-p
-                     "Fresh thought"
-                     (buffer-substring-no-properties (point-min) (point-max))))))
-      (delete-file file))))
-
-
 ;;; Hosted by agent-shell
 
 (defvar agent-shell--state)
@@ -1127,48 +1075,6 @@ leaves it nil, which is what an unhosted session looks like."
   (should-not (agent-river--thought-chunk (agent-river-test--update "tool_call")))
   (should-not (agent-river--thought-chunk '((params . nil))))
   (should-not (agent-river--thought-chunk nil)))
-
-(ert-deftest agent-river-test-transcript-path-stands-down-when-hosted ()
-  (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-auto-display nil)
-        (file (make-temp-file "af-tr")))
-    (unwind-protect
-        (agent-river-test--with-shell '(("Claude Agent @ repo" "s1" fake-client))
-          (let ((state (agent-river-state "s1" "repo"))
-                (payload (list (cons 'transcript_path file))))
-            ;; Fast-forward past the backlog first, so the only reason
-            ;; nothing appears below is the guard.
-            (with-temp-file file (insert "{\"type\":\"user\"}\n"))
-            (agent-river--emit-reasoning state payload)
-            (agent-river-clear)
-            (with-temp-buffer
-              (insert "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"Scraped thought.\"}]}}\n")
-              (append-to-file (point-min) (point-max) file))
-            (agent-river--emit-reasoning state payload)
-            ;; agent_thought_chunk already delivered this live.  Both paths
-            ;; running would print every thought twice.
-            (should-not (string-match-p "Scraped thought" (agent-river-test--hud)))))
-      (delete-file file))))
-
-(ert-deftest agent-river-test-transcript-path-still-serves-an-unhosted-session ()
-  (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-auto-display nil)
-        (file (make-temp-file "af-tr")))
-    (unwind-protect
-        (let ((state (agent-river-state "s1" "repo"))
-              (payload (list (cons 'transcript_path file))))
-          (with-temp-file file (insert "{\"type\":\"user\"}\n"))
-          (agent-river--emit-reasoning state payload)
-          (agent-river-clear)
-          (with-temp-buffer
-            (insert "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"Scraped thought.\"}]}}\n")
-            (append-to-file (point-min) (point-max) file))
-          (agent-river--emit-reasoning state payload)
-          ;; A terminal session has no ACP stream, so the old path is all
-          ;; there is -- taking it away would silence its reasoning.
-          (should (string-match-p "Scraped thought" (agent-river-test--hud))))
-      (delete-file file))))
-
 
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here
