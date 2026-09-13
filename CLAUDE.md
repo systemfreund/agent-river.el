@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (121 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (134 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -198,6 +198,45 @@ What a consumer must respect:
 
 Two frames again: pick `task` or `session` scope *explicitly* (see
 `agent-river-heat-scope`) and say which one the view is showing.
+
+### Producers — the other direction
+
+A *consumer* turns state into an outside effect and hangs off
+`agent-river-observers`. A *producer* turns something only Emacs can see into
+an event, via `agent-river-note`, and hangs off whatever Emacs hook sees it —
+not off `agent-river-observers`, which fires on the agent's events, not yours.
+`agent-river-watch-saves-mode` is the worked example: it notices you saving a
+file an agent is working in, which no hook can see because the agent's
+staleness check knows the disk and not your buffers.
+
+```
+hooks -> fold -> observers -> outside world    consumer (agent-river-heat-mode)
+Emacs -> note  -> fold -> observers            producer (agent-river-watch-saves-mode)
+```
+
+What may be noted is narrower than "anything from outside":
+
+- **Point-in-time facts** — you saved this file at 14:32, during this task.
+  Once past, nothing can recompute it. This is what notes are for.
+- **Current-state facts** — the buffer has unsaved changes *right now*. Query
+  it where it is read (`buffer-modified-p`); a note would go stale the moment
+  it is folded.
+
+Two things a producer owes:
+
+- **A relevance filter.** `after-save-hook` fires on every save you make.
+  Without a filter the log becomes a list of your keystrokes. The filter is a
+  state query — `agent-river--frame-touches` is the one used here.
+- **A provenance guard.** A producer that cannot tell the agent's own writes
+  from yours launders the agent's action into an observation about it.
+  `agent-river--agent-in-flight-p` is the guard here, and it is deliberately
+  narrow: it suppresses only while a tool call is open on that exact file.
+  Widening it before there is evidence of noise would be tuning on a guess.
+
+Reading notes back and deciding what to tell the agent is a separate step, and
+is deliberately not built: `agent-river--signal` still fires on fail streaks
+only. Notes are visible in the HUD (`◉`) and counted in the report (`:notes`)
+first, so the rate can be seen before anything is fed back.
 
 ### Pieces that span files or need context
 

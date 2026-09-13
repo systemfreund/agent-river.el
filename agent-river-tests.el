@@ -1617,5 +1617,109 @@ CALL overrides fields of the tool call record."
   ;; thing here that needs consent, so the default has to stay off.
   (should-not (default-value 'agent-river-heat-mode)))
 
+
+;;; Foreign saves, noted from Emacs
+;;
+;; The producer decides three things -- is this file one an agent is working
+;; in, which sessions does that mean, and is the save plausibly the agent's
+;; own -- and all three are pure functions of the state and a file name.
+;; `agent-river-note-foreign-save' takes the name rather than reading
+;; `buffer-file-name' so none of it needs a buffer, a file or a save.
+
+(ert-deftest agent-river-test-frame-touches-matches-on-the-bare-name ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :file "src/a.el"))
+    (agent-river-fold state '(:kind "act" :file "src/a.el"))
+    ;; The saved buffer knows an absolute path; the state knows a normalised
+    ;; one.  The basename is where they meet, as everywhere else here.
+    (should (= (agent-river--frame-touches state "a.el") 2))
+    (should-not (agent-river--frame-touches state "untouched.el"))))
+
+(ert-deftest agent-river-test-frame-touches-reads-the-frame-it-is-asked-for ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :file "a.el"))
+    (agent-river-fold state '(:kind "prompt" :text "next"))
+    ;; A save only costs something while the *current* turn is in the file;
+    ;; the session frame is the wider, noisier net.
+    (should-not (agent-river--frame-touches state "a.el" 'task))
+    (should (= (agent-river--frame-touches state "a.el" 'session) 1))))
+
+(ert-deftest agent-river-test-saving-a-file-the-agent-is-in-is-noted ()
+  (agent-river-test--with-observers
+    (agent-river-observe '(:kind "act" :session "s1" :file "a.el" :detail "Edit"))
+    (agent-river-observe '(:kind "think" :session "s1" :tool "Edit" :detail "Edit"))
+    (should (equal (agent-river-note-foreign-save "/repo/a.el") '("s1")))
+    (let ((state (gethash "s1" agent-river-registry)))
+      (should (= (length (agent-river-state-notes state)) 1))
+      (should (string-match-p "a\\.el saved outside the session"
+                              (cdr (car (agent-river-state-notes state))))))))
+
+(ert-deftest agent-river-test-saving-a-file-no-agent-is-in-says-nothing ()
+  (agent-river-test--with-observers
+    (agent-river-observe '(:kind "act" :session "s1" :file "a.el" :detail "Edit"))
+    ;; Every save in the editor reaches this; without the relevance filter
+    ;; the log would be a list of the user's keystrokes.
+    (should-not (agent-river-note-foreign-save "/repo/elsewhere.el"))
+    (should-not (agent-river-state-notes (gethash "s1" agent-river-registry)))))
+
+(ert-deftest agent-river-test-a-save-under-an-open-call-is-not-noted ()
+  (agent-river-test--with-observers
+    ;; act without its think: the tool call is still open on this file, so
+    ;; the write landing may be the agent's own.  Feeding that back as
+    ;; something observed about the agent would launder its action into an
+    ;; observation about it.
+    (agent-river-observe '(:kind "act" :session "s1" :file "a.el" :detail "Edit"))
+    (should-not (agent-river-note-foreign-save "/repo/a.el"))
+    (agent-river-observe '(:kind "think" :session "s1" :tool "Edit" :detail "Edit"))
+    ;; Once the call has returned the suppression lifts -- deliberately
+    ;; narrow, so a format-on-save a moment later still produces a note.
+    (should (agent-river-note-foreign-save "/repo/a.el"))))
+
+(ert-deftest agent-river-test-a-save-is-noted-to-every-session-in-the-file ()
+  (agent-river-test--with-observers
+    (dolist (id '("s1" "s2"))
+      (agent-river-observe (list :kind "act" :session id :file "shared.el"
+                                 :detail "Edit"))
+      (agent-river-observe (list :kind "think" :session id :tool "Edit"
+                                 :detail "Edit")))
+    ;; Two agents in one file is the case worth seeing, and the note belongs
+    ;; to both of them rather than to whichever was found first.
+    (should (= (length (agent-river-note-foreign-save "/repo/shared.el")) 2))
+    (dolist (id '("s1" "s2"))
+      (should (= (length (agent-river-state-notes (gethash id agent-river-registry)))
+                 1)))))
+
+(ert-deftest agent-river-test-a-subagent-is-not-noted-at ()
+  (agent-river-test--with-observers
+    (agent-river-observe '(:kind "act" :session "s1" :agent "a1"
+                                 :agent-type "Explore" :file "a.el"
+                                 :detail "Read a.el"))
+    (agent-river-observe '(:kind "think" :session "s1" :agent "a1"
+                                 :tool "Read" :detail "Read"))
+    ;; Subagents are counted on their parent and have no line of their own,
+    ;; so a note against one would be addressed to something nothing shows.
+    (should-not (agent-river-note-foreign-save "/repo/a.el"))))
+
+(ert-deftest agent-river-test-watching-saves-is-off-until-asked-for ()
+  (should-not (default-value 'agent-river-watch-saves-mode))
+  (should-not (memq #'agent-river--after-save after-save-hook)))
+
+(ert-deftest agent-river-test-a-broken-save-watch-never-breaks-the-save ()
+  (agent-river-test--with-observers
+    (cl-letf (((symbol-function 'agent-river-note-foreign-save)
+               (lambda (_file) (error "boom"))))
+      (let ((buffer-file-name "/repo/a.el"))
+        ;; An error here would abandon the rest of `after-save-hook' and land
+        ;; in the user's face on every save, over a log line.  It must
+        ;; retire instead -- and say so, because going quiet is how this
+        ;; package has broken before.
+        (agent-river-watch-saves-mode 1)
+        ;; Returning normally *is* the assertion; ERT fails the test if this
+        ;; throws, which is what a save would do to the user.
+        (agent-river--after-save)
+        (should-not agent-river-watch-saves-mode)
+        (should-not (memq #'agent-river--after-save after-save-hook))
+        (should (string-match-p "save watch stopped" (agent-river-test--hud)))))))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here

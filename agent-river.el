@@ -2144,5 +2144,129 @@ worth seeing."
 (put 'agent-river--dired-observe 'agent-river-retire
      (lambda () (agent-river-heat-mode -1)))
 
+;;; Foreign saves, noted from Emacs
+;;
+;; The flow runs the other way here.  Everything above turns hook events into
+;; a state and then into views; this turns something only Emacs can see into
+;; an event, via `agent-river-note'.  The two halves close the circle:
+;;
+;;   hooks       -> fold -> observers -> the outside world   (the dired heat)
+;;   Emacs       -> note  -> fold -> observers               (this)
+;;
+;; So it does not hang off `agent-river-observers' -- that hook fires on the
+;; agent's events, and this one has to fire on yours.
+;;
+;; What it is for: the agent is editing a file, you have it open and edit it
+;; too.  Either its next edit fails on a string that moved, which is loud and
+;; harmless, or it lands and quietly overwrites you.  Nothing in the hook
+;; stream can see that coming -- the agent's staleness check knows the disk,
+;; not your buffers -- so this is the case `agent-river-note' exists for: a
+;; point-in-time fact that nothing could recompute once it has passed.
+;;
+;; Note what happened, never what to make of it.  "You saved a file the agent
+;; is working in" is a fact; "its read is stale" is a conclusion, and drawing
+;; conclusions here would put an opinion into the measured state.  Reading the
+;; notes and deciding what, if anything, to tell the agent is a separate step
+;; that is deliberately not built yet: first it has to be clear how often
+;; these fire in real use.
+
+(defcustom agent-river-foreign-save-scope 'task
+  "Which artifact frame decides that a saved file is worth noting.
+
+`task' notes a save only while the agent's current turn is in that file,
+which is when a collision actually costs something.  `session' notes
+anything it has been in at all this session, which is a wider net and a
+noisier one."
+  :type '(choice (const task) (const session)))
+
+(defun agent-river--frame-touches (state name &optional scope)
+  "Return how often STATE touched the file called NAME, or nil for never.
+
+Matched on the bare name, the way `agent-river-touching' does it, so a
+file reached from a worktree and from the main checkout is one file.
+SCOPE is `session' for the whole session, `task' or nil for this turn."
+  (let ((total 0))
+    (maphash (lambda (path entry)
+               (when (equal (file-name-nondirectory path) name)
+                 (setq total (+ total (or (plist-get entry :touches) 0)))))
+             (if (eq scope 'session)
+                 (agent-river-state-artifacts state)
+               (agent-river-state-task-artifacts state)))
+    (and (> total 0) total)))
+
+(defun agent-river--agent-in-flight-p (state name)
+  "Return non-nil when STATE has a step running against the file called NAME.
+
+The one case where a save is not evidence of anything: a tool call is open
+on this very file, so the write may be the agent's own landing rather than
+a human's.  Feeding that back as something observed about the agent would
+launder its own action into an observation about it -- the closed loop the
+`intent' slots are kept apart to prevent.
+
+Deliberately narrow.  It suppresses nothing once the call has returned, so
+a format-on-save firing a moment after the agent's write still produces a
+note.  That is the right way round for now: the point of noting before
+signalling is to find out how often these fire, and a filter tuned before
+the evidence exists is tuned on a guess."
+  (let ((step (agent-river-state-step state)))
+    (and step
+         (plist-get step :file)
+         (equal (file-name-nondirectory (plist-get step :file)) name))))
+
+(defun agent-river-note-foreign-save (file)
+  "Note FILE as saved outside any session that is working in it.
+
+Returns the ids noted, so the caller can tell silence from a miss.  Takes
+the name rather than reading `buffer-file-name' itself: that makes the
+whole decision testable without a buffer, a file on disk or a save."
+  (let ((name (file-name-nondirectory file))
+        noted)
+    (maphash
+     (lambda (id state)
+       ;; Subagents are skipped: they are counted on their parent and have no
+       ;; line of their own, so a note against one would be addressed to
+       ;; something nothing displays.
+       (when (and (null (agent-river-state-parent state))
+                  (agent-river--active-p state)
+                  (not (agent-river--agent-in-flight-p state name)))
+         (let ((touches (agent-river--frame-touches
+                         state name agent-river-foreign-save-scope)))
+           (when touches
+             (agent-river-note
+              (format "%s saved outside the session (%d touch%s this task)"
+                      name touches (if (= touches 1) "" "es"))
+              id)
+             (push id noted)))))
+     agent-river-registry)
+    noted))
+
+(defun agent-river--after-save ()
+  "Note the file this buffer just saved, if an agent is working in it."
+  (when buffer-file-name
+    ;; The same bargain the hook path makes, for the same reason: never break
+    ;; the thing being observed over the observing.  An error raised inside
+    ;; `after-save-hook' abandons the rest of the chain and lands in the
+    ;; user's face on every single save, over what is only a log line.  So it
+    ;; retires the mode instead, and says so rather than going quiet.
+    (condition-case err
+        (agent-river-note-foreign-save buffer-file-name)
+      (error
+       (agent-river-watch-saves-mode -1)
+       (ignore-errors
+         (agent-river-log "fail" (format "save watch stopped (%s)"
+                                         (error-message-string err))))))))
+
+;;;###autoload
+(define-minor-mode agent-river-watch-saves-mode
+  "Note when you save a file an agent is currently working in.
+
+Off by default like every other side effect here, though this one only
+writes into agent-river's own state and buffer -- the consent it needs is
+for watching every save you make, not for what it does with them."
+  :global t
+  (if agent-river-watch-saves-mode
+      (add-hook 'after-save-hook #'agent-river--after-save)
+    (remove-hook 'after-save-hook #'agent-river--after-save)))
+
 (provide 'agent-river)
 ;;; agent-river.el ends here
