@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (137 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (141 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -125,6 +125,17 @@ These are load-bearing; the tests enforce most of them.
   `PostToolUse` line rather than racing it. On Claude Code that means `PreToolUse`
   and `PostToolUseFailure`; on Codex and Gemini CLI the post-tool hook joins them,
   because there it is the event a `fail` is refined out of.
+- **One observation is delivered once** (`agent-river--signalled-p`). Entries in
+  `signals` are `(:at :text :id)`, so the list is the delivery log and not just
+  a tally; `agent-river--signal` returns `(:text … :id …)` and withholds any id
+  already logged. The throttle alone was not enough: it keys on the failure
+  streak, which does not move when the agent merely acts, so one run of three
+  failures was re-delivered on every subsequent tool call. The throttle decides
+  which streaks are worth a word; the id decides each gets exactly one.
+  The id must identify the *occasion*, not the number — `(streak RUN N)`, where
+  `fail-runs` counts runs and never resets. `(streak N)` alone silently
+  suppressed a later, genuinely new run of three failures, and a never-reset
+  counter is also what stops a new prompt making old ids collide with new ones.
 - **Only an answering event may signal** (`agent-river-answering-kinds`, default
   `act` and `fail`). `observe` asks `agent-river--signal` only for those kinds.
   It used to ask on every event, so a fail streak still standing at the end of a

@@ -222,6 +222,7 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
   task-artifacts    ; the same, but cleared by each new prompt
   tools             ; hash: tool -> (:count N :ms TOTAL :failures N)
   fail-streak       ; consecutive failures, reset by any success
+  fail-runs         ; how many separate runs of failures, never reset
   fail-tools        ; alist tool -> count, for the current streak only
   task-failures     ; failures during this task, not just the current run
   recent            ; newest-first (TOOL . DETAIL), the window phase reads
@@ -384,6 +385,7 @@ AGENT-TYPE are set once, when the state is created."
                              :task-artifacts (make-hash-table :test 'equal)
                              :tools (make-hash-table :test 'equal)
                              :fail-streak 0
+                             :fail-runs 0
                              :steps 0)
                             agent-river-registry))))
     ;; agent-shell's own name wins where it exists: it is stable across a
@@ -537,6 +539,16 @@ replaying a session's events from the start."
 
      ((equal kind "fail")
       (agent-river--record-tool state tool ms t)
+      ;; A failure that follows a success opens a new run.  Counted because
+      ;; the streak value alone cannot tell two runs apart: a session that
+      ;; recovers and then fails three times again is in a new predicament,
+      ;; not still in the old one, and an observation about it must not be
+      ;; suppressed as a repeat of the first.  Never reset, so the id built
+      ;; from it stays unique for the life of the session -- a new prompt
+      ;; clears the streak but must not make old ids collide with new ones.
+      (when (zerop (agent-river-state-fail-streak state))
+        (setf (agent-river-state-fail-runs state)
+              (1+ (or (agent-river-state-fail-runs state) 0))))
       (setf (agent-river-state-step state) nil
             (agent-river-state-task-failures state)
             (1+ (or (agent-river-state-task-failures state) 0))
@@ -551,7 +563,12 @@ replaying a session's events from the start."
      ;; rather than something it did, which is why neither touches the step,
      ;; the streak or the artifacts.
      ((equal kind "signal")
-      (push (cons (current-time) (plist-get event :text))
+      ;; :id is what makes this list a delivery log rather than a tally --
+      ;; `agent-river--signalled-p' reads it back to keep one observation
+      ;; from being handed over twice.
+      (push (list :at (current-time)
+                  :text (plist-get event :text)
+                  :id (plist-get event :id))
             (agent-river-state-signals state)))
 
      ((equal kind "note")
@@ -661,28 +678,55 @@ SCOPE is `session' for the whole session, or nil for the current task."
     (when (and best (> best-n 1))
       (format "%s (%d touches)" (file-name-nondirectory best) best-n))))
 
-(defun agent-river--signal (state)
-  "Return an observation about STATE for the agent, or nil.
+(defun agent-river--signalled-p (state id)
+  "Return non-nil when ID has already been handed to the agent in STATE.
 
-Kept to a single line with no control characters: the hook reads this
-back through `emacsclient', whose printed representation of a plain
-string is then parsed as JSON, and an embedded newline would break that."
-  (let ((streak (agent-river-state-fail-streak state)))
+The signals list doubles as the delivery log, which is what makes
+\"exactly once\" answerable without a second slot that would have to be
+kept in step with it."
+  (seq-find (lambda (entry) (equal (plist-get entry :id) id))
+            (agent-river-state-signals state)))
+
+(defun agent-river--signal (state)
+  "Return the observation STATE has earned as (:text S :id ID), or nil.
+
+:text is kept to a single line with no control characters: the hook reads
+it back through `emacsclient', whose printed representation of a plain
+string is then parsed as JSON, and an embedded newline would break that.
+
+:id names *what* is being reported rather than what was said about it, and
+an id already in `signals' is not reported again.  Without it the throttle
+keyed on the failure streak alone -- a number that does not move when the
+agent merely acts -- so a single run of failures was re-delivered on every
+tool call that followed it, which is the exact thing the throttle exists
+to prevent.
+
+The two do different jobs and both are needed: the throttle decides which
+streaks are worth a word, the id decides that each of them gets one."
+  (let* ((streak (agent-river-state-fail-streak state))
+         ;; Which run, and how deep into it.  The run number is what keeps a
+         ;; later stretch of three failures from being mistaken for the
+         ;; earlier one; the streak is what earns each of 3, 6, 9 its own word
+         ;; within a run.
+         (id (list 'streak (or (agent-river-state-fail-runs state) 0) streak)))
     (when (and (>= streak agent-river-fail-streak-threshold)
                (zerop (mod (- streak agent-river-fail-streak-threshold)
-                           agent-river-fail-streak-repeat)))
+                           agent-river-fail-streak-repeat))
+               (not (agent-river--signalled-p state id)))
       (let ((tools (mapconcat (lambda (cell) (format "%s x%d" (car cell) (cdr cell)))
                               (reverse (agent-river-state-fail-tools state))
                               ", "))
             (since (and (agent-river-state-task-started state)
                         (agent-river--ago (agent-river-state-task-started state))))
             (hot (agent-river--hottest state)))
-        (concat
-         (format "agent-river: %d consecutive tool failures (%s)" streak tools)
-         (if since (format ", %s into the current task" since) "")
-         (if hot (format ". Most-revisited file: %s" hot) "")
-         ". This is an observation, not an instruction -- weigh it against"
-         " what you know; repeated failure is sometimes the right path.")))))
+        (list :id id
+              :text
+              (concat
+               (format "agent-river: %d consecutive tool failures (%s)" streak tools)
+               (if since (format ", %s into the current task" since) "")
+               (if hot (format ". Most-revisited file: %s" hot) "")
+               ". This is an observation, not an instruction -- weigh it against"
+               " what you know; repeated failure is sometimes the right path."))))))
 
 
 ;;; Reading the hook payload
@@ -1336,9 +1380,12 @@ often the agent had to be told something is itself part of the state."
           ;; state the fold is supposed to own alone -- and left the fold's
           ;; promise that a state can be rebuilt by replaying its events true
           ;; only by accident, because a signal happens to be derivable.
-          (agent-river-fold state (list :kind "signal" :text signal))
-          (agent-river-log "signal" signal label))
-        signal))))
+          (agent-river-fold state (list :kind "signal"
+                                        :text (plist-get signal :text)
+                                        :id (plist-get signal :id)))
+          (agent-river-log "signal" (plist-get signal :text) label))
+        ;; Only the text goes back to the agent; the id is bookkeeping.
+        (plist-get signal :text)))))
 
 
 ;;;###autoload
@@ -1518,6 +1565,7 @@ and through the main checkout counts as one artifact."
                :session-elapsed (and (agent-river-state-started state)
                                      (agent-river--ago
                                       (agent-river-state-started state)))
+               :fail-runs (or (agent-river-state-fail-runs state) 0)
                :signals (length (agent-river-state-signals state))
                :notes (length (agent-river-state-notes state)))
          ;; Subagents fold separately so their failures stay theirs, but the

@@ -128,7 +128,8 @@
         (should signal)
         ;; The hook reads this back through emacsclient and parses prin1's
         ;; output as JSON; an embedded newline would break that silently.
-        (should-not (string-match-p "\n" signal))))))
+        ;; Only :text travels -- the :id beside it is bookkeeping.
+        (should-not (string-match-p "\n" (plist-get signal :text)))))))
 
 (ert-deftest agent-river-test-new-task-clears-only-the-task-tally ()
   (agent-river-test--with-session state
@@ -1433,6 +1434,69 @@ CALL overrides fields of the tool call record."
 
 ;;; Notes -- state produced from outside the hook stream
 
+(ert-deftest agent-river-test-one-streak-is-reported-once ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (dotimes (_ 3)
+      (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash" :detail "Bash")))
+    ;; act is an answering kind and leaves the streak where it is, so the
+    ;; throttle -- keyed on the streak alone -- used to fire again on every
+    ;; tool call that followed.  One run of failures, four deliveries of the
+    ;; identical sentence, which is what the throttle exists to prevent.
+    (dotimes (_ 3)
+      (should-not (agent-river-observe '(:kind "act" :session "s1" :tool "Read"
+                                               :file "a.el" :detail "Read a.el"))))
+    (should (= (length (agent-river-state-signals
+                        (gethash "s1" agent-river-registry)))
+               1))))
+
+(ert-deftest agent-river-test-a-further-streak-is-reported-again ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (dotimes (_ 3)
+      (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash" :detail "Bash")))
+    (agent-river-observe '(:kind "act" :session "s1" :file "a.el" :detail "Read"))
+    ;; Delivered-once must not become delivered-never: the streak reaching 6
+    ;; is a different fact from it reaching 3, and earns its own word.
+    (dotimes (_ 2)
+      (should-not (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash"
+                                               :detail "Bash"))))
+    (should (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash"
+                                         :detail "Bash")))
+    (should (= (length (agent-river-state-signals
+                        (gethash "s1" agent-river-registry)))
+               2))))
+
+(ert-deftest agent-river-test-a-new-streak-may-repeat-a-value ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (dotimes (_ 3)
+      (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash" :detail "Bash")))
+    ;; A success ends the streak, and a later run of three is a new fact
+    ;; about a new stretch of work -- the id must not suppress it as a
+    ;; duplicate of the first.  This is why the id is checked against the
+    ;; delivery log rather than the streak being remembered as a high-water
+    ;; mark.
+    (agent-river-observe '(:kind "think" :session "s1" :tool "Bash" :detail "Bash"))
+    (dotimes (_ 2)
+      (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash" :detail "Bash")))
+    (should (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash"
+                                         :detail "Bash")))))
+
+(ert-deftest agent-river-test-the-signals-list-is-a-delivery-log ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (dotimes (_ 3)
+      (agent-river-observe '(:kind "fail" :session "s1" :tool "Bash" :detail "Bash")))
+    (let ((entry (car (agent-river-state-signals
+                       (gethash "s1" agent-river-registry)))))
+      ;; What was said, when, and what it was about.  The last is what makes
+      ;; "exactly once" answerable out of the existing state instead of from
+      ;; a second slot that would have to be kept in step with this one.
+      (should (plist-get entry :at))
+      (should (string-match-p "consecutive tool failures" (plist-get entry :text)))
+      (should (equal (plist-get entry :id) '(streak 1 3))))))
+
 (ert-deftest agent-river-test-an-event-that-cannot-answer-does-not-signal ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
@@ -1482,7 +1546,7 @@ CALL overrides fields of the tool call record."
     ;; made observe a second writer to a state the fold is supposed to own
     ;; alone.  Folding it is what keeps that ownership true.
     (should (= (length (agent-river-state-signals state)) 1))
-    (should (equal (cdr (car (agent-river-state-signals state)))
+    (should (equal (plist-get (car (agent-river-state-signals state)) :text)
                    "told the agent something"))))
 
 (ert-deftest agent-river-test-a-signal-event-measures-nothing ()
