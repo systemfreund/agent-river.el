@@ -1076,5 +1076,185 @@ leaves it nil, which is what an unhosted session looks like."
   (should-not (agent-river--thought-chunk '((params . nil))))
   (should-not (agent-river--thought-chunk nil)))
 
+
+;;; Observers -- the side-effect contract
+;;
+;; What every consumer that reaches outside this package inherits from the
+;; runner, so that adding one is writing its own job and nothing else.  These
+;; are the tests to point a new observer at.
+
+(defmacro agent-river-test--with-observers (&rest body)
+  "Run BODY with an empty observer list and an empty HUD."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-auto-display nil)
+         (agent-river-observers nil))
+     (agent-river-clear)
+     ,@body))
+
+(ert-deftest agent-river-test-an-observer-sees-the-state-and-the-raw-event ()
+  (agent-river-test--with-observers
+    (let (seen)
+      (add-hook 'agent-river-observers
+                (lambda (state event) (push (cons state event) seen)))
+      (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                   :file "a.el" :path "/repo/a.el"
+                                   :detail "Edit a.el"))
+      (should (= (length seen) 1))
+      ;; The state is the folded account, already updated when the observer
+      ;; runs -- an observer that had to fold for itself would be a second,
+      ;; unlogged account of the same events.
+      (should (= (agent-river-state-steps (car (car seen))) 1))
+      ;; And the raw event is where anything the fold drops still lives.
+      (should (equal (plist-get (cdr (car seen)) :path) "/repo/a.el")))))
+
+(ert-deftest agent-river-test-a-throwing-observer-retires-and-says-so ()
+  (agent-river-test--with-observers
+    (let ((calls 0))
+      (add-hook 'agent-river-observers
+                (lambda (_state _event) (setq calls (1+ calls)) (error "boom")))
+      (agent-river-observe '(:kind "act" :session "s1" :detail "Edit a.el"))
+      (agent-river-observe '(:kind "act" :session "s1" :detail "Edit b.el"))
+      ;; This path runs on every tool call, so a consumer that is broken is
+      ;; broken thousands of times; it gets exactly one chance.
+      (should (= calls 1))
+      (should-not agent-river-observers)
+      ;; Retiring quietly is the failure mode this package keeps having.
+      (should (string-match-p "observer .* retired" (agent-river-test--hud))))))
+
+(ert-deftest agent-river-test-a-retiring-observer-can-tear-down ()
+  (agent-river-test--with-observers
+    (let (torn-down)
+      (defun agent-river-test--breaking-observer (_state _event) (error "boom"))
+      (put 'agent-river-test--breaking-observer 'agent-river-retire
+           (lambda () (setq torn-down t)))
+      (add-hook 'agent-river-observers #'agent-river-test--breaking-observer)
+      (agent-river-observe '(:kind "act" :session "s1" :detail "Edit a.el"))
+      ;; Removal alone would leave whatever the observer put into other
+      ;; buffers sitting there, and its mode variable claiming to be on.
+      (should torn-down))))
+
+(ert-deftest agent-river-test-one-broken-observer-spares-the-rest ()
+  (agent-river-test--with-observers
+    (let (survived)
+      (add-hook 'agent-river-observers (lambda (_state _event) (error "boom")))
+      (add-hook 'agent-river-observers (lambda (_state _event) (setq survived t)))
+      (agent-river-observe '(:kind "act" :session "s1" :detail "Edit a.el"))
+      (should survived))))
+
+(ert-deftest agent-river-test-an-observer-cannot-reach-the-agent ()
+  (agent-river-test--with-observers
+    (add-hook 'agent-river-observers
+              (lambda (_state _event) "agent-river: do something else"))
+    ;; The return value is dropped on purpose.  Signals are the one channel
+    ;; back into the agent's context and they are kept narrow and factual;
+    ;; a side effect that could speak through it would widen that channel
+    ;; without any of the discipline that makes it safe.
+    (should-not (agent-river-observe '(:kind "act" :session "s1" :detail "Edit")))))
+
+(ert-deftest agent-river-test-a-broken-observer-spares-the-fold ()
+  (agent-river-test--with-observers
+    (add-hook 'agent-river-observers (lambda (_state _event) (error "boom")))
+    (agent-river-observe '(:kind "act" :session "s1" :file "a.el" :detail "Edit"))
+    ;; The state must be untouched by a failing side effect, and the failure
+    ;; must not be reported as a fold failure -- that message sends the user
+    ;; to `agent-river-reset', which throws away every session.
+    (should (= (agent-river-state-steps (gethash "s1" agent-river-registry)) 1))
+    (should-not (string-match-p "fold failed" (agent-river-test--hud)))))
+
+
+;;; Heat, derived for dired
+;;
+;; The derivation is tested, the rendering is not.  Everything that can be
+;; wrong in a way that misleads an onlooker -- which frame the count comes
+;; from, how two sessions on one file add up, which face a count earns -- is
+;; a pure function of the state.  Overlay placement is dired's geometry, and
+;; testing it would mean building a listing to assert that dired knows where
+;; its own filenames are.
+
+(ert-deftest agent-river-test-heat-counts-touches-by-basename ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :file "src/a.el"))
+    (agent-river-fold state '(:kind "act" :file "src/a.el"))
+    (agent-river-fold state '(:kind "act" :file "b.el"))
+    (let ((table (agent-river--heat-table)))
+      ;; Keyed on the bare name because that is the only key a dired buffer
+      ;; can ask with: it holds absolute paths, the state holds normalised
+      ;; ones, and the basename is where the two meet.
+      (should (equal (gethash "a.el" table) 2))
+      (should (equal (gethash "b.el" table) 1))
+      (should-not (gethash "never-touched.el" table)))))
+
+(ert-deftest agent-river-test-heat-reads-the-frame-it-is-asked-for ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :file "a.el"))
+    (agent-river-fold state '(:kind "act" :file "a.el"))
+    (agent-river-fold state '(:kind "prompt" :text "next"))
+    (agent-river-fold state '(:kind "act" :file "a.el"))
+    ;; The two frames answer different questions and the shading must not
+    ;; blur them: the task frame says what this turn is about, the session
+    ;; frame says what the agent has been in all afternoon.
+    (should (equal (gethash "a.el" (agent-river--heat-table 'task)) 1))
+    (should (equal (gethash "a.el" (agent-river--heat-table 'session)) 3))
+    ;; No scope is the task frame, matching the panel.
+    (should (equal (gethash "a.el" (agent-river--heat-table)) 1))))
+
+(ert-deftest agent-river-test-heat-sums-two-sessions-on-one-file ()
+  (agent-river-test--with-session state
+    (let ((other (agent-river-state "s2" "beta")))
+      (agent-river-fold state '(:kind "act" :file "shared.el"))
+      (agent-river-fold other '(:kind "act" :file "worktree/shared.el"))
+      (agent-river-fold other '(:kind "act" :file "worktree/shared.el"))
+      ;; Two agents in one file is the case worth seeing, and the same file
+      ;; reached from a worktree must not read as a second one -- which is
+      ;; exactly what `agent-river-touching' already promises.
+      (should (equal (gethash "shared.el" (agent-river--heat-table)) 3)))))
+
+(ert-deftest agent-river-test-heat-face-escalates-with-touches ()
+  (let ((agent-river-heat-levels '((6 . agent-river-heat-3)
+                                   (3 . agent-river-heat-2)
+                                   (1 . agent-river-heat-1))))
+    ;; Below every threshold there is no face, which is what stops an
+    ;; untouched listing being covered in overlays that mean nothing.
+    (should-not (agent-river--heat-face 0))
+    (should (eq (agent-river--heat-face 1) 'agent-river-heat-1))
+    (should (eq (agent-river--heat-face 2) 'agent-river-heat-1))
+    (should (eq (agent-river--heat-face 3) 'agent-river-heat-2))
+    (should (eq (agent-river--heat-face 9) 'agent-river-heat-3))))
+
+(ert-deftest agent-river-test-heat-levels-are-read-top-down ()
+  ;; The order of the alist decides the answer, so a list written the other
+  ;; way round would hand every touched file the coolest face and the
+  ;; shading would never escalate at all.
+  (let ((agent-river-heat-levels '((1 . agent-river-heat-1)
+                                   (6 . agent-river-heat-3))))
+    (should (eq (agent-river--heat-face 9) 'agent-river-heat-1))))
+
+(ert-deftest agent-river-test-event-carries-an-absolute-path-unfolded ()
+  (let ((event (agent-river--event
+                "act"
+                (agent-river-test--payload
+                 "{\"session_id\":\"s1\",\"cwd\":\"/repo\",
+                   \"tool_name\":\"Edit\",
+                   \"tool_input\":{\"file_path\":\"/repo/src/a.el\"}}"))))
+    ;; Two forms of the same file, and they are not interchangeable: :file
+    ;; is normalised and is what the state is keyed on, :path is absolute
+    ;; and is the only thing a dired buffer can be asked about.
+    (should (equal (plist-get event :file) "src/a.el"))
+    (should (equal (plist-get event :path) "/repo/src/a.el"))
+    (agent-river-test--with-session state
+      (agent-river-fold state event)
+      ;; The absolute path must not reach the artifact table.  If it did,
+      ;; one file reached from a worktree and from the main checkout would
+      ;; count as two and the contention query would stop working.
+      (should (gethash "src/a.el" (agent-river-state-task-artifacts state)))
+      (should-not (gethash "/repo/src/a.el"
+                           (agent-river-state-task-artifacts state))))))
+
+(ert-deftest agent-river-test-heat-mode-is-off-until-asked-for ()
+  ;; Writing overlays into buffers the user did not point this at is the one
+  ;; thing here that needs consent, so the default has to stay off.
+  (should-not (default-value 'agent-river-heat-mode)))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here

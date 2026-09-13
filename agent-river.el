@@ -713,6 +713,12 @@ so the view does not have to re-derive which argument mattered."
           :agent-type (alist-get 'agent_type payload)
           :tool (alist-get 'tool_name payload)
           :file (and file (agent-river--rel file cwd))
+          ;; The absolute name, for the views that have to reach the file on
+          ;; disk.  Carried beside `:file' rather than replacing it, and never
+          ;; folded: the artifact tables are keyed on the normalised form, and
+          ;; an absolute path in them would make one file reached from a
+          ;; worktree and from the main checkout count as two again.
+          :path file
           :ms (alist-get 'duration_ms payload)
           :text (when (equal kind "prompt")
                   (agent-river--clip
@@ -841,6 +847,55 @@ thinking text, so there is nothing else to read them from."
 ;; believes it is doing.  The second is a claim rather than a measurement,
 ;; which is why it is kept apart everywhere downstream.
 
+;; Side effects hang off `agent-river-observers' rather than being called from
+;; `agent-river-observe' by name.  The point is not extensibility for its own
+;; sake: every consumer that reaches outside this package needs the same three
+;; things, and each one is a mistake that has already been made here.
+;;
+;; It must not run inside the fold -- the fold is pure, and the tests depend on
+;; being able to drive it with no frame, no buffers and no live session.  It
+;; must not share the fold's guard, because an error reported as a fold failure
+;; sends the user to `agent-river-reset', throwing away every session's state
+;; over what may be one overlay.  And it must retire on its first error rather
+;; than repeat it, because this path runs on every single tool call, so a
+;; consumer that is broken is broken thousands of times.
+;;
+;; Getting those three right is most of the work of adding a consumer, so the
+;; runner owns them and a consumer is left with only its own job.
+
+(defvar agent-river-observers nil
+  "Functions called with (STATE EVENT) after each event is folded.
+
+An abnormal hook, run for effect only: the return value is ignored and
+nothing downstream reads it, so an observer cannot influence the state,
+the signal handed back to the agent, or each other.  That is deliberate --
+the state is the one account of what happened, and a consumer that could
+edit it on the way past would become a second, unlogged one.
+
+STATE is the `agent-river-state' the event was folded into, and carries
+everything measured.  EVENT is the raw plist, which is where to look for
+anything the fold deliberately drops -- `:path' being the case in point.")
+
+(defun agent-river--run-observers (state event)
+  "Run `agent-river-observers' over STATE and EVENT, each in its own guard.
+
+An observer that throws is removed rather than being allowed to fail on
+every tool call for the rest of the session, and says so in the log --
+going quiet is how this has broken before.  One that needs to tear
+something down on the way out puts a function on its symbol's
+`agent-river-retire' property; without it, removal is the whole
+retirement."
+  (dolist (observer agent-river-observers)
+    (condition-case err
+        (funcall observer state event)
+      (error
+       (setq agent-river-observers (delq observer agent-river-observers))
+       (when (symbolp observer)
+         (let ((retire (get observer 'agent-river-retire)))
+           (when retire (ignore-errors (funcall retire)))))
+       (agent-river-log "fail" (format "observer %s retired (%s)"
+                                       observer (error-message-string err)))))))
+
 ;;;###autoload
 (defun agent-river-observe (event)
   "Fold EVENT into its session's state, render it, and return any signal.
@@ -880,6 +935,7 @@ often the agent had to be told something is itself part of the state."
       (error
        (agent-river-log "fail" (format "fold failed (%s) -- try M-x agent-river-reset"
                                        (error-message-string err)))))
+    (agent-river--run-observers state event)
     (let ((label (agent-river-state-label state)))
       (unless (string-empty-p detail)
         (agent-river-log kind detail label))
@@ -1428,6 +1484,238 @@ long as Emacs does."
           (run-at-time agent-river-refresh-interval
                        agent-river-refresh-interval
                        #'agent-river--tick))))
+
+;;; Heat and pulse, rendered into dired
+;;
+;; A second view of the same state.  The panel names the hottest file; this
+;; puts that reading where the files actually are, so a dired buffer shows at
+;; a glance which entries the current task is living in.
+;;
+;; Nothing here folds.  The shading is derived from the artifact tables on
+;; every redraw, exactly as the panel is, so the two cannot drift -- and the
+;; fold stays pure, which is what lets the tests run with no frame and no
+;; dired buffer in sight.
+;;
+;; The lookup runs from the *buffer* to the state rather than the other way
+;; round, and that is the whole trick.  State paths are normalised by
+;; `agent-river--rel' -- relative to the session cwd, a bare basename outside
+;; it -- so they deliberately cannot address a file on disk.  A dired buffer
+;; already holds the absolute side; asking it "how hot is this entry" needs
+;; only the basename, which is the key `agent-river-touching' already matches
+;; on and what keeps a worktree and its main checkout reading as one file.
+;;
+;; Kept as one contiguous block, faces included, rather than filed into the
+;; sections above: it is the only part of this package that writes into
+;; buffers the user did not point at it, and that should stay easy to remove.
+
+(declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
+(declare-function dired-goto-file "dired" (file))
+(declare-function dired-move-to-filename "dired" (&optional raise-error eol))
+(declare-function dired-move-to-end-of-filename "dired" (&optional no-error))
+(declare-function pulse-momentary-highlight-region "pulse" (start end &optional face))
+
+(defface agent-river-heat-1
+  '((((background light)) :background "#edf2fa")
+    (((background dark))  :background "#1c232e"))
+  "Face for a dired entry the agent has touched once.")
+
+(defface agent-river-heat-2
+  '((((background light)) :background "#dbe4f3")
+    (((background dark))  :background "#26334a"))
+  "Face for a dired entry the agent keeps coming back to.")
+
+(defface agent-river-heat-3
+  '((((background light)) :background "#f7e2c9" :weight bold)
+    (((background dark))  :background "#4a3724" :weight bold))
+  "Face for the dired entry the agent is living in.")
+
+(defcustom agent-river-heat-levels
+  '((6 . agent-river-heat-3)
+    (3 . agent-river-heat-2)
+    (1 . agent-river-heat-1))
+  "Touch counts and the face each earns, highest threshold first.
+Read top down and the first match wins, so the order is load-bearing;
+a count below every threshold gets no face and no overlay at all."
+  :type '(alist :key-type integer :value-type face))
+
+(defcustom agent-river-heat-scope 'task
+  "Which artifact frame the shading is read from.
+
+`task' answers \"what is this turn about\" and is cleared by every new
+prompt, which is what the panel shows.  `session' answers \"what has this
+agent been in all afternoon\".  They are different questions and the
+package refuses to blur them anywhere else, so the choice is explicit
+here too rather than being whichever frame was convenient."
+  :type '(choice (const task) (const session)))
+
+;; Defined before the functions that read it, so the byte-compiler sees the
+;; variable rather than taking it for a free one.
+;;;###autoload
+(define-minor-mode agent-river-heat-mode
+  "Shade dired entries by how often the agent has touched them.
+
+Off by default, and a mode rather than a variable, because this is the one
+thing in the package that writes into buffers the user did not point it
+at: turning it on is the consent, and turning it off has to take the
+overlays with it."
+  :global t
+  (if agent-river-heat-mode
+      (progn
+        (add-hook 'agent-river-observers #'agent-river--dired-observe)
+        (add-hook 'dired-after-readin-hook #'agent-river--heat-after-readin)
+        (agent-river-heat-refresh))
+    (remove-hook 'agent-river-observers #'agent-river--dired-observe)
+    (remove-hook 'dired-after-readin-hook #'agent-river--heat-after-readin)
+    (dolist (buffer (agent-river--dired-buffers t))
+      (agent-river--heat-clear buffer))))
+
+(defun agent-river--heat-table (&optional scope)
+  "Return a hash of basename to touch count across every folded session.
+
+Aggregated rather than kept per session on purpose: one file that two
+agents are both in is the case worth seeing, and summing them is the same
+reading `agent-river-touching' gives.  SCOPE is `session' for the whole
+session, `task' or nil for the current task."
+  (let ((table (make-hash-table :test 'equal)))
+    (maphash
+     (lambda (_id state)
+       (maphash (lambda (path entry)
+                  (let ((name (file-name-nondirectory path)))
+                    (puthash name
+                             (+ (or (gethash name table) 0)
+                                (or (plist-get entry :touches) 0))
+                             table)))
+                (if (eq scope 'session)
+                    (agent-river-state-artifacts state)
+                  (agent-river-state-task-artifacts state))))
+     agent-river-registry)
+    table))
+
+(defun agent-river--heat-face (touches)
+  "Return the face a file touched TOUCHES times earns, or nil for none."
+  (cdr (seq-find (lambda (cell) (>= touches (car cell)))
+                 agent-river-heat-levels)))
+
+(defun agent-river--heat-clear (buffer)
+  "Remove every heat overlay this package put into BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (remove-overlays (point-min) (point-max) 'agent-river-heat t))))
+
+(defun agent-river--heat-bounds ()
+  "Return the (BEG . END) of the filename on this line, or nil.
+Only the name is shaded, not the whole line: the permissions and size
+columns are dired's, and colouring them would read as dired saying
+something rather than as this package annotating it."
+  (let ((beg (dired-move-to-filename))
+        (end (dired-move-to-end-of-filename t)))
+    (and beg end (cons beg end))))
+
+(defun agent-river--heat-dired (buffer table)
+  "Shade the entries of dired BUFFER by their touch count in TABLE."
+  (with-current-buffer buffer
+    (agent-river--heat-clear buffer)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        ;; Walking the listing, rather than looking each state path up with
+        ;; `dired-goto-file', is what makes the mismatch cases harmless: the
+        ;; header and total lines simply yield no filename, and a file the
+        ;; agent has just created is an entry that is not there yet.
+        (let* ((name (ignore-errors (dired-get-filename 'no-dir t)))
+               (face (and name (agent-river--heat-face
+                                (or (gethash name table) 0))))
+               (bounds (and face (agent-river--heat-bounds))))
+          (when bounds
+            (let ((overlay (make-overlay (car bounds) (cdr bounds))))
+              (overlay-put overlay 'agent-river-heat t)
+              (overlay-put overlay 'face face)
+              (overlay-put overlay 'evaporate t))))
+        (forward-line 1)))))
+
+(defun agent-river--dired-buffers (&optional all)
+  "Return the dired buffers worth drawing into.
+
+Only those on screen unless ALL: overlays in a buffer nobody is looking
+at are work done for no one, and a long session accumulates dired buffers.
+`dired-after-readin-hook' catches the rest as they are listed or reverted.
+ALL is for tearing the shading down, which has to reach every buffer that
+might still be holding an overlay."
+  (seq-filter (lambda (buffer)
+                (with-current-buffer buffer
+                  (and (derived-mode-p 'dired-mode)
+                       (or all (get-buffer-window buffer t)))))
+              (buffer-list)))
+
+;;;###autoload
+(defun agent-river-heat-refresh ()
+  "Redraw the touch shading in every visible dired buffer.
+Unconditional, unlike the automatic path: asking for it is asking for it,
+whether or not `agent-river-heat-mode' is driving the redraws."
+  (interactive)
+  (let ((table (agent-river--heat-table agent-river-heat-scope)))
+    (dolist (buffer (agent-river--dired-buffers))
+      (agent-river--heat-dired buffer table))))
+
+(defun agent-river--heat-after-readin ()
+  "Reapply the shading to a dired buffer that was just listed or reverted.
+A revert replaces the buffer text and takes every overlay with it, so
+without this the shading vanishes at exactly the moment dired refreshes to
+show what the agent has written."
+  (when agent-river-heat-mode
+    (agent-river--heat-dired (current-buffer)
+                             (agent-river--heat-table agent-river-heat-scope))))
+
+;; The pulse is event-level, where the heat is state-level.  Heat answers
+;; "what is this task about"; the pulse answers "what happened just now",
+;; which is a property of the event and of nothing else -- so it rides on
+;; `:path', the absolute name carried beside the normalised `:file' and never
+;; folded.
+;;
+;; pulse.el supports exactly one highlight at a time, and not by oversight:
+;; `pulse-momentary-highlight-overlay' opens by unhighlighting whatever is
+;; running, keeps one global overlay, and animates the background of one
+;; global face.  An agent editing four files in a turn would not pulse four
+;; times, it would restart a single animation four times and finish none of
+;; them.  So the pulse stays the small half of this deliberately: one file,
+;; the one this event names, and the heat carries everything that has to be
+;; readable at once.
+
+(defun agent-river--pulse-dired (path)
+  "Pulse PATH's entry in the first visible dired buffer that lists it."
+  (when (and path (require 'pulse nil t))
+    (catch 'pulsed
+      (dolist (buffer (agent-river--dired-buffers))
+        (with-current-buffer buffer
+          (save-excursion
+            ;; dired-goto-file takes the absolute name and answers nil when
+            ;; the file is not in this listing, which is also the answer for
+            ;; a file the agent created a moment ago.
+            (when (ignore-errors (dired-goto-file path))
+              (let ((bounds (agent-river--heat-bounds)))
+                (when bounds
+                  (pulse-momentary-highlight-region
+                   (car bounds) (cdr bounds) 'agent-river-heat-3)
+                  (throw 'pulsed buffer))))))))))
+
+(defun agent-river--dired-observe (_state event)
+  "Draw EVENT into the dired views: heat from the state, a pulse from EVENT.
+
+Takes no mode check of its own: being on `agent-river-observers' is what
+switched it on, and the runner is what takes it off again.  STATE is
+ignored because the heat is aggregated across every session rather than
+read from the one that just acted -- two agents in one file is the case
+worth seeing."
+  (agent-river-heat-refresh)
+  ;; Only an act names a file that was touched at that moment; a think or a
+  ;; fail reports on a call whose pulse has already been shown.
+  (when (equal (plist-get event :kind) "act")
+    (agent-river--pulse-dired (plist-get event :path))))
+
+;; Removal is not enough of a retirement here: the overlays would stay where
+;; they are, and `agent-river-heat-mode' would keep claiming to be on.
+(put 'agent-river--dired-observe 'agent-river-retire
+     (lambda () (agent-river-heat-mode -1)))
 
 (provide 'agent-river)
 ;;; agent-river.el ends here

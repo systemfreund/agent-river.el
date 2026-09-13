@@ -17,7 +17,7 @@ wiring).
 ## Commands
 
 ```sh
-# Full suite (89 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (102 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -109,6 +109,49 @@ These are load-bearing; the tests enforce most of them.
   the session cwd when under it, bare basename otherwise. Stripping only the
   session's own cwd makes one file reached from a worktree and from the main
   checkout render as two, which defeats the contention query.
+
+### Adding a side-effect consumer
+
+Anything that reaches outside this package — shading dired, pulsing a line,
+notifying, writing a file — is an *observer*, not a fold branch. `dired`
+heat/pulse (`agent-river-heat-mode`) is the worked example; read it before
+writing a second one.
+
+Register on `agent-river-observers`, an abnormal hook of `(STATE EVENT)` run
+for effect after each fold. The runner (`agent-river--run-observers`) already
+owns the three things every consumer needs, so don't re-implement them:
+
+- **Its own guard, not the fold's.** An error reported as `fold failed` sends
+  the user to `agent-river-reset`, discarding every session's state over one
+  overlay.
+- **Retire on first error**, like the refresh timer. This path runs on *every*
+  tool call, so a broken consumer is broken thousands of times. The runner
+  removes it and logs `observer ... retired`.
+- **Teardown via the `agent-river-retire` symbol property** when removal alone
+  would leave something behind (overlays in foreign buffers, a mode variable
+  still claiming to be on).
+
+What a consumer must respect:
+
+- **Return values are ignored.** Signals are the only channel back into the
+  agent's context and they are kept narrow and factual on purpose; a side
+  effect must not speak through it.
+- **Never mutate STATE.** The state is the one account of what happened.
+- **The state cannot address a file on disk** — `agent-river--rel` sees to that,
+  and it must keep doing so. Two ways out, both in the heat code: look the file
+  up *from* the consumer's side by basename (what `agent-river-touching`
+  matches on), or read an extra event key the fold ignores. `:path` is that
+  key — the absolute name, carried beside `:file` and never folded.
+- **Off by default, behind a global minor mode.** Writing into buffers the user
+  did not point this at needs a consent gesture, and turning it off has to take
+  the effects with it.
+- **Test the derivation, not the rendering.** Frame choice, aggregation and
+  thresholds are pure functions of the state; geometry is the host package's
+  problem. The contract tests live under `;;; Observers` — point a new
+  observer at them.
+
+Two frames again: pick `task` or `session` scope *explicitly* (see
+`agent-river-heat-scope`) and say which one the view is showing.
 
 ### Pieces that span files or need context
 
