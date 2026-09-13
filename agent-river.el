@@ -674,27 +674,77 @@ the view renders a collision as two unrelated files."
               "s")
     (format "%dms" ms)))
 
+(defun agent-river--arg (input key)
+  "Return INPUT's KEY when it is a non-empty string, else nil.
+Guards the ladder below against a host that gives an argument another
+shape: Codex passes `command' as a vector of words, and handing that to
+a string function would throw inside the hook -- losing the whole event
+to save a few characters of a log line."
+  (let ((value (and (consp input) (alist-get key input))))
+    (and (stringp value) (not (string-empty-p value)) value)))
+
+(defun agent-river--tool-file (input)
+  "Return the file path named in tool INPUT, whichever host named it.
+Claude Code and Codex say `file_path', Gemini CLI says `absolute_path'
+for a read and `file_path' for a write, and several tools say plain
+`path'.  The artifact tables are keyed on this, so a name we did not
+know would not fail -- it would quietly stop counting files, which is
+the failure mode this whole file is written against."
+  (seq-some (lambda (key) (agent-river--arg input key))
+            '(file_path absolute_path path)))
+
 (defun agent-river--salient (input cwd)
   "Return the argument of tool INPUT worth showing, given CWD.
 Ordered most- to least-specific.  A description comes before a command
 deliberately: Bash and Task carry a human-written line saying what the
 call is for, which reads better than the shell it expands to."
-  (let ((width agent-river-detail-width))
+  (let ((width agent-river-detail-width)
+        (file (agent-river--tool-file input)))
     (cond
      ((not (consp input)) "")
-     ((alist-get 'file_path input) (agent-river--rel (alist-get 'file_path input) cwd))
-     ((alist-get 'description input)
-      (agent-river--clip (agent-river--squish (alist-get 'description input)) width))
-     ((alist-get 'command input)
-      (agent-river--clip (agent-river--squish (alist-get 'command input)) width))
-     ((alist-get 'pattern input)
-      (agent-river--clip (agent-river--squish (alist-get 'pattern input)) width))
-     ((alist-get 'code input)
-      (agent-river--clip (agent-river--squish (alist-get 'code input)) width))
-     ((alist-get 'url input) (agent-river--clip (alist-get 'url input) width))
+     (file (agent-river--rel file cwd))
+     ((agent-river--arg input 'description)
+      (agent-river--clip (agent-river--squish (agent-river--arg input 'description)) width))
+     ((agent-river--arg input 'command)
+      (agent-river--clip (agent-river--squish (agent-river--arg input 'command)) width))
+     ((agent-river--arg input 'pattern)
+      (agent-river--clip (agent-river--squish (agent-river--arg input 'pattern)) width))
+     ((agent-river--arg input 'code)
+      (agent-river--clip (agent-river--squish (agent-river--arg input 'code)) width))
+     ((agent-river--arg input 'url)
+      (agent-river--clip (agent-river--arg input 'url) width))
      ;; Keeps unknown and MCP tools legible rather than blank.
      (input (agent-river--clip (json-serialize input) width))
      (t ""))))
+
+(defun agent-river--failed-p (payload)
+  "Non-nil when PAYLOAD's tool response says the call did not succeed.
+
+Only Claude Code has a hook event of its own for a failed tool call.  On
+Codex and Gemini CLI the one post-tool event fires either way and the
+outcome sits in `tool_response', so without this the failure streak --
+the one measurement here that reads back to the agent -- could never
+rise on those hosts.
+
+Narrow on purpose.  `interrupted' is deliberately not a failure: the
+user stopped the call, and counting that would have the HUD hold being
+steered against the agent.  A tool that says nothing about its outcome
+is taken at its word."
+  (let ((response (alist-get 'tool_response payload)))
+    (and (consp response)
+         (or (alist-get 'error response)
+             (eq t (alist-get 'is_error response))
+             (eq t (alist-get 'isError response))
+             ;; `false' and "absent" both parse to nil, so the key has to be
+             ;; found before its value means anything.
+             (let ((claim (assq 'success response)))
+               (and claim (null (cdr claim))))
+             ;; Codex reports a shell failure as an exit status and nothing
+             ;; else; on the hosts that have a failure event of their own
+             ;; this key is absent, so it cannot double-count.
+             (let ((code (alist-get 'exit_code response)))
+               (and (integerp code) (/= code 0))))
+         t)))
 
 (defun agent-river--detail (kind payload)
   "Return the line KIND should show for PAYLOAD."
@@ -723,10 +773,19 @@ call is for, which reads better than the shell it expands to."
 (defun agent-river--event (kind payload)
   "Turn hook PAYLOAD into an event plist of KIND.
 Structured fields drive the fold; :detail is only a presentation hint,
-so the view does not have to re-derive which argument mattered."
+so the view does not have to re-derive which argument mattered.
+
+This is the one place that knows a host's dialect.  KIND still comes
+from the config as an argv, so the hook-event to fold-event mapping
+stays readable there; but a host without a failure event of its own
+reports one as an ordinary post-tool call, and refining KIND here is
+what keeps that from folding as a success."
   (let* ((input (alist-get 'tool_input payload))
          (cwd (or (alist-get 'cwd payload) ""))
-         (file (and (consp input) (alist-get 'file_path input))))
+         (file (agent-river--tool-file input))
+         (kind (if (and (equal kind "think") (agent-river--failed-p payload))
+                   "fail"
+                 kind)))
     (list :kind kind
           :session (or (alist-get 'session_id payload) "unknown")
           :label (file-name-nondirectory (directory-file-name cwd))
@@ -862,6 +921,215 @@ thinking text, so there is nothing else to read them from."
         (puthash id client agent-river--subscribed)))))
 
 
+;;; A second way in, for sessions no hook reaches
+;;
+;; Claude Code, Codex and Gemini CLI report themselves through hooks.  The
+;; other agents agent-shell hosts do not -- but agent-shell already reads
+;; their ACP stream, and publishes what it learns through
+;; `agent-shell-subscribe-to', which is a documented API rather than
+;; something read over its shoulder.  Three of its events carry what the
+;; fold wants: `input-submitted' the prompt, `tool-call-update' a step with
+;; its status and its raw arguments, `turn-complete' the end of the turn.
+;;
+;; So this path translates them into the payload shape the hooks report and
+;; hands that to `agent-river--event' -- the same adapter, not a second one.
+;; A file argument that path learns to count is then counted here too, and
+;; nothing downstream ever learns that a second source exists.
+;;
+;; Two things it cannot do.  It cannot talk back: a signal still reaches the
+;; buffer, but there is no `additionalContext' on a stream we only listen
+;; to.  And ACP has no notion of a subagent, so a delegated task folds as
+;; one step of its parent rather than as a session of its own.
+
+(defvar agent-river--source (make-hash-table :test 'equal)
+  "Session id -> the way in that owns it, `hooks' or `shell'.")
+
+(defun agent-river--claim (session source)
+  "Return non-nil when SOURCE may fold SESSION, claiming it if it is free.
+
+Both ways in describe the same session -- the hooks report what the CLI
+did, agent-shell reports what its ACP stream said -- so folding both
+would count every step twice.  That is not merely untidy: a doubled
+failure streak states a fact that is false, to the agent itself.
+
+The hooks win, because only they can carry an observation back.  A
+watched session that turns out to have hooks is given up whole rather
+than interleaved: what the stream folded is dropped, and the hooks build
+it again from their first event."
+  (let ((owner (gethash session agent-river--source)))
+    (cond
+     ((or (null owner) (eq owner source))
+      (puthash session source agent-river--source)
+      t)
+     ((eq source 'hooks)
+      (puthash session source agent-river--source)
+      (remhash session agent-river-registry)
+      (agent-river-log "signal" "hooks reach this session; folding those instead"
+                       (agent-river--shell-label session))
+      t))))
+
+(defvar agent-river--tool-calls (make-hash-table :test 'equal)
+  "\"SESSION\\0CALL-ID\" -> when that tool call was first seen.
+
+A tool call is announced once and then updated, so this is what keeps
+one step from being counted at every status change -- and what makes a
+duration out of two sightings, which the stream does not carry.
+
+Deliberately not a slot on `agent-river-state', for the same reason
+`agent-river--thought-runs' is not one: nothing folds it, and a reload
+would otherwise demand `agent-river-reset'.")
+
+(defun agent-river--shell-payload (call session cwd &optional ms)
+  "Return tool CALL of SESSION in the shape the hooks report, given CWD.
+MS is how long the call took, where that is known.
+
+Same shape on purpose.  `agent-river--event' is the one place that
+resolves a host's dialect, and a second event builder here would be a
+second place for a file argument to go uncounted.
+
+ACP names no tool, so the call's `kind' -- read, edit, execute and a
+handful more -- stands in for one.  Coarser than a tool name and stabler
+than the title, which is free text; the tallies want a small vocabulary,
+and the title reads better on the log line, which it reaches as a
+description when the call carries no arguments worth showing."
+  (let ((input (or (alist-get :raw-input call)
+                   (when (alist-get :title call)
+                     `((description . ,(alist-get :title call)))))))
+    (append `((session_id . ,session)
+              (cwd . ,cwd)
+              (tool_name . ,(or (alist-get :kind call) "tool"))
+              (tool_input . ,input))
+            (when ms `((duration_ms . ,ms))))))
+
+(defun agent-river--shell-events (event session cwd)
+  "Return the events agent-shell's EVENT amounts to for SESSION, given CWD.
+
+EVENT is what `agent-shell-subscribe-to' hands a subscriber.  Most
+amount to one; a tool call first seen in a terminal state amounts to
+two, because a step has to be counted before it can be reported as
+over -- which is exactly what `PreToolUse' and `PostToolUse' do."
+  (let ((data (alist-get :data event)))
+    (pcase (alist-get :event event)
+      ('input-submitted
+       (list (agent-river--event
+              "prompt" `((session_id . ,session) (cwd . ,cwd)
+                         (prompt . ,(or (alist-get :prompt data) ""))))))
+      ('turn-complete
+       ;; Nothing outlives the turn it was called in, so a call that never
+       ;; reported an end is dropped here rather than kept for ever.
+       (agent-river--forget-tool-calls session)
+       (list (agent-river--event
+              "idle" `((session_id . ,session) (cwd . ,cwd)))))
+      ('tool-call-update
+       (let* ((call (alist-get :tool-call data))
+              (key (format "%s\0%s" session (alist-get :tool-call-id data)))
+              (started (gethash key agent-river--tool-calls))
+              (ended (pcase (alist-get :status call)
+                       ("completed" "think")
+                       ("failed" "fail")))
+              events)
+         (unless started
+           (setq started (current-time))
+           (puthash key started agent-river--tool-calls)
+           (push (agent-river--event
+                  "act" (agent-river--shell-payload call session cwd))
+                 events))
+         (when ended
+           (remhash key agent-river--tool-calls)
+           (push (agent-river--event
+                  ended (agent-river--shell-payload
+                         call session cwd
+                         (round (* 1000 (float-time
+                                         (time-subtract (current-time)
+                                                        started))))))
+                 events))
+         (nreverse events))))))
+
+(defun agent-river--forget-tool-calls (session)
+  "Drop what is remembered about SESSION's tool calls in flight."
+  (let (stale)
+    (maphash (lambda (key _)
+               (when (string-prefix-p (concat session "\0") key)
+                 (push key stale)))
+             agent-river--tool-calls)
+    (mapc (lambda (key) (remhash key agent-river--tool-calls)) stale)))
+
+(defun agent-river--shell-session ()
+  "Return the ACP session id of the agent-shell buffer, or nil.
+Read per event rather than once at subscription: a shell buffer exists
+before its session does."
+  (and (agent-river--shell-buffer-p)
+       (alist-get :id (alist-get :session (bound-and-true-p agent-shell--state)))))
+
+(defun agent-river--shell-observe (event)
+  "Fold agent-shell's EVENT for the session of the current buffer."
+  (let ((session (agent-river--shell-session)))
+    (when (and session (agent-river--claim session 'shell))
+      (dolist (one (agent-river--shell-events
+                    event session (directory-file-name
+                                   (expand-file-name default-directory))))
+        (agent-river-observe one)))))
+
+(defvar-local agent-river--watching nil
+  "This buffer's agent-shell subscription token, while it is watched.")
+
+;;;###autoload
+(defun agent-river-watch-shell (&optional buffer)
+  "Fold BUFFER's agent-shell session from the stream agent-shell reads.
+
+For the agents whose hooks are not wired to `agent-river-hook.sh'.  A
+session that does run hooks needs nothing: they take it over on their
+first event, and this path lets them (`agent-river--claim').
+
+Idempotent, and a no-op outside an agent-shell buffer."
+  (interactive)
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and (agent-river--shell-buffer-p)
+               (null agent-river--watching)
+               (fboundp 'agent-shell-subscribe-to))
+      (let ((shell (current-buffer)))
+        (setq agent-river--watching
+              (agent-shell-subscribe-to
+               :shell-buffer shell
+               :on-event
+               (lambda (event)
+                 ;; Never let the HUD break the shell it rides on -- but
+                 ;; never go quiet either.
+                 (condition-case err
+                     (with-current-buffer shell
+                       (agent-river--shell-observe event))
+                   (error
+                    (ignore-errors
+                      (agent-river-log
+                       "fail" (format "shell fold failed: %s"
+                                      (error-message-string err)))))))))))))
+
+;;;###autoload
+(defun agent-river-unwatch-shell (&optional buffer)
+  "Stop folding BUFFER's agent-shell session from the stream."
+  (interactive)
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and agent-river--watching (fboundp 'agent-shell-unsubscribe))
+      (agent-shell-unsubscribe :subscription agent-river--watching)
+      (setq agent-river--watching nil))))
+
+;;;###autoload
+(define-minor-mode agent-river-watch-mode
+  "Fold every agent-shell session from the stream, hooks or no hooks.
+
+What to turn on when the agent has no hook wiring at all.  Sessions that
+do report through hooks are unaffected: the hooks own them, so this only
+ever supplies the sessions the first way in cannot reach."
+  :global t
+  :group 'agent-river
+  (if agent-river-watch-mode
+      (progn
+        (add-hook 'agent-shell-mode-hook #'agent-river-watch-shell)
+        (mapc #'agent-river-watch-shell (buffer-list)))
+    (remove-hook 'agent-shell-mode-hook #'agent-river-watch-shell)
+    (mapc #'agent-river-unwatch-shell (buffer-list))))
+
+
 ;;; Entry points -- how state gets in
 ;;
 ;; Two ways: the hooks report what happened, and the agent can state what it
@@ -991,9 +1259,14 @@ IN-FILE is deleted afterwards, whatever happens."
                            (json-parse-buffer :object-type 'alist
                                               :null-object nil
                                               :false-object nil))))
-            (let ((signal (agent-river-observe (agent-river--event kind payload)))
-                  (event (alist-get 'hook_event_name payload)))
-              (when (and signal event)
+            (let* ((event (agent-river--event kind payload))
+                   ;; The hooks own whatever session they report on, taking
+                   ;; it back from the stream if it was being watched -- a
+                   ;; session folded from both would count every step twice.
+                   (_ (agent-river--claim (plist-get event :session) 'hooks))
+                   (signal (agent-river-observe event))
+                   (name (alist-get 'hook_event_name payload)))
+              (when (and signal name)
                 (with-temp-file out-file
                   (insert (json-serialize
                            `((hookSpecificOutput
@@ -1428,6 +1701,13 @@ half that also folds."
   "Forget all folded state.  The buffer is left alone."
   (interactive)
   (clrhash agent-river-registry)
+  ;; Which way in owns a session, and which tool calls are in flight, are
+  ;; state about the same sessions: left behind, they would have the fold
+  ;; start again while ownership and half-timed calls referred to states
+  ;; that no longer exist.  The subscriptions themselves survive -- they
+  ;; belong to buffers, not to what was folded out of them.
+  (clrhash agent-river--source)
+  (clrhash agent-river--tool-calls)
   (agent-river--stop-timer))
 
 ;;;###autoload

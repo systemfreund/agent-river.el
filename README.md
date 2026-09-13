@@ -19,8 +19,9 @@ two consumers, and they want different things.
 ## Requirements
 
 Emacs 28.1 or later with native JSON, a running Emacs server
-(`M-x server-start`), and Claude Code. No external tools: the shell bridge
-only moves bytes.
+(`M-x server-start`), and Claude Code — or Codex or Gemini CLI, whose hooks
+are close enough to wire up the same bridge. No external tools: the shell
+bridge only moves bytes.
 
 [`agent-shell`](https://github.com/xenodium/agent-shell) is optional for the
 HUD and required for the `◇` lines. When it hosts the sessions, agent-river
@@ -56,6 +57,49 @@ Two details in that example are load-bearing rather than cosmetic:
 
 Nothing needs loading in advance: the first hook call loads the Elisp
 itself, and does so again after an Emacs restart.
+
+### Other hosts: Codex and Gemini CLI
+
+Both run hooks the same way Claude Code does — an external command, the
+payload as JSON on stdin, the answer as JSON on stdout — and both read an
+observation back out of `hookSpecificOutput.additionalContext`, in exactly
+Claude's shape. `session_id`, `cwd`, `tool_name`, `tool_input`,
+`tool_response` and `prompt` all carry the same names. So the bridge and the
+response side are unchanged; only the wiring differs, and
+`codex-hooks.json` and `gemini-settings.json` in this repo are the two
+examples. Codex needs `[features] codex_hooks = true` in
+`~/.codex/config.toml`.
+
+Three differences are real, and two of them are handled in
+`agent-river--event` — the one function that knows a host's dialect:
+
+- **Neither has a failure event.** One post-tool event fires whether the
+  call worked or not, and the outcome sits in `tool_response`. So a `think`
+  whose response carries `error`, `is_error`, `isError`, `success: false`
+  or a non-zero `exit_code` is refined to `fail` before it is folded —
+  otherwise the failure streak, the one measurement that reads back to the
+  agent, could never rise on these hosts. `interrupted` stays a success on
+  purpose: the user stopped that call.
+
+  This is why their post-tool hook must be **synchronous** where Claude's
+  can be async. It is now the event that can produce a signal.
+- **Gemini CLI names a read's argument `absolute_path`**, not `file_path`.
+  Unknown to `agent-river--tool-file`, that would not have failed — it
+  would have quietly stopped counting files.
+- **Codex subagents fold into their parent.** `agent_id` rides
+  `SubagentStart` and `SubagentStop` but not the tool events between them,
+  and those carry the parent's `session_id`. `agent-river-key` therefore
+  cannot separate them the way it does on Claude Code: a Codex subagent's
+  steps and failures are counted against its parent. Documented rather than
+  guessed around — a key invented from `turn_id` would split a parent's own
+  work instead.
+
+Gemini CLI has no subagent hooks at all, so its wiring is four events, not
+six: `BeforeAgent`, `BeforeTool`, `AfterTool`, `AfterAgent`.
+
+Both configurations are written from the hosts' documentation and are
+covered by tests at the payload level, but have not been run against a live
+Codex or Gemini session.
 
 ## What you see
 
@@ -402,12 +446,15 @@ emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 
-89 tests covering the state transitions, streak accounting, signal
+121 tests covering the state transitions, streak accounting, signal
 threshold and throttle, the phase, subagent isolation, the registry and its
 TTL, the cross-session `touching` query, the reasoning stream — chunk
 accumulation, the sentence boundary, which path serves a hosted session —
-and the payload derivation: which argument of a call is the interesting
-one, how a duration is formatted, what counts as an interrupted call.
+the payload derivation: which argument of a call is the interesting one, how
+a duration is formatted, what counts as an interrupted call, what a host
+other than Claude Code calls a file and how it reports a failure — and the
+second way in: one step per tool call however often it is updated, and the
+hooks taking a watched session over.
 
 Verified to actually fail rather than merely pass: mutating the streak
 reset in a scratch copy turns exactly the two responsible tests red, and
@@ -515,4 +562,69 @@ one, so every step degrades to a no-op — no Emacs server, unreadable
 payload, no `mktemp`. But a payload that reaches Emacs and then fails to
 parse writes a `hook failed` line into the buffer rather than going quiet:
 silence is how this has broken before, three times.
+
+## A second way in, for sessions no hook reaches
+
+Claude Code, Codex and Gemini CLI report themselves through hooks. The other
+agents agent-shell hosts — Goose, Qwen Code, opencode, Cursor, whatever it
+grows next — do not. But agent-shell is already reading their ACP stream,
+and it publishes what it learns:
+
+```elisp
+(agent-river-watch-mode 1)          ; every agent-shell session
+(agent-river-watch-shell)           ; or just this buffer
+```
+
+`agent-shell-subscribe-to` is a documented API rather than something read
+over agent-shell's shoulder, and three of its events carry what the fold
+wants:
+
+| agent-shell event  | Kind             | Carries                                    |
+|--------------------|------------------|--------------------------------------------|
+| `input-submitted`  | `prompt`         | the prompt text                            |
+| `tool-call-update` | `act`/`think`/`fail` | status, kind, title, `rawInput`        |
+| `turn-complete`    | `idle`           | the stop reason                            |
+
+The translation is deliberately shallow: it builds the *same payload shape
+the hooks report* and hands that to `agent-river--event`, the one function
+that resolves a host's dialect. So a file argument that path learns to count
+is counted here too — `agent-river--tool-file`, written for Gemini's
+`absolute_path`, reads ACP's `rawInput` unchanged — and nothing downstream
+learns that a second source exists.
+
+Three differences from the hook path are worth knowing:
+
+- **A step is counted once, and timed here.** A tool call is announced and
+  then updated, so the first sighting is the `act` and the terminal status
+  is the `think` or the `fail`; the updates between them are not steps. ACP
+  carries no duration, so the two sightings supply one — which is how the
+  `·` lines keep their timings.
+- **The failure is the protocol's, not a guess.** `status: "failed"` says
+  so outright, where Codex and Gemini leave it to be read out of a tool
+  response.
+- **A tool has no name, only a kind.** ACP gives `read`, `edit`, `execute`
+  and a handful more, plus a free-text title. The tallies use the kind,
+  because they want a small stable vocabulary; the title reaches the log
+  line through the same `description` slot a `Bash` call's would.
+
+### One session, one source
+
+A session folded from both would count every step twice. That is not merely
+untidy: a doubled failure streak states a fact that is false, to the agent
+itself.
+
+So a session belongs to whichever way in claimed it, and **the hooks win** —
+they are the only ones that can carry an observation back. A watched session
+that turns out to have hooks is given up whole rather than interleaved: what
+the stream folded is dropped, the hooks rebuild it from their first event,
+and the buffer says so once. `agent-river-watch-mode` is therefore safe to
+leave on; it only ever supplies the sessions the first way in cannot reach.
+
+What this path cannot do, and will not learn to:
+
+- **Talk back.** A signal still reaches the buffer, but there is no
+  `additionalContext` on a stream we only listen to.
+- **Tell a subagent apart.** ACP has no notion of one, so a delegated task
+  folds as a single step of its parent — `agent-river-key` has nothing to
+  key on.
 

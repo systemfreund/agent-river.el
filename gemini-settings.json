@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" prompt",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" act",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" think",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" idle",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -11,13 +11,13 @@ it explains the reasoning behind nearly every decision here and is worth reading
 before changing behaviour.
 
 Four files, no build system: `agent-river.el` (everything), `agent-river-tests.el`
-(ERT), `agent-river-hook.sh` (the bridge), `claude-settings.json` (example hook
-wiring).
+(ERT), `agent-river-hook.sh` (the bridge), and one example hook wiring per host —
+`claude-settings.json`, `codex-hooks.json`, `gemini-settings.json`.
 
 ## Commands
 
 ```sh
-# Full suite (110 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (121 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -52,9 +52,10 @@ a restart — but restart Claude Code if the hooks stay silent.
 The data path, one hook event end to end:
 
 ```
-Claude Code hook
-  → agent-river-hook.sh <kind>        payload in a temp file, response in another
-  → agent-river-hook (kind in out)    parses JSON, writes additionalContext back
+Claude Code hook                     agent-shell event (no hooks wired)
+  → agent-river-hook.sh <kind>         → agent-river--shell-observe
+  → agent-river-hook (kind in out)     → agent-river--shell-events
+  ↓                                    → agent-river--shell-payload
   → agent-river--event                payload alist → event plist
   → agent-river-observe               addresses the state, folds, renders, signals
   → agent-river-fold                  pure state transition
@@ -62,9 +63,23 @@ Claude Code hook
   → agent-river--update-panel / agent-river-log     the view
 ```
 
+Two ways in, one adapter. The right-hand column exists for the agents
+agent-shell hosts that have no hooks; it translates into the payload shape the
+hooks report rather than building events of its own, so everything from
+`agent-river--event` down is shared. Only the hooks can answer the agent —
+the stream is listened to, not spoken on.
+
 `kind` (`prompt` `act` `think` `fail` `done` `idle`) is passed as an argv from
 settings.json, not read out of the payload, so the hook-event → fold-event mapping
-stays visible in the config.
+stays visible in the config. `agent-river--event` may *refine* it — a `think`
+whose `tool_response` reports an error becomes a `fail`, since only Claude Code
+has a failure event of its own — but it never invents one from scratch.
+
+`agent-river--event` is also the only function that knows a host's dialect:
+`agent-river--tool-file` for the several names a file argument goes by, and
+`agent-river--arg` because an argument may not even be a string (Codex passes
+`command` as a vector). Everything downstream sees one shape. See the README
+section on Codex and Gemini CLI for what else differs.
 
 **The shell script only moves bytes.** It does no parsing and has no `jq`
 dependency. Both directions go through files so no tool argument is ever
@@ -104,10 +119,12 @@ These are load-bearing; the tests enforce most of them.
   docstring promises a state can be rebuilt by replaying its events; a second
   writer puts transitions in the state that no event accounts for, and the
   promise stops being true without anything failing.
-- **`PreToolUse` and `PostToolUseFailure` must not set `"async": true`.** An async
+- **Whatever hook can produce a signal must not set `"async": true`.** An async
   hook's stdout is never read, so only a synchronous hook can inject
   `additionalContext`; and a synchronous `act` orders its log line before its own
-  `PostToolUse` line rather than racing it.
+  `PostToolUse` line rather than racing it. On Claude Code that means `PreToolUse`
+  and `PostToolUseFailure`; on Codex and Gemini CLI the post-tool hook joins them,
+  because there it is the event a `fail` is refined out of.
 - **Never fail a tool call over the HUD, but never go quiet either.** Every step in
   the script degrades to a no-op; a payload that reaches Emacs and then throws
   writes a `hook failed` / `fold failed` line into the buffer. Silent failure is
@@ -116,6 +133,19 @@ These are load-bearing; the tests enforce most of them.
   the session cwd when under it, bare basename otherwise. Stripping only the
   session's own cwd makes one file reached from a worktree and from the main
   checkout render as two, which defeats the contention query.
+- **One session, one way in** (`agent-river--claim`). The hooks and the
+  agent-shell stream describe the same session, so folding both counts every
+  step twice — and a doubled failure streak states a fact that is false, to the
+  agent itself. The hooks win, because only they can carry an observation back;
+  a watched session they reach is dropped from the registry and rebuilt from
+  their first event, rather than interleaved. This is what makes
+  `agent-river-watch-mode` safe to leave on.
+- **The stream path builds payloads, not events** (`agent-river--shell-payload`).
+  It goes through `agent-river--event` like everything else, so there is one
+  place where a file argument can go uncounted rather than two. A tool call is
+  counted on its first sighting and reported on its terminal status;
+  `agent-river--tool-calls` is what keeps the updates between them from
+  counting again, and what supplies the duration ACP does not carry.
 
 ### Adding a side-effect consumer
 

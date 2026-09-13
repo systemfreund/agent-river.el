@@ -586,6 +586,71 @@
     (should-not (plist-get event :agent))
     (should-not (plist-get event :file))))
 
+
+;;; Reading the hook payload of another host
+
+(ert-deftest agent-river-test-the-file-is-found-whatever-the-host-names-it ()
+  ;; Gemini CLI's read_file says `absolute_path' and other tools say plain
+  ;; `path'.  A name we did not know would not fail -- it would stop
+  ;; counting files, which is the failure that must not be silent.
+  (should (equal (plist-get
+                  (agent-river--event
+                   "act" (agent-river-test--payload
+                          "{\"cwd\":\"/repo\",\"tool_name\":\"read_file\",\"tool_input\":{\"absolute_path\":\"/repo/a.el\"}}"))
+                  :file)
+                 "a.el"))
+  (should (equal (plist-get
+                  (agent-river--event
+                   "act" (agent-river-test--payload
+                          "{\"cwd\":\"/repo\",\"tool_name\":\"read\",\"tool_input\":{\"path\":\"/repo/b.el\"}}"))
+                  :file)
+                 "b.el"))
+  ;; An empty string is not a path; it used to reach `--rel' as one.
+  (should-not (plist-get
+               (agent-river--event
+                "act" (agent-river-test--payload
+                       "{\"cwd\":\"/repo\",\"tool_input\":{\"file_path\":\"\"}}"))
+               :file)))
+
+(ert-deftest agent-river-test-a-failure-folds-as-one-without-its-own-event ()
+  ;; Codex and Gemini CLI have no `PostToolUseFailure': the one post-tool
+  ;; event fires either way, so the outcome has to be read off the
+  ;; response or the failure streak never rises on those hosts.
+  (dolist (response '("{\"error\":\"no such file\"}"
+                      "{\"is_error\":true}"
+                      "{\"isError\":true}"
+                      "{\"success\":false}"
+                      "{\"exit_code\":2}"))
+    (should (equal (plist-get
+                    (agent-river--event
+                     "think" (agent-river-test--payload
+                              (format "{\"tool_name\":\"shell\",\"tool_response\":%s}"
+                                      response)))
+                    :kind)
+                   "fail")))
+  ;; A call the user stopped is not the agent failing, and a tool that
+  ;; says nothing about its outcome is taken at its word.
+  (dolist (response '("{\"interrupted\":true}"
+                      "{\"success\":true}"
+                      "{\"exit_code\":0}"
+                      "{\"stdout\":\"ok\"}"))
+    (should (equal (plist-get
+                    (agent-river--event
+                     "think" (agent-river-test--payload
+                              (format "{\"tool_name\":\"shell\",\"tool_response\":%s}"
+                                      response)))
+                    :kind)
+                   "think"))))
+
+(ert-deftest agent-river-test-an-argument-of-another-shape-does-not-throw ()
+  ;; Codex passes `command' as a vector of words.  Handing that to a
+  ;; string function threw inside the hook, which cost the whole event to
+  ;; save a few characters of a log line.
+  (should (equal (agent-river--detail
+                  "act" (agent-river-test--payload
+                         "{\"tool_name\":\"shell\",\"tool_input\":{\"command\":[\"make\",\"test\"]}}"))
+                 "shell  {\"command\":[\"make\",\"test\"]}")))
+
 (ert-deftest agent-river-test-hook-folds-and-answers ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil)
@@ -1075,6 +1140,119 @@ leaves it nil, which is what an unhosted session looks like."
   (should-not (agent-river--thought-chunk (agent-river-test--update "tool_call")))
   (should-not (agent-river--thought-chunk '((params . nil))))
   (should-not (agent-river--thought-chunk nil)))
+
+
+;;; Folded from the stream instead of from hooks
+
+(defmacro agent-river-test--with-watch (&rest body)
+  "Run BODY against an empty HUD, with fresh ownership and call tables."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river--tool-calls (make-hash-table :test 'equal))
+         (agent-river--source (make-hash-table :test 'equal))
+         (agent-river-auto-display nil))
+     (agent-river-clear)
+     ,@body))
+
+(defun agent-river-test--tool-call (id status &rest call)
+  "Return the `tool-call-update' agent-shell publishes for ID in STATUS.
+CALL overrides fields of the tool call record."
+  `((:event . tool-call-update)
+    (:data . ((:tool-call-id . ,id)
+              (:tool-call . ,(append call `((:status . ,status)
+                                            (:kind . "read")
+                                            (:title . "Read a.el"))))))))
+
+(defun agent-river-test--kinds (events)
+  "Return the kinds of EVENTS, in order."
+  (mapcar (lambda (event) (plist-get event :kind)) events))
+
+(ert-deftest agent-river-test-a-tool-call-is-one-step-however-often-it-is-updated ()
+  (agent-river-test--with-watch
+    (should (equal (agent-river-test--kinds
+                    (agent-river--shell-events
+                     (agent-river-test--tool-call "c1" "pending") "s1" "/repo"))
+                   '("act")))
+    ;; A status change is not a second step: the call was announced once,
+    ;; and the stream then updates that same announcement.
+    (should-not (agent-river--shell-events
+                 (agent-river-test--tool-call "c1" "in_progress") "s1" "/repo"))
+    (let ((done (agent-river--shell-events
+                 (agent-river-test--tool-call "c1" "completed") "s1" "/repo")))
+      (should (equal (agent-river-test--kinds done) '("think")))
+      ;; ACP carries no duration, so the two sightings supply it.
+      (should (integerp (plist-get (car done) :ms))))))
+
+(ert-deftest agent-river-test-a-call-first-seen-finished-is-still-counted ()
+  (agent-river-test--with-watch
+    ;; A step has to be counted before it can be reported as over, which is
+    ;; what the two hook events do between them.
+    (should (equal (agent-river-test--kinds
+                    (agent-river--shell-events
+                     (agent-river-test--tool-call "c1" "completed") "s1" "/repo"))
+                   '("act" "think")))))
+
+(ert-deftest agent-river-test-a-failure-comes-off-the-status ()
+  (agent-river-test--with-watch
+    ;; No guessing from the response here: the protocol says `failed'.
+    (should (equal (agent-river-test--kinds
+                    (agent-river--shell-events
+                     (agent-river-test--tool-call "c1" "failed") "s1" "/repo"))
+                   '("act" "fail")))))
+
+(ert-deftest agent-river-test-the-stream-reads-the-fields-the-hooks-do ()
+  (agent-river-test--with-watch
+    (let ((event (car (agent-river--shell-events
+                       (agent-river-test--tool-call
+                        "c1" "pending" '(:raw-input . ((file_path . "/repo/a.el"))))
+                       "s1" "/repo"))))
+      ;; Through the same adapter: normalised against the session's cwd,
+      ;; and tallied under the call's kind, since ACP names no tool.
+      (should (equal (plist-get event :file) "a.el"))
+      (should (equal (plist-get event :tool) "read"))
+      (should (equal (plist-get event :detail) "read  a.el")))))
+
+(ert-deftest agent-river-test-a-call-without-arguments-shows-its-title ()
+  (agent-river-test--with-watch
+    (should (equal (plist-get (car (agent-river--shell-events
+                                    (agent-river-test--tool-call "c1" "pending")
+                                    "s1" "/repo"))
+                              :detail)
+                   "read  Read a.el"))))
+
+(ert-deftest agent-river-test-a-turn-ends-the-calls-it-started ()
+  (agent-river-test--with-watch
+    (agent-river--shell-events (agent-river-test--tool-call "c1" "pending") "s1" "/repo")
+    (agent-river--shell-events (agent-river-test--tool-call "c2" "pending") "s2" "/repo")
+    (should (equal (agent-river-test--kinds
+                    (agent-river--shell-events '((:event . turn-complete)) "s1" "/repo"))
+                   '("idle")))
+    ;; A call that never reported an end does not outlive its turn -- but
+    ;; another session's calls are none of this turn's business.
+    (should (= (hash-table-count agent-river--tool-calls) 1))))
+
+(ert-deftest agent-river-test-the-stream-carries-the-prompt ()
+  (agent-river-test--with-watch
+    (let ((event (car (agent-river--shell-events
+                       '((:event . input-submitted) (:data . ((:prompt . "do the thing"))))
+                       "s1" "/repo"))))
+      (should (equal (plist-get event :kind) "prompt"))
+      (should (equal (plist-get event :text) "do the thing")))))
+
+(ert-deftest agent-river-test-hooks-take-a-watched-session-over ()
+  (agent-river-test--with-watch
+    (should (agent-river--claim "s1" 'shell))
+    (agent-river-observe '(:kind "act" :session "s1" :tool "read" :detail "read"))
+    (should (gethash "s1" agent-river-registry))
+    ;; The hooks win: they are the only way in that can carry an
+    ;; observation back.  What the stream folded is dropped whole rather
+    ;; than interleaved -- every step would otherwise be counted twice,
+    ;; and a doubled failure streak states a fact that is false.
+    (should (agent-river--claim "s1" 'hooks))
+    (should-not (gethash "s1" agent-river-registry))
+    (should-not (agent-river--claim "s1" 'shell))
+    ;; Going quiet about it is how this has broken before.
+    (should (string-match-p "hooks reach this session" (agent-river-test--hud)))))
 
 
 ;;; Observers -- the side-effect contract

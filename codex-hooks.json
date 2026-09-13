@@ -1,0 +1,62 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" prompt",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" act",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" think",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" done",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" idle",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
