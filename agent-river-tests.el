@@ -230,9 +230,13 @@
     (let ((lines (split-string (substring-no-properties
                                 (agent-river--panel-block))
                                "\n" t)))
-      ;; One line per session, then the rule dividing block from log.
+      ;; One line per session heading, then the eventlog heading dividing
+      ;; block from log.
       (should (= (length lines) 3))
-      (should (string-prefix-p "──" (nth 2 lines)))
+      (should (string-prefix-p "* -- eventlog" (nth 2 lines)))
+      ;; Every block line is an outline heading (`* ' at column zero).
+      (should (string-prefix-p "* " (nth 0 lines)))
+      (should (string-prefix-p "* " (nth 1 lines)))
       ;; Same directory, so the labels would otherwise be identical and the
       ;; two agents indistinguishable.
       (should (string-match-p "repo<2>" (nth 1 lines))))))
@@ -257,9 +261,10 @@
     (with-current-buffer (agent-river--buffer)
       (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
              (lines (split-string text "\n" t)))
-        ;; State block on top, then the log newest-first underneath.
+        ;; State block on top, then the eventlog heading, then the log
+        ;; newest-first underneath.
         (should (string-match-p "repo" (nth 0 lines)))
-        (should (string-prefix-p "──" (nth 1 lines)))
+        (should (string-prefix-p "* -- eventlog" (nth 1 lines)))
         (should (string-match-p "second" (nth 2 lines)))
         (should (string-match-p "first" (nth 3 lines)))))))
 
@@ -285,10 +290,26 @@
     (with-current-buffer (agent-river--buffer)
       (let ((text (buffer-substring-no-properties (point-min) (point-max))))
         ;; One block at the foot, however many events went through -- the
-        ;; separator is what would multiply if it were appended each time.
+        ;; eventlog heading is what would multiply if it were appended each
+        ;; time.
         (should (= 1 (length (seq-filter
-                              (lambda (line) (string-prefix-p "──" line))
+                              (lambda (line) (string-prefix-p "* -- eventlog" line))
                               (split-string text "\n")))))))))
+
+(ert-deftest agent-river-test-block-doubles-as-an-outline ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo" :detail "Read"))
+    (with-current-buffer (agent-river--buffer)
+      ;; TAB folds the log away and leaves just the state: the block lines
+      ;; are level-1 headings and the eventlog heading starts the one
+      ;; subtree worth hiding.  The fold lives in overlays, so a later
+      ;; redraw unfolds it again -- that is accepted, not a bug.
+      (should (bound-and-true-p outline-minor-mode))
+      (should (eq (lookup-key agent-river-mode-map (kbd "TAB")) #'outline-cycle))
+      (should (string-prefix-p
+               "* repo"
+               (buffer-substring-no-properties (point-min) (line-end-position)))))))
 
 (ert-deftest agent-river-test-hottest-needs-more-than-one-touch ()
   (agent-river-test--with-session state

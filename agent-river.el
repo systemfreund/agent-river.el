@@ -44,6 +44,7 @@
 
 (require 'cl-lib)
 (require 'seq)
+(require 'outline)
 
 (defgroup agent-river nil
   "Folded focus state for a coding-agent session."
@@ -1616,12 +1617,25 @@ and through the main checkout counts as one artifact."
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
   (setq-local wrap-prefix (make-string 11 ?\s))
+  ;; The block doubles as an outline: every session line and the eventlog
+  ;; divider are level-1 headings, so `outline-cycle' (TAB) can fold the log
+  ;; away and leave just the state.  The fold is for looking, not state: it
+  ;; lives in overlays, and the block is erased and rebuilt on every fold,
+  ;; so the next event naturally unfolds it again.
+  (setq-local outline-regexp "^\\*+ ")
+  (outline-minor-mode 1)
   ;; Explicitly none: the state used to live here, and a value left behind
   ;; by an older version of this file would sit frozen at the top of the
   ;; buffer, showing a step count and an elapsed time from whenever it was
   ;; last written.
   (setq-local header-line-format nil)
   (buffer-disable-undo))
+
+;; `outline-minor-mode-cycle' binds TAB only when the user opted in, so the
+;; heading navigation has to be on the mode's own map to be there at all.
+;; Only `* -- eventlog' has a subtree worth hiding, so folding the session
+;; headings is harmless noise rather than a problem.
+(define-key agent-river-mode-map (kbd "TAB") #'outline-cycle)
 
 (defun agent-river--panel (state)
   "Return the header-line summary of STATE.
@@ -1676,8 +1690,13 @@ question an onlooker actually has."
                                'face 'agent-river-fail))
                  (when (> running 0)
                    (format "%d subagent%s" running (if (= running 1) "" "s")))))))
+    ;; The `* ' at column zero makes the line an outline heading, so outline
+    ;; navigation and `outline-cycle' (TAB) can treat the block as a
+    ;; document.  It stays inside the make-visitable call so the whole line,
+    ;; star included, is the visitable region: pressing RET on the star must
+    ;; still jump to the session.
     (agent-river--make-visitable
-     (concat " " (mapconcat #'identity parts " · "))
+     (concat "* " (mapconcat #'identity parts " · "))
      (agent-river-state-id state))))
 
 (defvar agent-river-session-line-map
@@ -1713,7 +1732,8 @@ EVENT is the mouse event, when invoked from one."
      (t (pop-to-buffer buffer)))))
 
 (defun agent-river--panel-block ()
-  "Return one panel line per live session, newest state first.
+  "Return one panel line per live session, newest state first,
+closed by the `* -- eventlog' heading that starts the log.
 
 Lives at the foot of the log rather than in the header line, because a
 header line is structurally single-line: with two sessions it could only
@@ -1735,7 +1755,10 @@ with nothing to say they were different agents."
                   (sort lines (lambda (a b) (string< (car a) (car b))))
                   "\n")
        "\n"
-       (propertize (make-string 30 ?─) 'face 'agent-river-time)))))
+       ;; The block's closing line is itself a heading, so the log
+       ;; underneath reads as its subtree: TAB folds the log away and
+       ;; leaves just the state.
+       (propertize "* -- eventlog" 'face 'agent-river-time)))))
 
 (defun agent-river--update-panel (state)
   "Note STATE as the session that last acted, for `agent-river-set-intent'.

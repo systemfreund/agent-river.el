@@ -133,13 +133,19 @@ session, rewritten on every fold — and the log runs underneath it **newest
 first**:
 
 ```
- supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
- supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
-──────────────────────────────
+* supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
+* supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
+* -- eventlog
 19:07:03 super<2> ▸ Edit supersonic-mpv.el
 19:07:01 superson · Read ✓  2ms
 19:06:58 superson ▸ Read  Cask
 ```
+
+Each block line is an outline heading, and `* -- eventlog` is the heading
+whose subtree the log is, so `TAB` (`outline-cycle`) folds the log away and
+leaves just the state.  The fold is for looking, not state: it lives in
+overlays, and the block is rebuilt on every fold, so the next event unfolds
+it again.
 
 A scrolling log shows activity. Only the block answers what is being worked
 on right now, which is the question an onlooker actually has — and the
