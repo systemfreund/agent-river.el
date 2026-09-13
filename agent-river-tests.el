@@ -306,10 +306,40 @@
       ;; subtree worth hiding.  The fold lives in overlays, so a later
       ;; redraw unfolds it again -- that is accepted, not a bug.
       (should (bound-and-true-p outline-minor-mode))
-      (should (eq (lookup-key agent-river-mode-map (kbd "TAB")) #'outline-cycle))
+      (should (eq (lookup-key agent-river-mode-map (kbd "TAB"))
+                  #'agent-river-toggle-at-point))
       (should (string-prefix-p
                "* repo"
                (buffer-substring-no-properties (point-min) (line-end-position)))))))
+
+(ert-deftest agent-river-test-details-are-folded-until-asked ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :file "a.el" :detail "Edit"))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :file "b.el" :detail "Edit"))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :file "b.el" :detail "Edit"))
+    ;; Collapsed by default: the header is the whole session line, and the
+    ;; block is exactly one line per session plus the eventlog heading.
+    (let ((block (substring-no-properties (agent-river--panel-block))))
+      (should-not (string-match-p "hottest" block))
+      (should-not (string-match-p "files:" block))
+      (should (= 2 (length (split-string block "\n" t)))))
+    (with-current-buffer (agent-river--buffer)
+      (agent-river-toggle-details)
+      (let ((block (substring-no-properties (agent-river--panel-block))))
+        ;; Unfolded, the same measurement at a finer grain: the whole list,
+        ;; most-touched first.  The header's parenthetical is its head, so
+        ;; a separate `hottest' heading would only repeat it.
+        (should (string-match-p "\\*\\* files: b\\.el 2 · a\\.el 1" block))
+        (should-not (string-match-p "hottest" block))
+        ;; And it folds back.
+        (agent-river-toggle-details)
+        (should-not (string-match-p "files:"
+                                    (substring-no-properties
+                                     (agent-river--panel-block))))))))
 
 (ert-deftest agent-river-test-hottest-needs-more-than-one-touch ()
   (agent-river-test--with-session state

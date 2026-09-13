@@ -116,6 +116,12 @@ tool call does not repaint the panel."
   "How much of the current task or intent the session line shows."
   :type 'integer)
 
+(defcustom agent-river-panel-detail-files 8
+  "How many artifacts a session's unfolded `files' heading lists.
+The list is ordered by touch count, so the tail is the least interesting;
+an ellipsis marks the files that were left off."
+  :type 'integer)
+
 (defcustom agent-river-phase-blocked-threshold 2
   "Consecutive failures that make the phase read as blocked.
 Lower than the threshold for telling the agent: an onlooker may see a
@@ -1643,11 +1649,50 @@ and through the main checkout counts as one artifact."
   (setq-local header-line-format nil)
   (buffer-disable-undo))
 
-;; `outline-minor-mode-cycle' binds TAB only when the user opted in, so the
-;; heading navigation has to be on the mode's own map to be there at all.
-;; Only `* -- eventlog' has a subtree worth hiding, so folding the session
-;; headings is harmless noise rather than a problem.
-(define-key agent-river-mode-map (kbd "TAB") #'outline-cycle)
+(defvar-local agent-river--panel-expanded nil
+  "When non-nil, the block unfolds each session's detail headings.
+
+Kept as a buffer-local flag rather than left to outline overlay visibility,
+because the block is erased and rebuilt on every event: an overlay fold
+would spring open on the next tool call.  A flag means the block is simply
+rendered already open, so the fold survives as long as the user wants it.")
+
+(defun agent-river--artifact-list (state &optional scope)
+  "Return STATE's artifacts as (NAME . TOUCHES), most-touched first.
+
+NAME is the bare basename, summed the way `agent-river-touching' matches,
+so a file reached from a worktree and from the main checkout counts once.
+SCOPE is `session' for the whole session, nil for the current task."
+  (let ((totals (make-hash-table :test 'equal)))
+    (maphash (lambda (path entry)
+               (let ((name (file-name-nondirectory path)))
+                 (puthash name (+ (gethash name totals 0)
+                                  (or (plist-get entry :touches) 0))
+                          totals)))
+             (if (eq scope 'session)
+                 (agent-river-state-artifacts state)
+               (agent-river-state-task-artifacts state)))
+    (let (pairs)
+      (maphash (lambda (name n) (push (cons name n) pairs)) totals)
+      (sort pairs (lambda (a b) (> (cdr a) (cdr b)))))))
+
+(defun agent-river--panel-details (state)
+  "Return STATE's detail headings, one outline level below its block line.
+
+The header condenses the numbers -- one artifact, and only sometimes, as a
+parenthetical.  The `files' heading unfolds the same measurement at a finer
+grain, never a second tally, so an onlooker can see which files the step
+count is made of.  Most-touched first, so the header's parenthetical is
+simply the head of this list.  Empty while nothing has been touched."
+  (let ((files (agent-river--artifact-list state)))
+    (when files
+      (let* ((limit agent-river-panel-detail-files)
+             (shown (seq-take files limit)))
+        (list (format "** files: %s%s"
+                      (mapconcat (lambda (pair)
+                                   (format "%s %d" (car pair) (cdr pair)))
+                                 shown " · ")
+                      (if (> (length files) limit) " …" "")))))))
 
 (defun agent-river--panel (state)
   "Return the header-line summary of STATE.
@@ -1707,9 +1752,18 @@ question an onlooker actually has."
     ;; document.  It stays inside the make-visitable call so the whole line,
     ;; star included, is the visitable region: pressing RET on the star must
     ;; still jump to the session.
-    (agent-river--make-visitable
-     (concat "* " (mapconcat #'identity parts " · "))
-     (agent-river-state-id state))))
+    ;;
+    ;; Only the header is made visitable: the detail headings below it are a
+    ;; finer reading of the same state, and RET on one of them jumping to the
+    ;; session would be a link nobody asked for.
+    (let ((header (agent-river--make-visitable
+                   (concat "* " (mapconcat #'identity parts " · "))
+                   (agent-river-state-id state)))
+          (details (and agent-river--panel-expanded
+                        (agent-river--panel-details state))))
+      (if details
+          (concat header "\n" (mapconcat #'identity details "\n"))
+        header))))
 
 (defvar agent-river-session-line-map
   (let ((map (make-sparse-keymap)))
@@ -2022,6 +2076,41 @@ long as Emacs does."
           (save-excursion
             (agent-river--erase-block)
             (agent-river--insert-block)))))))
+
+;;;###autoload
+(defun agent-river-toggle-details ()
+  "Fold or unfold every session's detail headings in the HUD.
+
+The fold is remembered in `agent-river--panel-expanded' rather than left to
+outline overlay visibility, because the block is erased and rebuilt on
+every event: an overlay fold would spring open on the next tool call.  A
+flag means the rebuilt block is drawn already open, and stays that way
+until asked to close."
+  (interactive)
+  (let ((buffer (get-buffer agent-river-buffer-name)))
+    (unless (buffer-live-p buffer)
+      (user-error "No agent-river buffer"))
+    (with-current-buffer buffer
+      (setq agent-river--panel-expanded (not agent-river--panel-expanded))
+      (agent-river--redraw-block))))
+
+(defun agent-river-toggle-at-point ()
+  "Toggle the block heading on this line of the HUD.
+
+On the `* -- eventlog' heading this folds the log away, as in any outline;
+on a session heading it unfolds that session's detail headings.  Both live
+on TAB because they are the same gesture -- open or close the thing under
+the heading -- applied to the two kinds of heading the block has."
+  (interactive)
+  (if (save-excursion
+        (goto-char (line-beginning-position))
+        (looking-at "^\\* -- eventlog"))
+      (outline-cycle)
+    (agent-river-toggle-details)))
+
+;; `outline-minor-mode-cycle' binds TAB only when the user opted in, so the
+;; heading navigation has to be on the mode's own map to be there at all.
+(define-key agent-river-mode-map (kbd "TAB") #'agent-river-toggle-at-point)
 
 (defun agent-river--stop-timer ()
   "Stop the refresh timer."
