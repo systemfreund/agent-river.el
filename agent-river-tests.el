@@ -1049,12 +1049,36 @@ stubbed here so the tests do not depend on agent-shell being installed."
                                          :agent-type "Explore"
                                          :tool "Read" :detail "Read"))
             signals))
-    ;; The child hit the threshold and is told so; the parent, which did
-    ;; nothing wrong, must not be.
-    (should (car signals))
+    ;; The child hit the threshold and is told nothing, because nothing it
+    ;; is told arrives -- see `agent-river--answerable-p'.  This assertion
+    ;; used to read the other way round on the assumption that a subagent's
+    ;; synchronous hook could answer it; measuring said otherwise.
+    (should-not (car signals))
+    ;; What the test was always really about: the parent, which did nothing
+    ;; wrong, keeps its own streak and its own silence.
     (should (= 0 (agent-river-state-fail-streak
                   (agent-river-state "s1" "repo"))))
     (should-not (agent-river--signal (agent-river-state "s1" "repo")))))
+
+(ert-deftest agent-river-test-a-subagent-is-never-signalled ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        (agent-river-fail-streak-threshold 1))
+    (agent-river-observe '(:kind "fail" :session "s1" :agent "a9"
+                                 :agent-type "Explore" :tool "Read" :detail "Read"))
+    (let ((child (gethash "s1/a9" agent-river-registry)))
+      ;; The streak is measured either way -- the HUD still shows the child
+      ;; failing, and the parent's report still aggregates it.
+      (should (= (agent-river-state-fail-streak child) 1))
+      ;; But nothing is handed over, and nothing is recorded as handed over.
+      ;; additionalContext returned from a subagent's hook reaches neither the
+      ;; subagent nor the parent, so counting it would make the signals tally
+      ;; report a conversation that never happened -- the same lie
+      ;; `agent-river-answering-kinds' was added to stop, in the other
+      ;; dimension: not which event, but which state.
+      (should-not (agent-river-state-signals child))
+      (should (agent-river--answerable-p (agent-river-state "s1" "repo")))
+      (should-not (agent-river--answerable-p child)))))
 
 (ert-deftest agent-river-test-parent-sees-subagents-aggregated ()
   (let ((agent-river-registry (make-hash-table :test 'equal))

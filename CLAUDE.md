@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (141 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (142 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -136,6 +136,18 @@ These are load-bearing; the tests enforce most of them.
   `fail-runs` counts runs and never resets. `(streak N)` alone silently
   suppressed a later, genuinely new run of three failures, and a never-reset
   counter is also what stops a new prompt making old ids collide with new ones.
+- **Only a reachable state may signal** (`agent-river--answerable-p`): root
+  sessions, never subagents. Measured on 2026-09-13, not assumed — a subagent's
+  `PostToolUseFailure` is synchronous, `agent-river-hook` writes
+  `additionalContext` for it, and the text reaches nobody: two subagents asked
+  outright never saw it, a trace confirmed the signal came from a real `fail`
+  argv rather than a `think` refined into one, and the transcript holds no
+  sidechain entry containing it. Signalling a subagent therefore writes into a
+  pipe nobody reads, and counting it repeats the lie the gate below exists to
+  stop. Dropped rather than escalated to the parent: a child's failures are a
+  statement about a different subject, and `agent-river-children` already
+  aggregates them on demand and says whose they are. Claude Code only; nothing
+  is known about Codex or Gemini CLI here.
 - **Only an answering event may signal** (`agent-river-answering-kinds`, default
   `act` and `fail`). `observe` asks `agent-river--signal` only for those kinds.
   It used to ask on every event, so a fail streak still standing at the end of a

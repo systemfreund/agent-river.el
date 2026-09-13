@@ -587,11 +587,13 @@ replaying a session's events from the start."
 
      ((equal kind "done")
       (setf (agent-river-state-step state) nil)
-      ;; Only ever retires a subagent.  Whether SubagentStop carries an
-      ;; agent_id is unverified; if it does not, the event addresses the
-      ;; parent key, and marking a live session finished would poison every
-      ;; reading taken from it.  Ignoring a stray event is the cheap side of
-      ;; that trade.
+      ;; Only ever retires a subagent.  SubagentStop does carry an agent_id --
+      ;; measured on 2026-09-13 by tracing the argv against the folded event,
+      ;; where the done arrived addressed to the subagent's own key -- so this
+      ;; guard no longer stands in for an unknown.  It stays because it still
+      ;; holds the line that matters and costs nothing: were the event ever to
+      ;; address a root key, marking a live session finished would poison
+      ;; every reading taken from it.
       (when (agent-river-state-parent state)
         (setf (agent-river-state-done state) t))))
     state))
@@ -677,6 +679,32 @@ SCOPE is `session' for the whole session, or nil for the current task."
                (agent-river-state-task-artifacts state)))
     (when (and best (> best-n 1))
       (format "%s (%d touches)" (file-name-nondirectory best) best-n))))
+
+(defun agent-river--answerable-p (state)
+  "Return non-nil when an observation folded into STATE can reach an agent.
+
+Measured rather than assumed.  A subagent's hook call carries its parent's
+session id and its own agent_id, `PostToolUseFailure' is wired
+synchronously, and `agent-river-hook' duly writes `additionalContext' for
+it -- and the text arrives nowhere.  Two subagents asked outright reported
+never seeing it, a trace confirmed the signal was produced on a genuinely
+synchronous hook rather than on a `think' refined into a `fail', and the
+session transcript holds no sidechain entry containing it.
+
+A signal produced for a subagent is therefore written into a pipe nobody
+reads, and counting it in `signals' would repeat the very lie the gate on
+`agent-river-answering-kinds' exists to stop: a tally whose whole purpose
+is to make \"how often was the agent told something\" observable,
+reporting conversations that never happened.
+
+Dropped rather than redirected to the parent.  A child's failures are a
+statement about a different subject, and minting it here would be this
+function deciding what a parent should make of its children --
+`agent-river-children' aggregates them on demand and says whose they are.
+
+Claude Code as measured on 2026-09-13; nothing is known about whether
+Codex or Gemini CLI behave the same way."
+  (null (agent-river-state-parent state)))
 
 (defun agent-river--signalled-p (state id)
   "Return non-nil when ID has already been handed to the agent in STATE.
@@ -1373,6 +1401,7 @@ often the agent had to be told something is itself part of the state."
       ;; the agent told something" observable must not be the thing that
       ;; misreports it.
       (let ((signal (and (member kind agent-river-answering-kinds)
+                         (agent-river--answerable-p state)
                          (agent-river--signal state))))
         (when signal
           ;; Through the fold, not around it.  This used to push straight onto
