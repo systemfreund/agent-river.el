@@ -1,0 +1,516 @@
+# agent-focus
+
+Claude Code hooks report events one at a time. `agent-focus` folds that
+stream into a per-session **state** — what the agent is working on, which
+files it keeps returning to, how its tools are faring — and renders it in
+Emacs next to the event log.
+
+A flat log answers *what happened*. Only a fold answers *where the work
+stands*, because that question quantifies over a set of events.
+
+It grew out of streaming development live: viewers could see *what* changed
+in the Emacs frame but not what the agent was paying attention to. It has
+two consumers, and they want different things.
+
+- **Onlookers** get the buffer: a state block over a tailing event log.
+- **The agent itself** gets a short, factual observation when a signal
+  fires, injected back into its own context by the hook.
+
+## Requirements
+
+Emacs 28.1 or later with native JSON, a running Emacs server
+(`M-x server-start`), and Claude Code. No external tools: the shell bridge
+only moves bytes.
+
+Optional: [`agent-shell`](https://github.com/xenodium/agent-shell). When it
+hosts the sessions, agent-focus takes liveness and session names from it
+instead of estimating them.
+
+## Installing
+
+Clone it, then wire the hooks into the project's `.claude/settings.json`.
+`claude-settings.json` in this repo is a working example — six events, with
+the paths already in place:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "hooks": [ { "type": "command",
+                     "command": "\"$HOME/src/agent-focus/agent-focus-hook.sh\" act",
+                     "timeout": 5 } ] }
+    ]
+  }
+}
+```
+
+Two details in that example are load-bearing rather than cosmetic:
+
+- **`PreToolUse` and `PostToolUseFailure` must not set `"async": true`.**
+  A synchronous `PreToolUse` orders its line before its own completion; an
+  async hook's stdout is never read, so only a synchronous one can hand an
+  observation back to the agent.
+- Settings are read at session start, so a change needs a restart.
+
+Nothing needs loading in advance: the first hook call loads the Elisp
+itself, and does so again after an Emacs restart.
+
+## What you see
+
+One line per step:
+
+```
+16:22:48 ◆ add a queue-position render field     ← task from the user
+16:22:59 ▸ Bash  Syntax-check the updated hook   ← acting: about to run a tool
+16:23:01 · Bash ✓  12ms                          ← tool returned, how long it took
+16:23:03 ◇ The mode sets truncate-lines, so a…   ← the agent's own reasoning
+16:23:03 ▸ Edit  supersonic-mpv.el
+16:23:05 · Bash ✗  2.1s                          ← interrupted, not a success
+16:23:09 ✗ Bash  340ms                           ← errored
+16:23:12 ■ waiting for you                       ← idle
+```
+
+Two things worth knowing about what lands on those lines. `Bash` and `Task`
+calls carry a human-written `description` alongside the raw command, and the
+HUD prefers it — "Syntax-check the updated hook" reads better on stream than
+the shell it expands to. And `PostToolUse` carries `duration_ms` plus
+`tool_response`, so the closing line reports how long the call took and
+marks an interrupted one with `✗` rather than claiming success.
+
+Failures get their own `PostToolUseFailure` hook and a red `✗` line, which is
+a different thing from the `✗` that `think` shows for an *interrupted* call.
+
+## The panel is the view of the state
+
+One buffer, two halves. The state block sits at the top — one line per live
+session, rewritten on every fold — and the log runs underneath it **newest
+first**:
+
+```
+ supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
+ supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
+──────────────────────────────
+19:07:03 super<2> ▸ Edit supersonic-mpv.el
+19:07:01 superson · Read ✓  2ms
+19:06:58 superson ▸ Read  Cask
+```
+
+A scrolling log shows activity. Only the block answers what is being worked
+on right now, which is the question an onlooker actually has — and the
+reason the fold exists at all. A live failure run appears there too
+(`3 failing`, in the error face), because that is the one thing nobody
+should have to reconstruct from scrollback.
+
+Newest-first means there is nothing to tail: the block and the latest event
+are both at the head of the buffer and never move, so neither can scroll out
+of view as the log grows. Trimming takes the oldest lines off the bottom.
+
+### The block keeps its own time
+
+Elapsed times are only correct at the moment the block is drawn, so drawing
+it solely on events makes the clock jump by however long the gap between two
+of them was. A repeating timer
+(`agent-focus-refresh-interval`, 1 s) redraws just the block — the log is
+never touched.
+
+It runs only while an agent is actually mid-task, which is narrower than
+"the session is live": a turn that has ended leaves the session registered
+and reachable, but nothing is happening in it, and a clock ticking over an
+idle agent claims work that is not being done. So the timer starts on the
+next folded event and retires itself on the first tick that finds no one
+working — it is not running between turns, or at all once Emacs is quiet.
+
+A subagent still working keeps it alive even when its parent looks idle. A
+redraw that throws cancels the timer rather than repeating the error every
+second.
+
+The block is **not** the header line, and that is not a style choice.
+`header-line-format` is structurally single-line, so with two sessions it
+could only ever show whichever acted last — the step count jumped between 1
+and 4 with nothing to say these were different agents, which is worse than
+showing nothing. The mode now sets it to nil explicitly: an earlier version
+did keep the state there, and a value left behind by that version sat frozen
+at the top of the buffer showing a step count and an elapsed time from
+whenever it was last written.
+
+A subagent does not get a line: it is counted on its parent, so the session
+stays the subject.
+
+### When agent-shell is hosting the sessions
+
+The sessions run as `agent-shell` buffers in this same Emacs, and
+`agent-shell--state` carries the ACP session id — which is *verbatim* the
+`session_id` the hooks report. So the link is an id comparison, not an
+inference from process ancestry or working directory.
+
+That deletes three pieces of guesswork rather than adding a feature:
+
+- **Liveness stops being an estimate.** For a hosted session the buffer
+  settles it: the process runs here, so whether it is alive is a fact. The
+  TTL is what remains for subagents and for anything this Emacs does not
+  own — it was only ever a way of guessing at something we could not see.
+- **Labels stop drifting.** They come from the agent-shell buffer name,
+  which does not change when the session changes directory.
+- **Uniquifying them stops being our job.** agent-shell already numbers its
+  buffers (`Claude Agent @ supersonic.el<2>`); the parallel scheme here was
+  duplicated work.
+
+Each session line is also a link: `RET` or `mouse-1` jumps to that
+session's shell buffer. A line with nothing to jump to does not pretend
+otherwise.
+
+All of this degrades to the previous behaviour when agent-shell is absent —
+the test is simply whether a buffer in `agent-shell-mode` claims that id.
+
+### Telling two sessions apart
+
+Two agents in one checkout derive the same label from their directory, so
+labels are uniquified the way Emacs uniquifies buffers, and the way the
+session list already shows them: `supersonic.el`, `supersonic.el<2>`.
+
+The session column truncates to `agent-focus-label-width`, and truncating
+from the right would cut both down to `superson` — undoing the whole point.
+It keeps the suffix instead: `super<2>`.
+
+The label follows the session's working directory, so it changes if the
+session moves. That is accurate rather than stable; a session that spends a
+while outside the repo will show up under whatever directory it is in.
+
+### The phase
+
+`exploring` / `editing` / `verifying` / `blocked` / `waiting`, read from the
+last `agent-focus-phase-window` steps. Three rules decide it, in order:
+
+- **`waiting` outranks everything.** The tool window still holds the steps
+  of a finished turn, so without this the panel announces `exploring` above
+  a log line saying the turn is over — describing what the work *was* while
+  presenting it as what the work *is*.
+- **`blocked` comes from failures, not tools.** A run of errors says more
+  about where the work stands than which tools produced it. Its threshold
+  (2) is deliberately lower than the one for interrupting the agent (3): an
+  onlooker may see a rough patch early, the agent should only be told once
+  it looks like more than bad luck.
+- **Otherwise the dominant tool bucket wins**, and only with at least two
+  classified steps. One is noise, two is a tendency.
+
+Shell calls stay unclassified unless they match
+`agent-focus-verify-regexp`, because the same tool runs the test suite, a
+git query and a directory listing. The practical consequence is that
+shell-heavy work often shows *no* phase at all — abstaining beats guessing.
+The pattern is applied only to shell tools: matching it against every step
+once classified reading a file called `Cask` as verification.
+
+`M-x agent-focus-status` lists every session in full, and
+`M-x agent-focus-who-touches` answers the contention question. Both exist
+because the queries were otherwise reachable only by evaluating Elisp,
+which put the state out of reach of exactly the onlookers it is for.
+
+### The agent can read its own state — and state its intent
+
+Both go through the `emacs` MCP server, as plain function calls. No extra
+tool is needed, but nothing advertises them either, so: they exist.
+
+```elisp
+(agent-focus-report "<session-id>")     ; own state
+(agent-focus-touching "supersonic.el")  ; is another session on this file?
+(agent-focus-set-intent "narrowing down why queue position goes stale")
+```
+
+`set-intent` records the one thing the hooks cannot derive. `:task` is
+literally the user's prompt, which stays put for twenty minutes while the
+work moves through several sub-goals; the intent names the current one, and
+the panel shows it in place of the prompt.
+
+**It is stored as a claim, not a measurement.** Everything else in the state
+is counted — touches, durations, failures, tool mix. A value the agent wrote
+about itself is different in kind, and this state is fed *back* to the
+agent: a claim later read as an observation closes the loop with no ground
+truth left in it. So it lives in its own slots, reports under
+`:claimed-intent`, and never feeds a signal (there is a test for that: a
+cheerful intent cannot talk a failure streak out of firing).
+
+It also ages. An agent remembers to narrate while things go well and forgets
+precisely when it has lost the thread — which is when an onlooker most needs
+to know. So the measured state is allowed to contradict the claim: after
+`agent-focus-intent-stale-steps` steps, or once the hottest file has moved
+on, the panel greys it and appends `(stale)` rather than letting it pass as
+current. Silence about having stopped narrating would be the worse failure.
+
+### Two frames, labelled as such
+
+`artifacts` accumulate for the whole session; `steps` and the task tally
+reset with every prompt. Reporting one while labelling it the other is how
+a panel starts misleading people, so the report keys say which frame they
+are in — `:task-steps`, `:task-hottest`, `:session-hottest`,
+`:session-elapsed`. The panel uses the task frame (what is being worked on
+now); `agent-focus-touching` uses the session frame, because contention
+has to survive a change of subject.
+
+### Reloading after a struct change
+
+`cl-defstruct` instances already in the registry do not gain a slot added
+later, so reloading this file mid-session can leave the fold erroring
+against states built by the previous definition. That once stopped the
+display with no error anywhere. The fold now reports such a failure as a
+line in the buffer naming `agent-focus-reset` as the fix — losing the
+folded state is cheap, a HUD that has silently gone dark is not.
+
+## Asking the state things
+
+Events fold into a per-session `agent-focus-state` held in
+`agent-focus-registry`, keyed by session id. The fold is deterministic
+given event order, so a state can be rebuilt by replay.
+`agent-focus-reset` forgets it; `agent-focus-clear` only empties the buffer.
+
+Two queries expose the meta level:
+
+```elisp
+(agent-focus-report "<session-id>")
+;; (:label "supersonic.el" :phase "editing"
+;;  :claimed-intent "narrowing down the stale queue position"
+;;  :claimed-intent-stale nil
+;;  :task "fix the mpv queue position bug"
+;;  :task-elapsed "25s" :task-steps 3 :task-failures 0
+;;  :task-hottest "supersonic-mpv.el (2 touches)"
+;;  :fail-streak 0 :history nil
+;;  :session-hottest "supersonic.el (14 touches)" :session-elapsed "41m"
+;;  :signals 1
+;;  :subagents (:running 0 :total 1 :steps 2
+;;              :each (("Explore" :steps 2 :fail-streak 0 :status "done"))))
+
+(agent-focus-touching "supersonic-mpv.el")
+;; (("session-b" :label "worktree-…" :touches 2 :ago "9s"))
+```
+
+`agent-focus-touching` is the one that earns its keep: two agents editing
+the same file without knowing about each other is a real hazard in a
+worktree setup. Several sessions fold side by side already; Emacs Lisp is
+single-threaded, so concurrent `emacsclient` calls are atomic and the
+registry needs no locking.
+
+### Subagents
+
+A subagent's tool calls fire the same hooks, and arrive with the **session
+id and transcript path of its parent**. The only fields that give them away
+are `agent_id` and `agent_type`, which are absent on a call the parent makes
+itself:
+
+```
+PreToolUse   Bash   -                  -
+PreToolUse   Read   a37409f14b2a9aa55  Explore
+```
+
+So the registry key is `session_id`, or `session_id/agent_id` for a
+subagent. Keying on the session alone folded a subagent's work into its
+parent — inflating the step count and, worse, letting one subagent's
+failures raise a streak that got reported against the parent. `agent_type`
+doubles as the label, which reads better than a directory name:
+
+```
+18:25:36 ▸ Agent  Verify subagent tree folding
+18:25:38 Explore  ▸ Read  Makefile
+18:25:44 superson · Agent ✓  7.8s
+```
+
+The parent still sees what it set in motion, aggregated on demand from the
+registry rather than mirrored onto the parent (so the two cannot drift):
+
+```elisp
+(agent-focus-report "<session>")
+;; … :steps 3
+;;   :subagents (:running 1 :total 1 :steps 2
+;;               :each (("Explore" :steps 2 :fail-streak 0 :status "running")))
+```
+
+`:status` distinguishes three things on purpose. `done` comes from
+`SubagentStop` and is a fact. `stale` means the TTL expired with no end
+event — something went away without saying so. Only `running` is a claim
+that it is still working. Inferring "finished" from silence is how a
+registry starts lying, and a `done` event that carries no `agent_id` is
+dropped rather than applied to the parent key.
+
+### One buffer, several sessions
+
+Every session renders into the same `*agent-focus*` buffer, so a session
+column appears as soon as a second one is live:
+
+```
+18:05:40 ▸ Edit  supersonic.el                 ← one session: no column
+18:05:48 other    ▸ Edit  supersonic.el        ← two: who did it matters
+18:05:48 superson ▸ Bash  Run the test suite
+```
+
+Two details that are easy to get wrong and were:
+
+- **Paths must normalise identically across sessions.** They render relative
+  to the session cwd when under it, and as a bare basename otherwise. An
+  earlier version stripped only the session's own cwd, so the same file
+  reached from a worktree and from the main checkout produced two different
+  strings — and the view showed a collision as two unrelated files, which is
+  the exact opposite of the point.
+- **The column is liveness-gated**, not registry-gated: a session silent for
+  `agent-focus-session-ttl` stops counting, so a crashed session does not
+  leave a column behind forever.
+
+The label is the cwd basename, truncated to `agent-focus-label-width` (8),
+which makes `supersonic.el` read as `superson`. Ugly but distinguishing;
+widen it, or the window, if it bothers you. Lines already in the buffer keep
+whatever format they were written with — it is an append-only log, not a
+re-rendered table.
+
+A buffer per session, with an overview, is the obvious next step. It is
+deliberately not built yet: it costs real work and only pays off once
+several agents run in parallel routinely.
+
+## Talking back to the agent
+
+`agent-focus-observe` returns an observation when a signal fires, and the
+hook turns it into `hookSpecificOutput.additionalContext` — text injected
+into the agent's own context. Today one signal exists: a run of
+`agent-focus-fail-streak-threshold` consecutive tool failures.
+
+```
+agent-focus: 3 consecutive tool failures (Edit x2, Bash x1), 7s into the
+current task. Most-revisited file: supersonic-mpv.el (2 touches). This is an
+observation, not an instruction — weigh it against what you know; repeated
+failure is sometimes the right path.
+```
+
+Three constraints hold this together, and each is load-bearing:
+
+- **Only a synchronous hook can inject.** An async hook's stdout is never
+  read, which is why `PostToolUseFailure` alone omits `"async": true`.
+- **Observations, never instructions.** Signals are heuristics and will
+  misfire; sometimes six edits to one file is exactly right. A wrong fact
+  costs tokens, a wrong instruction derails a correct solution.
+- **Rare, and never a target.** Emitted signals fold back into the state as
+  a `signals` count, so "how often did the agent have to be told" is itself
+  observable. If that count ever becomes a measure of quality, the whole
+  mechanism is corrupted — an agent can lower it by avoiding the *measure*
+  rather than the problem.
+
+## Tests
+
+The fold and the payload parsing are the parts that are logic rather than
+formatting, and both are pure — so they are tested without a frame, a hook
+or a live session:
+
+```
+emacs -Q --batch -L . -l agent-focus.el -l agent-focus-tests.el \
+      -f ert-run-tests-batch-and-exit
+```
+
+86 tests covering the state transitions, streak accounting, signal
+threshold and throttle, the phase, subagent isolation, the registry and its
+TTL, the cross-session `touching` query, and the payload derivation — which
+argument of a call is the interesting one, how a duration is formatted,
+what counts as an interrupted call.
+
+Verified to actually fail rather than merely pass: mutating the streak
+reset in a scratch copy turns exactly the two responsible tests red.
+
+## Trailing reasoning: the `◇` lines
+
+The payload carries no thinking text. It does carry `transcript_path`,
+pointing at the session's full JSONL — and that file holds the reasoning as
+`thinking` content blocks. The HUD lifts them out.
+
+The catch is timing. Measured on 2026-09-13: at both `PreToolUse` and
+`PostToolUse` the assistant record holding the current `tool_use_id` is
+still absent from the transcript; it is flushed afterwards. The newest
+readable reasoning always belongs to the *previous* step, and no amount of
+watching the file changes that — it is a property of when the transcript is
+written, not of the hook.
+
+What makes it work anyway is *where* the line is placed. `PreToolUse` emits
+any new reasoning immediately before its own act line, so the `◇` lands
+directly beneath the step it explains:
+
+```
+16:31:03 · Grep ✓  40ms
+16:31:05 ◇ Joining on tool_use_id is more precise than timestamps…
+16:31:05 ▸ Edit  supersonic-mpv.el
+```
+
+Implementation notes:
+
+- Progress is a byte offset on the session state, so only the bytes added
+  since last time are read — the transcript is megabytes and rescanning it
+  on every tool call would be waste. Reading stops at the last newline, so
+  a half-written line is never consumed.
+- A session seen for the first time is fast-forwarded to the end instead of
+  replayed — otherwise the first tool call would dump the whole backlog.
+- Only the first sentence is shown, capped at 110 characters. Thinking
+  blocks are paragraphs; unabridged they would bury the tool-call rhythm.
+- The reasoning is in whatever language the agent thinks in, which is not
+  necessarily the language of the conversation.
+
+It is driven by Claude Code hooks, not by the agent choosing to call
+something — this repo's `.claude/settings.json` wires five events to
+`~/src/agent-focus/agent-focus-hook.sh`, which turns the hook's JSON
+payload into an `agent-focus-observe` call over `emacsclient`:
+
+| Hook event           | Kind     | Means                                     |
+|----------------------|----------|-------------------------------------------|
+| `UserPromptSubmit`   | `prompt` | a task arrived                            |
+| `PreToolUse`         | `act`    | done thinking, about to act — and on what |
+| `PostToolUse`        | `think`  | tool returned, reasoning follows          |
+| `PostToolUseFailure` | `fail`   | the call errored                          |
+| `SubagentStop`       | `done`   | a subagent finished                       |
+| `Stop`               | `idle`   | turn over                                 |
+
+`PreToolUse` runs **synchronously**, which is not a detail. Both it and
+`PostToolUse` used to be async, and the `act` path is the slower of the two
+(17 ms against 11 ms — it scans the transcript for reasoning), so a line
+could lose the race against its own completion and the buffer showed
+`· Read ✓` *above* `▸ Read Makefile`. Running `act` before the tool starts
+orders the pair by construction instead of by luck. The cost is ~17 ms on
+the critical path of every tool call, and `emacsclient` is wrapped in
+`timeout` (`AGENT_FOCUS_TIMEOUT`, 2 s) so a wedged Emacs cannot stall the
+stream.
+
+The gap between a `think` line and the next `act` line *is* the thinking
+window. Hooks carry no thinking text, so tool-call granularity is the finest
+resolution available — and the right one for a viewer anyway.
+
+There is nothing to arm. Every hook call wraps its payload in
+
+```elisp
+(progn (unless (fboundp 'agent-focus-log) (load "…/agent-focus.el" t t))
+       (agent-focus-log …))
+```
+
+so the first hook after an Emacs restart loads the Elisp, and every later
+one skips the load. No init-file entry is needed, and restarting Emacs mid
+stream costs nothing. Override the path with `AGENT_FOCUS_LISP` if you move
+the file.
+
+This matters because the failure is invisible: a hook firing into a session
+where `agent-focus-log` is undefined errors inside `emacsclient`, the script
+swallows it by design, and the HUD simply stays blank with nothing to
+suggest why. Self-arming removes the only way that happened in practice.
+
+Logging pops the side window by itself (`agent-focus-auto-display`), so
+there is nothing else to do. `M-x agent-focus-show` reopens it after a
+`C-x 1`, `M-x agent-focus-clear` empties it.
+
+### The shell script only moves bytes
+
+`agent-focus-hook.sh` is 56 lines and does no parsing. It writes the
+payload to a file, hands Emacs the two paths, and prints whatever Emacs
+wrote back.
+
+It was 224 lines of `jq` that parsed the payload and assembled Elisp *as
+text* — which meant every tool argument was interpolated into a form Emacs
+then evaluated, safe only for as long as the escaping held. Passing files
+in both directions removes that class of problem entirely, drops the `jq`
+dependency, and puts the derivation under test: which argument of a call is
+the interesting one, how a duration is formatted, what counts as an
+interrupted call. None of that was covered while it lived in the shell.
+
+The bridge sits on the critical path of every tool call and must never fail
+one, so every step degrades to a no-op — no Emacs server, unreadable
+payload, no `mktemp`. But a payload that reaches Emacs and then fails to
+parse writes a `hook failed` line into the buffer rather than going quiet:
+silence is how this has broken before, three times.
+
