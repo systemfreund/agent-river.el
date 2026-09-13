@@ -1348,6 +1348,19 @@ CALL overrides fields of the tool call record."
       (should (equal (plist-get event :tool) "read"))
       (should (equal (plist-get event :detail) "read  a.el")))))
 
+(ert-deftest agent-river-test-the-stream-reads-a-camel-case-edit-path ()
+  (agent-river-test--with-watch
+    ;; Claude's ACP `rawInput' for an edit names the target `filePath', not
+    ;; `file_path'.  While the snake-case ladder missed it every edit went
+    ;; uncounted and the dired heat never warmed -- measured, not guessed.
+    (let ((event (car (agent-river--shell-events
+                       (agent-river-test--tool-call
+                        "c1" "pending"
+                        '(:raw-input . ((filePath . "/repo/a.el"))))
+                       "s1" "/repo"))))
+      (should (equal (plist-get event :file) "a.el"))
+      (should (equal (plist-get event :path) "/repo/a.el")))))
+
 (ert-deftest agent-river-test-a-call-without-arguments-shows-its-title ()
   (agent-river-test--with-watch
     (should (equal (plist-get (car (agent-river--shell-events

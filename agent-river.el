@@ -811,11 +811,15 @@ to save a few characters of a log line."
   "Return the file path named in tool INPUT, whichever host named it.
 Claude Code and Codex say `file_path', Gemini CLI says `absolute_path'
 for a read and `file_path' for a write, and several tools say plain
-`path'.  The artifact tables are keyed on this, so a name we did not
-know would not fail -- it would quietly stop counting files, which is
-the failure mode this whole file is written against."
+`path'.  An agent-shell session adds `filePath' and `filepath' -- the ACP
+`rawInput' for a Claude edit carries the target under the camel-case
+`filePath', which the snake-case ladder missed, so every edit went
+uncounted and the dired heat stayed cold.  `fileName' is what a
+Copilot-style diff names.  The artifact tables are keyed on this, so a
+name we did not know would not fail -- it would quietly stop counting
+files, which is the failure mode this whole file is written against."
   (seq-some (lambda (key) (agent-river--arg input key))
-            '(file_path absolute_path path)))
+            '(file_path filePath filepath absolute_path path fileName)))
 
 (defun agent-river--salient (input cwd)
   "Return the argument of tool INPUT worth showing, given CWD.
