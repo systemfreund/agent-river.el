@@ -1,6 +1,6 @@
-# agent-focus
+# agent-river
 
-Claude Code hooks report events one at a time. `agent-focus` folds that
+Claude Code hooks report events one at a time. `agent-river` folds that
 stream into a per-session **state** — what the agent is working on, which
 files it keeps returning to, how its tools are faring — and renders it in
 Emacs next to the event log.
@@ -23,7 +23,7 @@ Emacs 28.1 or later with native JSON, a running Emacs server
 only moves bytes.
 
 Optional: [`agent-shell`](https://github.com/xenodium/agent-shell). When it
-hosts the sessions, agent-focus takes liveness and session names from it
+hosts the sessions, agent-river takes liveness and session names from it
 instead of estimating them.
 
 ## Installing
@@ -37,7 +37,7 @@ the paths already in place:
   "hooks": {
     "PreToolUse": [
       { "hooks": [ { "type": "command",
-                     "command": "\"$HOME/src/agent-focus/agent-focus-hook.sh\" act",
+                     "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" act",
                      "timeout": 5 } ] }
     ]
   }
@@ -110,7 +110,7 @@ of view as the log grows. Trimming takes the oldest lines off the bottom.
 Elapsed times are only correct at the moment the block is drawn, so drawing
 it solely on events makes the clock jump by however long the gap between two
 of them was. A repeating timer
-(`agent-focus-refresh-interval`, 1 s) redraws just the block — the log is
+(`agent-river-refresh-interval`, 1 s) redraws just the block — the log is
 never touched.
 
 It runs only while an agent is actually mid-task, which is narrower than
@@ -168,7 +168,7 @@ Two agents in one checkout derive the same label from their directory, so
 labels are uniquified the way Emacs uniquifies buffers, and the way the
 session list already shows them: `supersonic.el`, `supersonic.el<2>`.
 
-The session column truncates to `agent-focus-label-width`, and truncating
+The session column truncates to `agent-river-label-width`, and truncating
 from the right would cut both down to `superson` — undoing the whole point.
 It keeps the suffix instead: `super<2>`.
 
@@ -179,7 +179,7 @@ while outside the repo will show up under whatever directory it is in.
 ### The phase
 
 `exploring` / `editing` / `verifying` / `blocked` / `waiting`, read from the
-last `agent-focus-phase-window` steps. Three rules decide it, in order:
+last `agent-river-phase-window` steps. Three rules decide it, in order:
 
 - **`waiting` outranks everything.** The tool window still holds the steps
   of a finished turn, so without this the panel announces `exploring` above
@@ -194,14 +194,14 @@ last `agent-focus-phase-window` steps. Three rules decide it, in order:
   classified steps. One is noise, two is a tendency.
 
 Shell calls stay unclassified unless they match
-`agent-focus-verify-regexp`, because the same tool runs the test suite, a
+`agent-river-verify-regexp`, because the same tool runs the test suite, a
 git query and a directory listing. The practical consequence is that
 shell-heavy work often shows *no* phase at all — abstaining beats guessing.
 The pattern is applied only to shell tools: matching it against every step
 once classified reading a file called `Cask` as verification.
 
-`M-x agent-focus-status` lists every session in full, and
-`M-x agent-focus-who-touches` answers the contention question. Both exist
+`M-x agent-river-status` lists every session in full, and
+`M-x agent-river-who-touches` answers the contention question. Both exist
 because the queries were otherwise reachable only by evaluating Elisp,
 which put the state out of reach of exactly the onlookers it is for.
 
@@ -211,9 +211,9 @@ Both go through the `emacs` MCP server, as plain function calls. No extra
 tool is needed, but nothing advertises them either, so: they exist.
 
 ```elisp
-(agent-focus-report "<session-id>")     ; own state
-(agent-focus-touching "supersonic.el")  ; is another session on this file?
-(agent-focus-set-intent "narrowing down why queue position goes stale")
+(agent-river-report "<session-id>")     ; own state
+(agent-river-touching "supersonic.el")  ; is another session on this file?
+(agent-river-set-intent "narrowing down why queue position goes stale")
 ```
 
 `set-intent` records the one thing the hooks cannot derive. `:task` is
@@ -232,7 +232,7 @@ cheerful intent cannot talk a failure streak out of firing).
 It also ages. An agent remembers to narrate while things go well and forgets
 precisely when it has lost the thread — which is when an onlooker most needs
 to know. So the measured state is allowed to contradict the claim: after
-`agent-focus-intent-stale-steps` steps, or once the hottest file has moved
+`agent-river-intent-stale-steps` steps, or once the hottest file has moved
 on, the panel greys it and appends `(stale)` rather than letting it pass as
 current. Silence about having stopped narrating would be the worse failure.
 
@@ -243,7 +243,7 @@ reset with every prompt. Reporting one while labelling it the other is how
 a panel starts misleading people, so the report keys say which frame they
 are in — `:task-steps`, `:task-hottest`, `:session-hottest`,
 `:session-elapsed`. The panel uses the task frame (what is being worked on
-now); `agent-focus-touching` uses the session frame, because contention
+now); `agent-river-touching` uses the session frame, because contention
 has to survive a change of subject.
 
 ### Reloading after a struct change
@@ -252,20 +252,20 @@ has to survive a change of subject.
 later, so reloading this file mid-session can leave the fold erroring
 against states built by the previous definition. That once stopped the
 display with no error anywhere. The fold now reports such a failure as a
-line in the buffer naming `agent-focus-reset` as the fix — losing the
+line in the buffer naming `agent-river-reset` as the fix — losing the
 folded state is cheap, a HUD that has silently gone dark is not.
 
 ## Asking the state things
 
-Events fold into a per-session `agent-focus-state` held in
-`agent-focus-registry`, keyed by session id. The fold is deterministic
+Events fold into a per-session `agent-river-state` held in
+`agent-river-registry`, keyed by session id. The fold is deterministic
 given event order, so a state can be rebuilt by replay.
-`agent-focus-reset` forgets it; `agent-focus-clear` only empties the buffer.
+`agent-river-reset` forgets it; `agent-river-clear` only empties the buffer.
 
 Two queries expose the meta level:
 
 ```elisp
-(agent-focus-report "<session-id>")
+(agent-river-report "<session-id>")
 ;; (:label "supersonic.el" :phase "editing"
 ;;  :claimed-intent "narrowing down the stale queue position"
 ;;  :claimed-intent-stale nil
@@ -278,11 +278,11 @@ Two queries expose the meta level:
 ;;  :subagents (:running 0 :total 1 :steps 2
 ;;              :each (("Explore" :steps 2 :fail-streak 0 :status "done"))))
 
-(agent-focus-touching "supersonic-mpv.el")
+(agent-river-touching "supersonic-mpv.el")
 ;; (("session-b" :label "worktree-…" :touches 2 :ago "9s"))
 ```
 
-`agent-focus-touching` is the one that earns its keep: two agents editing
+`agent-river-touching` is the one that earns its keep: two agents editing
 the same file without knowing about each other is a real hazard in a
 worktree setup. Several sessions fold side by side already; Emacs Lisp is
 single-threaded, so concurrent `emacsclient` calls are atomic and the
@@ -316,7 +316,7 @@ The parent still sees what it set in motion, aggregated on demand from the
 registry rather than mirrored onto the parent (so the two cannot drift):
 
 ```elisp
-(agent-focus-report "<session>")
+(agent-river-report "<session>")
 ;; … :steps 3
 ;;   :subagents (:running 1 :total 1 :steps 2
 ;;               :each (("Explore" :steps 2 :fail-streak 0 :status "running")))
@@ -331,7 +331,7 @@ dropped rather than applied to the parent key.
 
 ### One buffer, several sessions
 
-Every session renders into the same `*agent-focus*` buffer, so a session
+Every session renders into the same `*agent-river*` buffer, so a session
 column appears as soon as a second one is live:
 
 ```
@@ -349,10 +349,10 @@ Two details that are easy to get wrong and were:
   strings — and the view showed a collision as two unrelated files, which is
   the exact opposite of the point.
 - **The column is liveness-gated**, not registry-gated: a session silent for
-  `agent-focus-session-ttl` stops counting, so a crashed session does not
+  `agent-river-session-ttl` stops counting, so a crashed session does not
   leave a column behind forever.
 
-The label is the cwd basename, truncated to `agent-focus-label-width` (8),
+The label is the cwd basename, truncated to `agent-river-label-width` (8),
 which makes `supersonic.el` read as `superson`. Ugly but distinguishing;
 widen it, or the window, if it bothers you. Lines already in the buffer keep
 whatever format they were written with — it is an append-only log, not a
@@ -364,13 +364,13 @@ several agents run in parallel routinely.
 
 ## Talking back to the agent
 
-`agent-focus-observe` returns an observation when a signal fires, and the
+`agent-river-observe` returns an observation when a signal fires, and the
 hook turns it into `hookSpecificOutput.additionalContext` — text injected
 into the agent's own context. Today one signal exists: a run of
-`agent-focus-fail-streak-threshold` consecutive tool failures.
+`agent-river-fail-streak-threshold` consecutive tool failures.
 
 ```
-agent-focus: 3 consecutive tool failures (Edit x2, Bash x1), 7s into the
+agent-river: 3 consecutive tool failures (Edit x2, Bash x1), 7s into the
 current task. Most-revisited file: supersonic-mpv.el (2 touches). This is an
 observation, not an instruction — weigh it against what you know; repeated
 failure is sometimes the right path.
@@ -396,7 +396,7 @@ formatting, and both are pure — so they are tested without a frame, a hook
 or a live session:
 
 ```
-emacs -Q --batch -L . -l agent-focus.el -l agent-focus-tests.el \
+emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 
@@ -447,8 +447,8 @@ Implementation notes:
 
 It is driven by Claude Code hooks, not by the agent choosing to call
 something — this repo's `.claude/settings.json` wires five events to
-`~/src/agent-focus/agent-focus-hook.sh`, which turns the hook's JSON
-payload into an `agent-focus-observe` call over `emacsclient`:
+`~/src/agent-river/agent-river-hook.sh`, which turns the hook's JSON
+payload into an `agent-river-observe` call over `emacsclient`:
 
 | Hook event           | Kind     | Means                                     |
 |----------------------|----------|-------------------------------------------|
@@ -466,7 +466,7 @@ could lose the race against its own completion and the buffer showed
 `· Read ✓` *above* `▸ Read Makefile`. Running `act` before the tool starts
 orders the pair by construction instead of by luck. The cost is ~17 ms on
 the critical path of every tool call, and `emacsclient` is wrapped in
-`timeout` (`AGENT_FOCUS_TIMEOUT`, 2 s) so a wedged Emacs cannot stall the
+`timeout` (`AGENT_RIVER_TIMEOUT`, 2 s) so a wedged Emacs cannot stall the
 stream.
 
 The gap between a `think` line and the next `act` line *is* the thinking
@@ -476,27 +476,27 @@ resolution available — and the right one for a viewer anyway.
 There is nothing to arm. Every hook call wraps its payload in
 
 ```elisp
-(progn (unless (fboundp 'agent-focus-log) (load "…/agent-focus.el" t t))
-       (agent-focus-log …))
+(progn (unless (fboundp 'agent-river-log) (load "…/agent-river.el" t t))
+       (agent-river-log …))
 ```
 
 so the first hook after an Emacs restart loads the Elisp, and every later
 one skips the load. No init-file entry is needed, and restarting Emacs mid
-stream costs nothing. Override the path with `AGENT_FOCUS_LISP` if you move
+stream costs nothing. Override the path with `AGENT_RIVER_LISP` if you move
 the file.
 
 This matters because the failure is invisible: a hook firing into a session
-where `agent-focus-log` is undefined errors inside `emacsclient`, the script
+where `agent-river-log` is undefined errors inside `emacsclient`, the script
 swallows it by design, and the HUD simply stays blank with nothing to
 suggest why. Self-arming removes the only way that happened in practice.
 
-Logging pops the side window by itself (`agent-focus-auto-display`), so
-there is nothing else to do. `M-x agent-focus-show` reopens it after a
-`C-x 1`, `M-x agent-focus-clear` empties it.
+Logging pops the side window by itself (`agent-river-auto-display`), so
+there is nothing else to do. `M-x agent-river-show` reopens it after a
+`C-x 1`, `M-x agent-river-clear` empties it.
 
 ### The shell script only moves bytes
 
-`agent-focus-hook.sh` is 56 lines and does no parsing. It writes the
+`agent-river-hook.sh` is 56 lines and does no parsing. It writes the
 payload to a file, hands Emacs the two paths, and prints whatever Emacs
 wrote back.
 

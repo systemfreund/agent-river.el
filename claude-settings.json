@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/src/agent-focus/agent-focus-hook.sh\" prompt",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" prompt",
             "async": true,
             "timeout": 5
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/src/agent-focus/agent-focus-hook.sh\" act",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" act",
             "timeout": 5
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/src/agent-focus/agent-focus-hook.sh\" think",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" think",
             "async": true,
             "timeout": 5
           }
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/src/agent-focus/agent-focus-hook.sh\" fail",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" fail",
             "timeout": 5
           }
         ]
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/src/agent-focus/agent-focus-hook.sh\" done",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" done",
             "async": true,
             "timeout": 5
           }
@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/src/agent-focus/agent-focus-hook.sh\" idle",
+            "command": "\"$HOME/src/agent-river/agent-river-hook.sh\" idle",
             "async": true,
             "timeout": 5
           }
