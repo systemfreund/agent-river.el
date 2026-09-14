@@ -4377,13 +4377,13 @@ buffer, which is what happens when there is no repository under the map."
      (concat marker
              (agent-river--map-mark shown face)
              (make-string pad ?\s)
-             markers " "
              (if stat
                  (concat stat (make-string
                                (max 1 (- agent-river-map-vc-width
                                          (string-width stat)))
                                ?\s))
                "")
+             markers " "
              (or (agent-river--map-annotation parties) "")))))
 
 (defun agent-river--map-shade ()
