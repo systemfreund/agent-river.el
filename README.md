@@ -689,10 +689,10 @@ file to read before altering behaviour rather than building on it.
 **Mostly designed, partly built.** The code is `agent-river-launch.el`, a
 fifth file, optional and opt-in; this section is the whole shape, and what it
 has to answer to. The first of the four rungs below exists — the spool, the
-ledger and the queue, with **no launcher**, so candidates arrive and are
-decided about and nothing starts. Rules and the launcher are next. The rest
-of this section is written in the present tense because it is the design,
-not because it is all there.
+rules, the ledger and the queue, with **no launcher**, so the pipeline runs
+end to end with a no-op where the process would go. The launcher is next. The
+rest of this section is written in the present tense because it is the
+design, not because it is all there.
 
 ```elisp
 (agent-river-launch-mode 1)   ; watch the spool
@@ -904,12 +904,46 @@ Four rungs:
 A rule is a plist, and `:match`, `:gate` and `:prompt` each take a
 declarative value *or* a function.
 
+```elisp
+(setq agent-river-launch-rules
+      '((:name "trusted issues"
+         :match ((:source . "\\`gh\\'") (:actor . ("oemer" "octocat")))
+         :gate ((:max-concurrent . 2) (:no-failures . t)
+                (:budget . (4 . 3600))))))
+```
+
 The default is the declarative form, and the reason is rung 1: calibrating
 means reading. A declarative rule can be explained in the queue buffer —
-matched on label `agent-ready`, refused on budget — where a function can
-only be named. What holds either way is that the ledger records the
-*outcome* of every gate, so a function rule is still answerable for
-afterwards; it just cannot explain itself in advance.
+matched on source `gh`, held because two sessions are already running —
+where a function can only be named. What holds either way is that the ledger
+records the *outcome* of every gate, so a function rule is still answerable
+for afterwards; it just cannot explain itself in advance.
+
+**`:match` is final and `:gate` is not**, and the split is the useful part
+rather than a tidy one. A match is a property of the candidate: nothing about
+waiting will change whether this is a GitHub issue by someone trusted, so a
+candidate no rule matches is *finished* — filed, not left to be asked the
+same question every minute for the rest of the week. A gate is a property of
+the world, which changes: two agents are running now and will not be at four,
+the budget window moves, midnight passes. So a gate refusal leaves the
+candidate in the queue to be asked again, and refusing it finally would throw
+work away for having arrived while an agent happened to be busy.
+
+Which means the gates have to be asked with nothing being delivered. An agent
+going idle is what releases a held candidate and no file arrives to say so,
+so `agent-river-launch-poll-interval` is the drain's clock as much as the
+spool's safety net.
+
+**A gate states its reason, and silence means yes.** That is why a gate
+function returns the reason rather than a boolean — "refused" without
+"because the budget was spent" is not evidence of anything, and the refusals
+are what the later rungs are armed on. It is also why a gate that *throws*
+refuses and says it broke, and why an unknown check refuses rather than
+passing: a typo in a config must not silently arm a rule its author gated.
+
+**A hold is logged on change, not on every ask.** A candidate held by a
+budget for an hour is asked sixty times, and sixty identical lines bury the
+transitions the log exists to show.
 
 ### Two things that must be settled before rung 4
 

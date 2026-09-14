@@ -810,9 +810,9 @@ state it decides on. The README section *"A third direction: starting a
 session from an event"* is the design document for all of it, including the
 parts not written yet; read it before adding to this file.
 
-Built so far: source, ledger, queue. **No launcher** — nothing here starts
-anything, which is the point rather than an unfinished edge. Rules and the
-launcher are next. What is load-bearing already:
+Built so far: source, rule, ledger, queue. **No launcher** — the pipeline
+runs end to end with a no-op where the process would go, so it is a dry run
+rather than a half-built one. What is load-bearing already:
 
 - **The spool is the only door**, and the state *is* the filesystem —
   `<spool>/` inbox, `queued/`, `done/`, `failed/`. No second account of what
@@ -832,11 +832,33 @@ launcher are next. What is load-bearing already:
   shape is the fallback reader, which is why the protocol is not speculative.
   A reader that throws costs its own file and no more: it goes to `failed/`
   and is never read again, so unlike an observer there is no runaway to retire.
+- **`:match` is final, `:gate` is not** (`agent-river-launch--rule-for`,
+  `--gate`). A match is a property of the candidate and nothing about waiting
+  will change it, so a candidate no rule matches is *finished* — filed, not
+  left to be asked the same question every minute. A gate is a property of
+  the world, so its refusal leaves the candidate queued to be asked again;
+  refusing finally would throw work away for having arrived while an agent
+  happened to be busy. Collapsing the two loses one or the other.
+  The match is re-asked at every drain rather than cached: rules get edited
+  between a delivery and the moment it could run.
+- **A gate states its reason, and silence means yes.** Which is why a gate
+  function returns the reason rather than a boolean, why a gate that *throws*
+  refuses (`gate errored`) instead of being read as silence, and why an
+  unknown check refuses too — a typo in a config must not silently arm a rule
+  its author gated.
 - **Refusals are the measurement.** The decision log exists from the first
   commit, before anything can launch, because the path to autonomy is paved
-  with a fortnight of decisions and those only accrue in wall-clock time. Once
-  a rule can refuse, the *reason* has to become durable too — right now only
-  the fact is, as which directory the file ended in.
+  with a fortnight of decisions and those only accrue in wall-clock time.
+  A hold is logged **on change only**: a candidate held for an hour is asked
+  sixty times, and sixty identical lines bury the transitions the log exists
+  to show. Once a rule can refuse, the reason has to become *durable* too —
+  right now only the fact is, as which directory the file ended in.
+- **The drain has to run with nothing delivered.** The gates read the world,
+  and an agent going idle is what releases a held candidate; no file arrives
+  to say so. `agent-river-launch-poll-interval` is therefore the drain's
+  clock as well as the spool's safety net, which is why its default is a
+  minute. Draining on `agent-river-observers` would be sharper and belongs
+  with the launcher, debounced — that hook fires on every tool call.
 - **A full queue defers, it does not drop** — intake stops and the files stay
   in the inbox, one log line per scan rather than one per file.
 

@@ -6371,17 +6371,37 @@ it clears them."
 ;; file, scan, and ask what the filesystem says.
 
 (defmacro agent-river-launch-test--with-spool (&rest body)
-  "Run BODY with an empty spool in a temporary directory."
+  "Run BODY with an empty spool in a temporary directory.
+
+The rule holds everything it matches, because being held is the only way
+to be in the queue: a candidate nothing refuses is drained in the same
+breath it is taken in, which is what shadow mode *is*.  Tests about
+intake therefore gate it shut and tests about gating supply their own."
   (declare (indent 0))
   `(let* ((agent-river-launch-spool (make-temp-file "agent-river-spool" t))
           (agent-river-launch--queue nil)
           (agent-river-launch--decisions nil)
+          (agent-river-launch--accepted nil)
+          (agent-river-launch-rules
+           (list (list :name "hold" :match t
+                       :gate (lambda (_candidate) "held by the test"))))
           (agent-river-launch-sources
            (list (cons "river" #'agent-river-launch--read-river)))
+          (agent-river-registry (make-hash-table :test 'equal))
           (agent-river-auto-display nil))
      (unwind-protect
          (progn (agent-river-launch--ensure-dirs) ,@body)
        (delete-directory agent-river-launch-spool t))))
+
+(defun agent-river-launch-test--busy (id label)
+  "Register a session ID labelled LABEL and leave it mid-turn."
+  (let ((state (agent-river-state id label)))
+    (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"))
+    state))
+
+(defun agent-river-launch-test--decisions ()
+  "Return the decisions so far, newest first."
+  (mapcar (lambda (e) (plist-get e :decision)) agent-river-launch--decisions))
 
 (defun agent-river-launch-test--deliver (data &optional name)
   "Write DATA, an alist, into the inbox as NAME.
@@ -6573,11 +6593,216 @@ file the moment it appears, and a half-written one reads as malformed."
     (agent-river-launch-test--deliver '((source . "river") (id . "42@t1"))
                                       "b.json")
     (agent-river-launch-scan)
-    (should (equal '(duplicate queued)
-                   (mapcar (lambda (e) (plist-get e :decision))
-                           agent-river-launch--decisions)))
+    (should (equal '(duplicate held queued)
+                   (agent-river-launch-test--decisions)))
     (should (seq-every-p (lambda (e) (plist-get e :reason))
                          agent-river-launch--decisions))))
+
+
+;;; Rules -- which candidates are worth acting on, and when
+
+(ert-deftest agent-river-launch-test-match-is-all-of-its-pairs ()
+  (let ((candidate '(:source "gh" :title "crash in the fold" :actor "octocat")))
+    (should (agent-river-launch--matches-p
+             '(:match ((:source . "gh") (:title . "crash"))) candidate))
+    ;; Every pair has to hold: an alist is an `and', or a rule about
+    ;; crashes on GitHub would fire on crashes anywhere.
+    (should-not (agent-river-launch--matches-p
+                 '(:match ((:source . "gh") (:title . "typo"))) candidate))
+    ;; A list is any-of, which is what makes a set of trusted authors one
+    ;; rule rather than one rule each.
+    (should (agent-river-launch--matches-p
+             '(:match ((:actor . ("dependabot" "octocat")))) candidate))
+    ;; A field the candidate does not carry cannot match.
+    (should-not (agent-river-launch--matches-p
+                 '(:match ((:cwd . "anything"))) candidate))))
+
+(ert-deftest agent-river-launch-test-match-t-and-match-function ()
+  (let ((candidate '(:source "gh" :title "crash")))
+    (should (agent-river-launch--matches-p '(:match t) candidate))
+    (should (agent-river-launch--matches-p
+             (list :match (lambda (c) (equal (plist-get c :source) "gh")))
+             candidate))
+    (should-not (agent-river-launch--matches-p
+                 (list :match (lambda (_c) nil)) candidate))))
+
+(ert-deftest agent-river-launch-test-first-matching-rule-wins ()
+  (let ((agent-river-launch-rules
+         '((:name "specific" :match ((:source . "gh")))
+           (:name "everything" :match t))))
+    (should (equal "specific"
+                   (plist-get (agent-river-launch--rule-for '(:source "gh"))
+                              :name)))
+    (should (equal "everything"
+                   (plist-get (agent-river-launch--rule-for '(:source "river"))
+                              :name)))))
+
+(ert-deftest agent-river-launch-test-unmatched-is-final ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules '((:name "gh only"
+                                       :match ((:source . "\\`gh\\'"))))))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      ;; `:match' is a property of the candidate and waiting will not change
+      ;; it, so this is decided rather than queued -- and filed, not left in
+      ;; the inbox to be asked the same question on every scan.
+      (should (null agent-river-launch--queue))
+      (should (equal '(unmatched) (agent-river-launch-test--decisions)))
+      (should (= 1 (length (agent-river-launch-test--files "done"))))
+      (should (null (agent-river-launch-test--files "queued"))))))
+
+(ert-deftest agent-river-launch-test-nothing-holding-it-goes-straight-through ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules '((:name "everything" :match t))))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      ;; The dry run runs end to end: the last step is a no-op instead of a
+      ;; process, so the queue empties and the log says what would have
+      ;; happened at the moment it would have happened.
+      (should (null agent-river-launch--queue))
+      (should (equal '(ready queued) (agent-river-launch-test--decisions)))
+      (should (= 1 (length (agent-river-launch-test--files "done")))))))
+
+(ert-deftest agent-river-launch-test-a-gate-refusal-is-not-final ()
+  (agent-river-launch-test--with-spool
+    (let* ((open nil)
+           (agent-river-launch-rules
+            (list (list :name "when open" :match t
+                        :gate (lambda (_c) (unless open "not open yet"))))))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      (should (= 1 (length agent-river-launch--queue)))
+      ;; The world changes and the same candidate is asked again.  Refusing
+      ;; finally would throw work away for having arrived at a busy moment.
+      (setq open t)
+      (agent-river-launch-drain)
+      (should (null agent-river-launch--queue))
+      (should (eq 'ready (car (agent-river-launch-test--decisions)))))))
+
+(ert-deftest agent-river-launch-test-a-hold-is-logged-on-change-only ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+    (agent-river-launch-scan)
+    (should (equal '(held queued) (agent-river-launch-test--decisions)))
+    ;; Asked again every minute for as long as it is held.  Sixty identical
+    ;; lines an hour would bury the transitions this log exists to show.
+    (agent-river-launch-drain)
+    (agent-river-launch-drain)
+    (should (equal '(held queued) (agent-river-launch-test--decisions)))))
+
+(ert-deftest agent-river-launch-test-a-changed-hold-is-logged-again ()
+  (agent-river-launch-test--with-spool
+    (let* ((reason "waiting on alpha")
+           (agent-river-launch-rules
+            (list (list :name "r" :match t :gate (lambda (_c) reason)))))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      (setq reason "waiting on the budget")
+      (agent-river-launch-drain)
+      (should (equal '(held held queued) (agent-river-launch-test--decisions)))
+      (should (equal "waiting on the budget"
+                     (plist-get (car agent-river-launch--decisions) :reason))))))
+
+(ert-deftest agent-river-launch-test-editing-the-rules-releases-a-candidate ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+    (agent-river-launch-scan)
+    (should (= 1 (length agent-river-launch--queue)))
+    ;; The match is asked again rather than remembered, so a rule edited
+    ;; between a delivery and the moment it could run takes effect.
+    (setq agent-river-launch-rules nil)
+    (agent-river-launch-drain)
+    (should (null agent-river-launch--queue))
+    (should (eq 'unmatched (car (agent-river-launch-test--decisions))))))
+
+(ert-deftest agent-river-launch-test-gate-counts-running-sessions ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules
+           '((:name "quiet" :match t :gate ((:max-concurrent . 1))))))
+      (agent-river-launch-test--busy "s1" "alpha")
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      (should (= 1 (length agent-river-launch--queue)))
+      (should (string-match-p "limit 1"
+                              (plist-get (car agent-river-launch--decisions)
+                                         :reason)))
+      ;; The session ends and the candidate goes.
+      (clrhash agent-river-registry)
+      (agent-river-launch-drain)
+      (should (null agent-river-launch--queue)))))
+
+(ert-deftest agent-river-launch-test-gate-waits-for-a-quiet-river ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules
+           '((:name "when idle" :match t :gate ((:idle . t))))))
+      (agent-river-launch-test--busy "s1" "alpha")
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      ;; Named, because "someone is working" is not something a reader can
+      ;; act on and "alpha is mid-turn" is.
+      (should (string-match-p "alpha"
+                              (plist-get (car agent-river-launch--decisions)
+                                         :reason))))))
+
+(ert-deftest agent-river-launch-test-gate-refuses-onto-a-failing-session ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules
+           '((:name "not while failing" :match t :gate ((:no-failures . t))))))
+      (let ((state (agent-river-launch-test--busy "s1" "alpha")))
+        (agent-river-test--fail state agent-river-fail-streak-threshold))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      (should (= 1 (length agent-river-launch--queue)))
+      (should (string-match-p "consecutive failures"
+                              (plist-get (car agent-river-launch--decisions)
+                                         :reason))))))
+
+(ert-deftest agent-river-launch-test-budget-counts-what-it-let-through ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules
+           '((:name "twice an hour" :match t :gate ((:budget . (2 . 3600)))))))
+      (dotimes (n 4)
+        (agent-river-launch-test--deliver
+         (list (cons 'source "river") (cons 'id (format "%d" n))))
+        (agent-river-launch-scan))
+      ;; Two went, two are waiting for the window to move -- and the ones
+      ;; that went are counted even though nothing was launched, which is
+      ;; what makes a budget legible before it matters.
+      (should (= 2 (length agent-river-launch--queue)))
+      (should (= 2 (seq-count (lambda (d) (eq d 'ready))
+                              (agent-river-launch-test--decisions)))))))
+
+(ert-deftest agent-river-launch-test-hours-may-cross-midnight ()
+  (should (agent-river-launch--within-hours-p 0 24))
+  (let ((hour (string-to-number (format-time-string "%H"))))
+    (should (agent-river-launch--within-hours-p hour (1+ hour)))
+    ;; Overnight is when this is meant to run, so an end below a start reads
+    ;; as crossing midnight rather than as an empty window.
+    (should (agent-river-launch--within-hours-p hour (mod (1- hour) 24)))
+    (should-not (agent-river-launch--within-hours-p
+                 (mod (+ hour 1) 24) (mod (+ hour 2) 24)))))
+
+(ert-deftest agent-river-launch-test-a-broken-gate-refuses ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules
+           (list (list :name "broken" :match t
+                       :gate (lambda (_c) (error "no"))))))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      ;; Silence here means "go ahead", so a gate that throws must not be
+      ;; read as silence.  It refuses, and says that it broke.
+      (should (= 1 (length agent-river-launch--queue)))
+      (should (string-match-p "errored"
+                              (plist-get (car agent-river-launch--decisions)
+                                         :reason)))))
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules
+           '((:name "typo" :match t :gate ((:no-such-check . t))))))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      ;; A gate nobody implements is a typo in a config, and reading it as
+      ;; "nothing to check" would silently arm a rule its author gated.
+      (should (= 1 (length agent-river-launch--queue))))))
 
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here

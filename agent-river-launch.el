@@ -25,15 +25,17 @@
 ;;   launcher -> session     start it
 ;;   queue                   what has been decided and not yet started
 ;;
-;; What is built here is the first rung of four: source, ledger and queue,
-;; with **no launcher at all**.  Candidates arrive, are deduplicated, are
-;; queued, and are looked at in `*agent-river-queue*'.  Nothing starts,
-;; because nothing here can.  That is the point rather than an unfinished
-;; edge: the path from "watch it decide" to "let it run overnight" is paved
-;; with a fortnight of decisions, and the decisions only accrue in wall-clock
-;; time, so the log has to be running long before the launcher exists.
+;; What is built here is the first rung of four: source, rule, ledger and
+;; queue, with **no launcher at all**.  Candidates arrive, are deduplicated,
+;; are matched against a rule, are held until its gate opens, and are then
+;; decided `ready' -- the whole pipeline, with a no-op where the process
+;; would go.  It is a dry run rather than a half-built one, and that is the
+;; point rather than an unfinished edge: the path from "watch it decide" to
+;; "let it run overnight" is paved with a fortnight of decisions, and
+;; decisions only accrue in wall-clock time, so the log has to be running
+;; long before the launcher exists.
 ;;
-;; Rules and the launcher are the next two commits.  See the README section
+;; The launcher is the next commit.  See the README section
 ;; "A third direction: starting a session from an event" for the reasoning
 ;; behind all of it, including the parts not written yet.
 ;;
@@ -341,19 +343,210 @@ CANDIDATE may be a plist or, where reading failed, a file name."
   (>= (length agent-river-launch--queue) agent-river-launch-queue-limit))
 
 
+;;; Rules -- which candidates are worth acting on, and when
+;;
+;; A rule is data with functions as the way out, rather than a function with
+;; data as a special case.  The reason is the first rung: calibrating means
+;; *reading*, and a declarative rule can be explained in the queue -- matched
+;; on source `gh', held because two sessions are already running -- where a
+;; function can only be named.  What holds either way is that the decision log
+;; records the outcome, so a function rule is still answerable for afterwards;
+;; it just cannot explain itself in advance.
+;;
+;; Two halves, and the split is not cosmetic: `:match' asks whether this is the
+;; kind of thing the rule is about, which is a property of the candidate alone
+;; and never changes; `:gate' asks whether now is the moment, which is a
+;; property of the world and changes every minute.  So a candidate no rule
+;; matches is finished -- nothing will ever match it -- and a candidate a gate
+;; refuses stays in the queue and is asked again.  Collapsing the two would
+;; throw away work for having arrived while an agent happened to be busy.
+
+(defcustom agent-river-launch-rules
+  '((:name "everything" :match t))
+  "Rules deciding which candidates are acted on, and when.
+
+Each rule is a plist:
+
+  :name    what the decision log calls it.
+  :match   t, an alist of (FIELD . SPEC), or a function of the candidate.
+  :gate    nil, an alist of (CHECK . VALUE), or a function of the candidate
+           returning nil to allow or a string saying why not.
+
+In a `:match' alist FIELD is one of :source :title :actor :key :cwd, and
+SPEC is a regexp, or a list of regexps of which one must match.  All pairs
+must hold.  A regexp rather than a comparison because most of these fields
+are prose; anchor it (\"\\\\`gh\\\\'\") where you mean the whole value.
+
+In a `:gate' alist CHECK is one of:
+
+  :max-concurrent N       refuse while N or more sessions are running.
+  :idle t                 refuse while any agent is mid-turn.
+  :no-failures t          refuse while any session is on a failure streak.
+  :budget (N . SECONDS)   refuse after N of this rule in that window.
+  :hours (START . END)    allow only between those local hours.
+
+The default matches everything and gates nothing, which is what makes a
+freshly delivered candidate visible without any configuration.  It is a
+rule like any other rather than a hidden fallback, so removing it is a
+thing you can see yourself doing.
+
+A gate must state its reason, which is why a function returns the reason
+rather than a boolean.  The refusals are the evidence the later rungs are
+armed on, and \"refused\" without \"because the budget was spent\" is not
+evidence of anything."
+  :type '(repeat sexp))
+
+(defun agent-river-launch--field (candidate field)
+  "Return CANDIDATE's FIELD as a string, or nil."
+  (let ((value (plist-get candidate field)))
+    (and (stringp value) value)))
+
+(defun agent-river-launch--spec-p (spec value)
+  "Return non-nil if VALUE satisfies SPEC."
+  (and value
+       (cond
+        ((eq spec t) t)
+        ((stringp spec) (string-match-p spec value))
+        ((listp spec) (seq-some (lambda (one) (string-match-p one value)) spec)))))
+
+(defun agent-river-launch--matches-p (rule candidate)
+  "Return non-nil if RULE's `:match' holds for CANDIDATE."
+  (let ((match (plist-get rule :match)))
+    (cond
+     ((eq match t) t)
+     ((functionp match) (funcall match candidate))
+     ((null match) nil)
+     (t (seq-every-p (lambda (pair)
+                       (agent-river-launch--spec-p
+                        (cdr pair)
+                        (agent-river-launch--field candidate (car pair))))
+                     match)))))
+
+(defun agent-river-launch--rule-for (candidate)
+  "Return the first rule in `agent-river-launch-rules' matching CANDIDATE.
+
+Asked again at every drain rather than remembered on the candidate: rules
+are edited between a delivery and the moment it could run, and a cached
+answer would go on citing a rule that no longer says what it used to."
+  (seq-find (lambda (rule)
+              (condition-case err
+                  (agent-river-launch--matches-p rule candidate)
+                (error (agent-river-log
+                        "fail" (format "rule %s: %s" (plist-get rule :name)
+                                       (error-message-string err)))
+                       nil)))
+            agent-river-launch-rules))
+
+(defvar agent-river-launch--accepted nil
+  "Times candidates were accepted, as (TIME . RULE-NAME), newest first.
+What `:budget' counts.  In shadow mode these are launches that did not
+happen, which is exactly what makes the budget legible before it matters.")
+
+(defun agent-river-launch--spent (name seconds)
+  "Return how many of rule NAME were accepted within the last SECONDS."
+  (let ((cutoff (time-subtract (current-time) seconds)))
+    (seq-count (lambda (entry)
+                 (and (equal (cdr entry) name)
+                      (time-less-p cutoff (car entry))))
+               agent-river-launch--accepted)))
+
+(defun agent-river-launch--working ()
+  "Return the label of a session that is mid-turn, or nil."
+  (let (label)
+    (maphash (lambda (_key state)
+               (when (and (not label) (agent-river--state-working-p state))
+                 (setq label (agent-river-state-label state))))
+             agent-river-registry)
+    label))
+
+(defun agent-river-launch--failing ()
+  "Return (LABEL . STREAK) for a live session on a failure streak, or nil."
+  (let (found)
+    (maphash (lambda (_key state)
+               (when (and (not found)
+                          (agent-river--active-p state)
+                          (>= (agent-river-state-fail-streak state)
+                              agent-river-fail-streak-threshold))
+                 (setq found (cons (agent-river-state-label state)
+                                   (agent-river-state-fail-streak state)))))
+             agent-river-registry)
+    found))
+
+(defun agent-river-launch--within-hours-p (start end)
+  "Return non-nil if the local hour is in [START, END).
+A window that wraps midnight is the useful case here -- overnight is when
+this is meant to run -- so END below START reads as crossing it."
+  (let ((hour (string-to-number (format-time-string "%H"))))
+    (if (<= start end)
+        (and (>= hour start) (< hour end))
+      (or (>= hour start) (< hour end)))))
+
+(defun agent-river-launch--check (check value rule)
+  "Return why CHECK with VALUE refuses RULE now, or nil to allow."
+  (pcase check
+    (:max-concurrent
+     (let ((n (agent-river--active-count)))
+       (and (>= n value) (format "%d session%s running, limit %d"
+                                 n (if (= n 1) "" "s") value))))
+    (:idle
+     (and value (let ((label (agent-river-launch--working)))
+                  (and label (format "%s is mid-turn" label)))))
+    (:no-failures
+     (and value (let ((failing (agent-river-launch--failing)))
+                  (and failing (format "%s is on %d consecutive failures"
+                                       (car failing) (cdr failing))))))
+    (:budget
+     (let* ((limit (car value))
+            (window (cdr value))
+            (spent (agent-river-launch--spent (plist-get rule :name) window)))
+       (and (>= spent limit)
+            (format "%d in the last %ds, limit %d" spent window limit))))
+    (:hours
+     (and (not (agent-river-launch--within-hours-p (car value) (cdr value)))
+          (format "%s is outside %02d:00-%02d:00"
+                  (format-time-string "%H:%M") (car value) (cdr value))))
+    (_ (format "unknown gate %s" check))))
+
+(defun agent-river-launch--gate (rule candidate)
+  "Return why RULE refuses CANDIDATE now, or nil to allow.
+
+A gate that throws refuses and says so, rather than being treated as
+silence.  Silence here means \"go ahead\", and a broken gate must never be
+the thing that lets something run."
+  (let ((gate (plist-get rule :gate)))
+    (condition-case err
+        (cond
+         ((null gate) nil)
+         ((functionp gate) (funcall gate candidate))
+         (t (seq-some (lambda (pair)
+                        (agent-river-launch--check (car pair) (cdr pair) rule))
+                      gate)))
+      (error (format "gate errored (%s)" (error-message-string err))))))
+
+
 ;;; Intake
+
+(defun agent-river-launch--finish (candidate decision reason)
+  "File CANDIDATE under `done/' as DECISION, because of REASON."
+  (let ((file (plist-get candidate :file)))
+    (when (and file (file-exists-p file))
+      (rename-file file (agent-river-launch--path
+                         "done" (plist-get candidate :key))
+                   t)))
+  (agent-river-launch--decide decision candidate reason))
 
 (defun agent-river-launch--take-in (file)
   "Take FILE out of the inbox, and return its decision.
 
-Three outcomes, and each moves the file, because a file left in the inbox
+Four outcomes, and each moves the file, because a file left in the inbox
 is a file that will be read again on the next scan.  Unreadable goes to
 `failed/' and is never read again -- kept rather than deleted, since the
 only way to fix a source is to look at what it wrote.  A repeat is
 deleted: `done/' or `queued/' already holds the canonical copy under the
 same name, and a poller with no memory of its own would otherwise fill the
-disk with identical files.  Anything else is moved to `queued/', which is
-what makes the queue survive a restart."
+disk with identical files.  One no rule matches is finished in `done/'.
+Anything else is moved to `queued/', which is what makes the queue survive
+a restart."
   (let ((candidate (condition-case err
                        (agent-river-launch--candidate file)
                      (error (rename-file file (agent-river-launch--dir "failed")
@@ -371,11 +564,20 @@ what makes the queue survive a restart."
          ((agent-river-launch--seen-p key)
           (delete-file file)
           (agent-river-launch--decide 'duplicate candidate "already taken in"))
+         ;; No rule is a *final* answer, unlike a gate refusing: `:match' is a
+         ;; property of the candidate and nothing about waiting will change
+         ;; it, so the candidate is finished here rather than sitting in the
+         ;; queue being asked a question that already has an answer.
+         ((null (agent-river-launch--rule-for candidate))
+          (agent-river-launch--finish candidate 'unmatched "no rule matched"))
          (t
           (let ((dest (agent-river-launch--path "queued" key)))
             (rename-file file dest t)
             (agent-river-launch--enqueue (plist-put candidate :file dest)))
-          (agent-river-launch--decide 'queued candidate "no rule yet")))))))
+          (agent-river-launch--decide
+           'queued candidate
+           (format "rule %s" (plist-get (agent-river-launch--rule-for candidate)
+                                        :name)))))))))
 
 (defun agent-river-launch--inbox ()
   "Return the delivered files, oldest first."
@@ -429,11 +631,69 @@ many candidates were taken in."
         (when (eq 'queued (plist-get (agent-river-launch--take-in (pop files))
                                      :decision))
           (setq taken (1+ taken)))))
+    (agent-river-launch--drain)
     (agent-river-launch--redraw)
     (when (called-interactively-p 'interactive)
       (message "agent-river: %d taken in, %d queued"
                taken (length agent-river-launch--queue)))
     taken))
+
+
+;;; The drain
+;;
+;; Where a gate is asked and, one commit from now, where a launcher is called.
+;; There is no launcher yet, so an accepted candidate is decided `ready' and
+;; filed -- the pipeline runs end to end and the last step is a no-op instead
+;; of a process.  That is what makes this a dry run rather than a half-built
+;; one: the queue drains, the budget is spent, and the log says what would
+;; have happened at the moment it would have happened.
+;;
+;; The gates read the world, so this has to run when nothing has been
+;; delivered -- an agent going idle is what unblocks a held candidate, and no
+;; file arrives to say so.  `agent-river-launch-poll-interval' is therefore
+;; the drain's clock as well as the spool's safety net, which is the second
+;; job that variable has and the reason its default is a minute rather than an
+;; hour.  Draining on `agent-river-observers' would be sharper and belongs
+;; with the launcher, debounced: that hook fires on every tool call.
+
+(defun agent-river-launch--drain ()
+  "Ask each queued candidate's gate, and file the ones that may go."
+  (let (keep)
+    (dolist (candidate agent-river-launch--queue)
+      (let ((rule (agent-river-launch--rule-for candidate)))
+        (cond
+         ;; The rules were edited under it.  Re-asking is the point of not
+         ;; caching the match, and the answer is as final here as at intake.
+         ((null rule)
+          (agent-river-launch--finish candidate 'unmatched
+                                      "no rule matches it any more"))
+         (t
+          (let ((reason (agent-river-launch--gate rule candidate)))
+            (cond
+             (reason
+              ;; Logged on change only.  A candidate held by a budget for an
+              ;; hour is asked sixty times, and sixty identical lines would
+              ;; bury the transitions this log exists to show.
+              (unless (equal reason (plist-get candidate :held))
+                (agent-river-launch--decide 'held candidate reason))
+              (push (plist-put candidate :held reason) keep))
+             (t
+              (push (cons (current-time) (plist-get rule :name))
+                    agent-river-launch--accepted)
+              (agent-river-launch--finish
+               candidate 'ready
+               (format "rule %s, nothing to launch it with yet"
+                       (plist-get rule :name))))))))))
+    (setq agent-river-launch--queue (nreverse keep))))
+
+;;;###autoload
+(defun agent-river-launch-drain ()
+  "Ask the gates now, rather than waiting for the next scan."
+  (interactive)
+  (agent-river-launch--drain)
+  (agent-river-launch--redraw)
+  (when (called-interactively-p 'interactive)
+    (message "agent-river: %d still queued" (length agent-river-launch--queue))))
 
 
 ;;; Watching the spool
@@ -470,9 +730,11 @@ many candidates were taken in."
   "Watch `agent-river-launch-spool' and queue what is delivered to it.
 
 Nothing is started.  This is the first of four rungs: candidates arrive,
-are deduplicated against the ledger, and wait in `*agent-river-queue*'
+are deduplicated against the ledger, are matched and gated by
+`agent-river-launch-rules', and are decided about in `*agent-river-queue*'
 where you can read what would have happened.  There is no launcher in this
-file yet, so there is nothing for a wrong rule to cost.
+file yet, so there is nothing for a wrong rule to cost -- which is what
+makes it worth pointing a rule at real events and leaving it running.
 
 Turning it on takes in whatever was delivered while it was off, and
 rebuilds the queue from disk."
@@ -516,8 +778,11 @@ rebuilds the queue from disk."
 ;; the issue, and the HUD is not Markdown for exactly that reason.
 
 (defvar agent-river-launch--decision-faces
-  '((queued . agent-river-act)
+  '((ready . agent-river-prompt)
+    (queued . agent-river-act)
+    (held . agent-river-signal)
     (duplicate . agent-river-stale)
+    (unmatched . agent-river-stale)
     (malformed . agent-river-fail))
   "Alist of decision to the face it is shown in.
 Inherited through agent-river's own faces, so the queue reads in whatever
@@ -556,7 +821,19 @@ the theme already means by these -- no colour is chosen here.")
                   (if actor (propertize (format "  <%s>" actor)
                                         'face 'agent-river-time)
                     ""))
-                "\n")))
+                "\n")
+        ;; Why it is still here rather than gone: the rule it is waiting under
+        ;; and what that rule is waiting for.  A queue that says only what is
+        ;; in it leaves the one question a reader has -- why has this not
+        ;; happened -- to be answered from the decision log by hand.
+        (let ((rule (agent-river-launch--rule-for candidate))
+              (held (plist-get candidate :held)))
+          (insert (propertize (format "         %s%s\n"
+                                      (if rule
+                                          (format "rule %s" (plist-get rule :name))
+                                        "no rule")
+                                      (if held (format " -- held: %s" held) ""))
+                              'face 'agent-river-think)))))
     (insert (propertize "\ndecisions\n" 'face 'agent-river-prompt))
     (if (null agent-river-launch--decisions)
         (insert (propertize "  none yet\n" 'face 'agent-river-stale))
