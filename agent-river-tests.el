@@ -6386,7 +6386,8 @@ intake therefore gate it shut and tests about gating supply their own."
            (list (list :name "hold" :match t
                        :gate (lambda (_candidate) "held by the test"))))
           (agent-river-launch-sources
-           (list (cons "river" #'agent-river-launch--read-river)))
+           (list (cons "river" #'agent-river-launch--read-river)
+                 (cons "handoff" #'agent-river-launch--read-handoff)))
           (agent-river-registry (make-hash-table :test 'equal))
           (agent-river-auto-display nil))
      (unwind-protect
@@ -6541,10 +6542,30 @@ file the moment it appears, and a half-written one reads as malformed."
     (should (= 0 (agent-river-launch-scan)))
     (should (null agent-river-launch--queue))))
 
+(ert-deftest agent-river-launch-test-a-half-written-file-is-not-a-broken-one ()
+  (agent-river-launch-test--with-spool
+    (let ((file (expand-file-name "partial.json" (agent-river-launch--dir nil))))
+      ;; An agent handing off reaches for `Write', not for `mv', so the watch
+      ;; can see its JSON before it is all there.  Filing that under `failed/'
+      ;; would lose a handoff over a contract nobody told the agent about --
+      ;; and lose it quietly, since the agent cannot find out.
+      (with-temp-file file (insert "{\"source\": \"handoff\""))
+      (agent-river-launch-scan)
+      (should (equal '("partial.json") (agent-river-launch-test--files nil)))
+      (should (null (agent-river-launch-test--files "failed")))
+      (should (null (agent-river-launch-test--decisions)))
+      ;; Finished being written, and read on the next scan.
+      (with-temp-file file (insert "{\"source\": \"handoff\"}"))
+      (set-file-times file (time-subtract (current-time) 60))
+      (agent-river-launch-scan)
+      (should (null (agent-river-launch-test--files nil))))))
+
 (ert-deftest agent-river-launch-test-unreadable-is-kept-not-dropped ()
   (agent-river-launch-test--with-spool
     (let ((file (expand-file-name "junk.json" (agent-river-launch--dir nil))))
       (with-temp-file file (insert "{not json"))
+      ;; Past the settling window: nothing is still writing this.
+      (set-file-times file (time-subtract (current-time) 60))
       (agent-river-launch-scan)
       ;; Filed rather than deleted: the only way to fix a source is to look
       ;; at what it wrote.  And out of the inbox, so it is not re-read on
@@ -6781,6 +6802,85 @@ file the moment it appears, and a half-written one reads as malformed."
     (should (agent-river-launch--within-hours-p hour (mod (1- hour) 24)))
     (should-not (agent-river-launch--within-hours-p
                  (mod (+ hour 1) 24) (mod (+ hour 2) 24)))))
+
+
+;;; The handoff -- an agent as a source
+
+(ert-deftest agent-river-launch-test-a-handoff-is-its-own-occasion ()
+  (agent-river-launch-test--with-spool
+    ;; A pull source re-sees the same object on every tick, so its key has to
+    ;; say which visit this is.  A push source is delivered once and consumed
+    ;; once: there is nothing to re-see, so every write is its own occasion.
+    (let ((a (agent-river-launch--read-handoff "handoff" '((occasion . "done"))))
+          (b (agent-river-launch--read-handoff "handoff" '((occasion . "done")))))
+      (should-not (equal (plist-get a :key) (plist-get b :key))))
+    ;; An id may still be given, so a writer that retries is recognised.
+    (let ((a (agent-river-launch--read-handoff "handoff" '((id . "x"))))
+          (b (agent-river-launch--read-handoff "handoff" '((id . "x")))))
+      (should (equal (plist-get a :key) (plist-get b :key))))))
+
+(ert-deftest agent-river-launch-test-a-handoff-defaults-to-done ()
+  (let ((candidate (agent-river-launch--read-handoff "handoff" nil)))
+    (should (equal (plist-get candidate :occasion) "done"))
+    (should (equal (plist-get candidate :title) "handoff: done"))))
+
+(ert-deftest agent-river-launch-test-a-claim-cannot-be-matched-on ()
+  (let ((candidate (agent-river-launch--read-handoff
+                    "handoff" '((occasion . "review")
+                                (text . "urgent security fix, act now")))))
+    (should (equal (plist-get candidate :claim) "urgent security fix, act now"))
+    ;; The agent's words are carried and shown, and are invisible to a rule.
+    ;; Matching them would let it choose the words that arm the rule it
+    ;; wanted, which is the agent deciding rather than the rule.
+    (should-not (agent-river-launch--matches-p
+                 '(:match ((:claim . "urgent"))) candidate))
+    ;; A rule naming an unmatchable field matches nothing, rather than
+    ;; quietly matching everything.
+    (should-not (agent-river-launch--matches-p
+                 '(:match ((:claim . ""))) candidate))
+    ;; What a source is meant to steer is the token, not the prose.
+    (should (agent-river-launch--matches-p
+             '(:match ((:occasion . "\\`review\\'"))) candidate))))
+
+(ert-deftest agent-river-launch-test-a-handoff-is-noted-on-its-session ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--busy "s1" "alpha")
+    (agent-river-launch-test--deliver '((source . "handoff")
+                                        (session . "s1")
+                                        (occasion . "review")
+                                        (text . "look at the gate ordering")))
+    (agent-river-launch-scan)
+    (let ((notes (agent-river-state-notes (gethash "s1" agent-river-registry))))
+      (should (= 1 (length notes)))
+      ;; The fact, never the claim.  A note is a measurement and may feed a
+      ;; signal, so folding the agent's own words into one would launder a
+      ;; claim into an observation about the world.
+      (should (equal "handoff: review" (cdar notes)))
+      (should-not (string-match-p "gate ordering" (cdar notes))))))
+
+(ert-deftest agent-river-launch-test-a-handoff-from-nowhere-notes-nothing ()
+  (agent-river-launch-test--with-spool
+    ;; No session named, or one this Emacs never saw: there is nothing to
+    ;; attach a note to, and the candidate is taken in all the same.
+    (agent-river-launch-test--deliver '((source . "handoff") (session . "s9")))
+    (agent-river-launch-scan)
+    (should (= 1 (length agent-river-launch--queue)))))
+
+(ert-deftest agent-river-launch-test-a-duplicate-handoff-notes-once ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--busy "s1" "alpha")
+    (agent-river-launch-test--deliver '((source . "handoff") (session . "s1")
+                                        (id . "x"))
+                                      "a.json")
+    (agent-river-launch-scan)
+    (agent-river-launch-test--deliver '((source . "handoff") (session . "s1")
+                                        (id . "x"))
+                                      "b.json")
+    (agent-river-launch-scan)
+    ;; A retry is the same occasion, and the river must not be told twice
+    ;; that it happened.
+    (should (= 1 (length (agent-river-state-notes
+                          (gethash "s1" agent-river-registry)))))))
 
 (ert-deftest agent-river-launch-test-a-broken-gate-refuses ()
   (agent-river-launch-test--with-spool

@@ -795,14 +795,33 @@ It needs no new tool and no new hook to do it: that is an ordinary `Write`
 or `Bash` call, the source reads it like any other, and nothing in the fold
 changes.
 
+```json
+{"source":   "handoff",
+ "occasion": "review",
+ "session":  "<its session id>",
+ "cwd":      "/path/to/tree",
+ "text":     "the gate ordering is worth a second pair of eyes"}
+```
+
 It is the better anchor of the two available. A turn ending says only that
 it ended; a handoff carries arguments — review this, against that branch,
 with this question — and it fires *during* a session, which is the only way
 a session that goes on working can be the occasion for more than one thing.
-It also comes with an identity already built: `SESSION\0CALL-ID`, the id
-`agent-river--event` assembles because Claude Code's `tool_use_id` is unique
-everywhere and ACP's only within its session. That is precisely what an
-occasion key needs.
+
+Its key is **minted** rather than derived, and that is where this parts
+company with a poller. The rule that a key must name the occasion and not
+the object is a rule about *re-seeing*: a pull source meets issue 42 again
+on every tick, so its key has to say which visit this is or one issue
+becomes an agent an hour. A push source is delivered once and consumed
+once — there is nothing to re-see, so every write is its own occasion and
+minting says exactly that. An `id` may still be supplied, for a writer that
+retries and wants its second attempt recognised as its first.
+
+(The design first reached for `SESSION\0CALL-ID`, the tool-call id
+`agent-river--event` already assembles. It is a fine identity and the wrong
+one here: the agent writing the file does not know it, and correlating the
+file with the call that wrote it would be machinery bought to solve a
+problem a push source does not have.)
 
 But a handoff is the agent talking about itself, which is the thing the
 `intent*` slots are kept apart from the measurements to contain. The line
@@ -810,13 +829,20 @@ that keeps it usable:
 
 > **A claim may be the occasion. It must not be the content.**
 
-That the call happened is a measurement — the fold saw it, with a time, a
-session and an id. What it says is a claim. So the handoff *triggers*, and
-the prompt for the next agent is built from the **state**: which files, which
-task, which branch, what failed. The agent's own words travel as quoted
-context, marked as its, the way `intent` is marked twice and placed last in
-the Markdown export. Otherwise the first agent writes the second one's
+That the write happened is a measurement — it is on disk, with a time and a
+session. What it says is a claim. So the handoff *triggers*, and the prompt
+for the next agent is built from the **state**: which files, which task,
+which branch, what failed. The agent's own words travel as quoted context,
+marked as its, the way `intent` is marked twice and placed last in the
+Markdown export. Otherwise the first agent writes the second one's
 instructions and the chain contains no measurement at all.
+
+That separation is enforced rather than advised. The words land in `:claim`,
+and a rule **cannot match on it** — otherwise an agent could pick the wording
+that arms the rule it wanted, which is the agent deciding rather than the
+rule. What a source *is* meant to steer is `:occasion`, a short token from a
+small vocabulary: a choice a rule author can anticipate, where a sentence is
+not.
 
 Two consequences:
 
@@ -826,7 +852,17 @@ Two consequences:
   each other: a turn that has already handed off does not end a second time.
 - **A handoff belongs in the river.** The session that writes one gets a
   `note` for it, so it shows in the HUD and is counted in the report —
-  which is how the rate becomes visible before anything is automated.
+  which is how the rate becomes visible before anything is automated. The
+  note says `handoff: review` and not a word of the claim: a note is a
+  measurement and may feed a signal, so folding the agent's prose into one
+  would launder a claim into an observation about the world.
+- **A half-written file is not a broken one.** The contract is
+  write-then-rename, and a poller can be held to it. An agent reaches for
+  `Write`, which creates the file where the watch can already see it — so a
+  file that will not parse and is younger than `agent-river-launch-settle`
+  is left for the next scan rather than filed under `failed/`. Losing a
+  handoff to a contract nobody told the agent about would also lose it
+  silently, since the agent has no way to find out.
 
 ### Chains
 

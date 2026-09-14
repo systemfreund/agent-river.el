@@ -48,6 +48,18 @@
 ;;   d=~/.local/state/agent-river/spool
 ;;   printf '%s' '{"source":"river","id":"1@t1","title":"hello"}' > $d/x.tmp
 ;;   mv $d/x.tmp $d/x.json
+;;
+;; An agent says it has reached a point the same way, and needs no tool and
+;; no hook to do it -- writing the file *is* the handoff:
+;;
+;;   {"source":  "handoff",
+;;    "occasion": "review",          the token a rule may match
+;;    "session":  "<its session id>",   optional: who, and where to note it
+;;    "cwd":      "/path/to/tree",
+;;    "text":     "the gate ordering is worth a second pair of eyes"}
+;;
+;; `text' is the agent's own words and goes to `:claim', which nothing
+;; matches on and nothing turns into a prompt.  See the field list below.
 
 ;;; Code:
 
@@ -111,6 +123,20 @@ prevents, and at a minute the cost of preventing it is a `directory-files'
 on a directory that is almost always empty."
   :type '(choice (const :tag "No safety net" nil) integer))
 
+(defcustom agent-river-launch-settle 2
+  "Seconds a file that will not parse is given before it is called broken.
+
+The contract is write-then-rename, and a poller can be held to it.  An
+agent handing off cannot: it reaches for `Write', which creates the file
+where the watch can already see it, so its JSON is briefly half there.
+Filing that under `failed/' would lose a handoff over a contract nobody
+told the agent about, and losing it *quietly* -- the agent has no way to
+find out that what it wrote was thrown away.
+
+So a file too young to be trusted is simply left for the next scan.  The
+cost is that a genuinely broken file is filed a couple of seconds late."
+  :type 'number)
+
 (defcustom agent-river-launch-queue-limit 200
   "How many candidates may wait in the queue at once.
 
@@ -145,13 +171,23 @@ display, not the account."
 ;; `agent-river--event' sees one event shape however many hosts feed it.
 ;;
 ;;   :key      the occasion's identity, and the ledger's key
-;;   :source   which adapter read it, and which dialect :payload is in
-;;   :at       when the occasion happened
-;;   :title    one line, for a human reading the queue
-;;   :actor    who caused it -- the provenance guard's input, later
-;;   :cwd      where a session for this would be started
-;;   :payload  the source's own data, unread by anything generic
-;;   :file     where the candidate currently lives on disk
+;;   :source    which adapter read it, and which dialect :payload is in
+;;   :at        when the occasion happened
+;;   :occasion  what kind of occasion, from the source's own small vocabulary
+;;   :title     one line, for a human reading the queue
+;;   :actor     who caused it -- the provenance guard's input, later
+;;   :session   the agent-river session it came from, where one did
+;;   :cwd       where a session for this would be started
+;;   :claim     what the subject said about itself.  Never matched on
+;;   :payload   the source's own data, unread by anything generic
+;;   :file      where the candidate currently lives on disk
+;;
+;; `:claim' is the one field kept deliberately out of reach, and it is the
+;; same separation the `intent*' slots have in the state: a claim is the agent
+;; talking about itself, and the moment it is read as a measurement the loop
+;; closes.  It is shown, marked as the agent's words, and that is all -- see
+;; `agent-river-launch--field', which refuses it, so a rule cannot be steered
+;; by the words of the thing it is deciding about.
 
 (defun agent-river-launch--time (value fallback)
   "Read VALUE as a time, falling back to FALLBACK.
@@ -187,14 +223,64 @@ rather than the run.  So a poller pairs the object with whatever moved:
     (list :key (format "%s/%s" source id)
           :source source
           :at (agent-river-launch--time (alist-get 'at data) nil)
+          :occasion (agent-river-launch--string (alist-get 'occasion data))
           :title (or (agent-river-launch--string (alist-get 'title data)) id)
           :actor (agent-river-launch--string (alist-get 'actor data))
-          :cwd (let ((cwd (agent-river-launch--string (alist-get 'cwd data))))
-                 (and cwd (expand-file-name cwd)))
+          :cwd (agent-river-launch--dir-value (alist-get 'cwd data))
           :payload (alist-get 'payload data))))
 
+(defun agent-river-launch--dir-value (value)
+  "Return VALUE as an absolute directory name, or nil."
+  (let ((dir (agent-river-launch--string value)))
+    (and dir (expand-file-name dir))))
+
+(defun agent-river-launch--mint ()
+  "Return an id for an occasion that is its own, and happens once."
+  (format "%s-%04x" (format-time-string "%Y%m%dT%H%M%S") (random 65536)))
+
+(defun agent-river-launch--read-handoff (source data)
+  "Read DATA as an agent saying it has reached a point, from SOURCE.
+
+The agent needs no tool for this and no hook: it writes a file into the
+spool with an ordinary `Write' or `Bash' call, the source reads it like
+any other, and nothing in the fold changes.
+
+It is the better anchor than a turn ending, because it carries arguments
+-- review this, it is blocked on that -- and because it fires *during* a
+session, which is the only way a session that goes on working can be the
+occasion for more than one thing.
+
+The key is minted here rather than taken from the data, and that is the
+one place this parts company with a poller.  A pull source re-sees the
+same object on every tick, so its key has to say which *visit* this is or
+one issue becomes an agent an hour.  A push source is delivered once and
+consumed once: there is nothing to re-see, so every write is its own
+occasion and minting says exactly that.  An `id' may still be given, for
+a writer that retries and wants the second attempt to be recognised as
+the first.
+
+`text' is the agent's own words and lands in `:claim', which nothing
+matches on.  `occasion' is the short token a rule may match -- keep the
+vocabulary small, since a rule author has to know what to write."
+  (let ((id (or (agent-river-launch--string (alist-get 'id data))
+                (agent-river-launch--mint)))
+        (occasion (or (agent-river-launch--string (alist-get 'occasion data))
+                      "done"))
+        (session (agent-river-launch--string (alist-get 'session data))))
+    (list :key (format "%s/%s" source id)
+          :source source
+          :at (agent-river-launch--time (alist-get 'at data) nil)
+          :occasion occasion
+          :title (format "handoff: %s" occasion)
+          :session session
+          :actor (or session "an agent")
+          :cwd (agent-river-launch--dir-value (alist-get 'cwd data))
+          :claim (agent-river-launch--string (alist-get 'text data))
+          :payload data)))
+
 (defvar agent-river-launch-sources
-  (list (cons "river" #'agent-river-launch--read-river))
+  (list (cons "river" #'agent-river-launch--read-river)
+        (cons "handoff" #'agent-river-launch--read-handoff))
   "Alist of (SOURCE . READER) turning a delivered file into a candidate.
 
 READER is called with the source name and the parsed JSON as an alist,
@@ -372,10 +458,17 @@ Each rule is a plist:
   :gate    nil, an alist of (CHECK . VALUE), or a function of the candidate
            returning nil to allow or a string saying why not.
 
-In a `:match' alist FIELD is one of :source :title :actor :key :cwd, and
-SPEC is a regexp, or a list of regexps of which one must match.  All pairs
-must hold.  A regexp rather than a comparison because most of these fields
-are prose; anchor it (\"\\\\`gh\\\\'\") where you mean the whole value.
+In a `:match' alist FIELD is one of :source :occasion :title :actor
+:session :key :cwd, and SPEC is a regexp, or a list of regexps of which
+one must match.  All pairs must hold.  A regexp rather than a comparison
+because several of these are prose; anchor it (\"\\\\`gh\\\\'\") where you
+mean the whole value.
+
+`:claim' is not among them and cannot be added: it holds what the subject
+of the candidate said about itself, and a rule matching it would let an
+agent choose the words that arm the rule it wanted.  `:occasion' is the
+field a source is meant to steer -- a short token from a small vocabulary,
+which is a choice a rule author can anticipate where a sentence is not.
 
 In a `:gate' alist CHECK is one of:
 
@@ -396,10 +489,23 @@ armed on, and \"refused\" without \"because the budget was spent\" is not
 evidence of anything."
   :type '(repeat sexp))
 
+(defconst agent-river-launch--unmatchable '(:claim)
+  "Candidate fields a rule may not match on.
+
+`:claim' is what the subject of the candidate said about itself.  Letting
+a rule match it would hand the agent the wiring: it could choose the words
+that make its own handoff match the rule it wanted, and a decision made on
+an agent's prose is the agent deciding.  What it *may* steer is
+`:occasion', deliberately -- a short token from a small vocabulary, which
+is a choice a rule author can anticipate and a sentence is not.")
+
 (defun agent-river-launch--field (candidate field)
-  "Return CANDIDATE's FIELD as a string, or nil."
-  (let ((value (plist-get candidate field)))
-    (and (stringp value) value)))
+  "Return CANDIDATE's FIELD as a string, or nil.
+Fields in `agent-river-launch--unmatchable' always read as nil, so a rule
+naming one matches nothing rather than quietly matching anything."
+  (unless (memq field agent-river-launch--unmatchable)
+    (let ((value (plist-get candidate field)))
+      (and (stringp value) value))))
 
 (defun agent-river-launch--spec-p (spec value)
   "Return non-nil if VALUE satisfies SPEC."
@@ -526,6 +632,35 @@ the thing that lets something run."
 
 ;;; Intake
 
+(defun agent-river-launch--settling-p (file)
+  "Return non-nil while FILE is too young to be called broken."
+  (let ((mtime (file-attribute-modification-time (file-attributes file))))
+    (and mtime (< (float-time (time-subtract (current-time) mtime))
+                  agent-river-launch-settle))))
+
+(defun agent-river-launch--note-session (candidate)
+  "Note in the river that CANDIDATE came out of a session, if it names one.
+
+The producer direction, and what `agent-river-note' is for: something only
+this layer can see, folded as an event of the session it is about, so it
+is logged, counted in the report and attributable rather than written
+straight onto a slot.
+
+What is noted is the *fact*, never the claim.  A note is a measurement and
+may therefore feed a signal, so folding in the agent's own words would
+launder a claim into an observation about the world -- the very loop the
+`intent*' slots are kept apart to prevent.  \"handoff: review\" says what
+the agent did; what it thinks stays in `:claim', where nothing reads it
+back to anybody."
+  (let* ((session (plist-get candidate :session))
+         (state (and session (gethash session agent-river-registry))))
+    (when state
+      (ignore-errors
+        (agent-river-note (format "%s: %s"
+                                  (plist-get candidate :source)
+                                  (or (plist-get candidate :occasion) "?"))
+                          session)))))
+
 (defun agent-river-launch--finish (candidate decision reason)
   "File CANDIDATE under `done/' as DECISION, because of REASON."
   (let ((file (plist-get candidate :file)))
@@ -549,35 +684,49 @@ Anything else is moved to `queued/', which is what makes the queue survive
 a restart."
   (let ((candidate (condition-case err
                        (agent-river-launch--candidate file)
-                     (error (rename-file file (agent-river-launch--dir "failed")
-                                         t)
-                            (agent-river-log
-                             "fail" (format "spool: %s (%s)"
-                                            (file-name-nondirectory file)
-                                            (error-message-string err)))
-                            (agent-river-launch--decide
-                             'malformed file (error-message-string err))
-                            nil))))
+                     (error
+                      ;; A file still being written is not a broken file.  The
+                      ;; contract is write-then-rename, but an agent handing
+                      ;; off reaches for `Write' rather than `mv', and filing
+                      ;; its half-finished JSON under `failed/' would lose a
+                      ;; handoff over a contract nobody told it about.  Left
+                      ;; alone, it is read again on the next scan.
+                      (if (agent-river-launch--settling-p file)
+                          nil
+                        (rename-file file (agent-river-launch--dir "failed") t)
+                        (agent-river-log
+                         "fail" (format "spool: %s (%s)"
+                                        (file-name-nondirectory file)
+                                        (error-message-string err)))
+                        (agent-river-launch--decide
+                         'malformed file (error-message-string err))
+                        nil)))))
     (when candidate
       (let ((key (plist-get candidate :key)))
-        (cond
-         ((agent-river-launch--seen-p key)
-          (delete-file file)
-          (agent-river-launch--decide 'duplicate candidate "already taken in"))
-         ;; No rule is a *final* answer, unlike a gate refusing: `:match' is a
-         ;; property of the candidate and nothing about waiting will change
-         ;; it, so the candidate is finished here rather than sitting in the
-         ;; queue being asked a question that already has an answer.
-         ((null (agent-river-launch--rule-for candidate))
-          (agent-river-launch--finish candidate 'unmatched "no rule matched"))
-         (t
-          (let ((dest (agent-river-launch--path "queued" key)))
-            (rename-file file dest t)
-            (agent-river-launch--enqueue (plist-put candidate :file dest)))
-          (agent-river-launch--decide
-           'queued candidate
-           (format "rule %s" (plist-get (agent-river-launch--rule-for candidate)
-                                        :name)))))))))
+        (if (agent-river-launch--seen-p key)
+            (progn (delete-file file)
+                   (agent-river-launch--decide 'duplicate candidate
+                                               "already taken in"))
+          ;; Noted before the rules get a say: that an agent said something
+          ;; about itself is true whether or not anything acts on it, and
+          ;; seeing the rate before anything is armed is the whole plan.
+          (agent-river-launch--note-session candidate)
+          (cond
+           ;; No rule is a *final* answer, unlike a gate refusing: `:match' is
+           ;; a property of the candidate and nothing about waiting will
+           ;; change it, so the candidate is finished here rather than sitting
+           ;; in the queue being asked a question that already has an answer.
+           ((null (agent-river-launch--rule-for candidate))
+            (agent-river-launch--finish candidate 'unmatched "no rule matched"))
+           (t
+            (let ((dest (agent-river-launch--path "queued" key)))
+              (rename-file file dest t)
+              (agent-river-launch--enqueue (plist-put candidate :file dest)))
+            (agent-river-launch--decide
+             'queued candidate
+             (format "rule %s"
+                     (plist-get (agent-river-launch--rule-for candidate)
+                                :name))))))))))
 
 (defun agent-river-launch--inbox ()
   "Return the delivered files, oldest first."
@@ -833,7 +982,17 @@ the theme already means by these -- no colour is chosen here.")
                                           (format "rule %s" (plist-get rule :name))
                                         "no rule")
                                       (if held (format " -- held: %s" held) ""))
-                              'face 'agent-river-think)))))
+                              'face 'agent-river-think)))
+        ;; The claim last and marked as a quotation, for the reason the
+        ;; Markdown export puts `intent' last and marks it twice: it is the
+        ;; subject talking about itself, and a reader who takes it for one of
+        ;; the measurements above has no way back to the distinction.
+        (let ((claim (plist-get candidate :claim)))
+          (when claim
+            (insert (propertize (format "         \"%s\"\n"
+                                        (agent-river--clip
+                                         (agent-river--squish claim) 60))
+                                'face 'agent-river-intent))))))
     (insert (propertize "\ndecisions\n" 'face 'agent-river-prompt))
     (if (null agent-river-launch--decisions)
         (insert (propertize "  none yet\n" 'face 'agent-river-stale))

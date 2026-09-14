@@ -826,6 +826,30 @@ rather than a half-built one. What is load-bearing already:
   file name carries a hash of the full key, because sanitising alone maps
   `a/b` and `a_b` onto one file and a false match here is a launch that never
   happens and never says why.
+- **A pull source derives its key; a push source mints one**
+  (`agent-river-launch--mint`). The rule above is about *re-seeing*: a poller
+  meets the same object on every tick, so its key has to say which visit this
+  is. A handoff is delivered once and consumed once — there is nothing to
+  re-see, so every write is its own occasion. An `id` may still be supplied,
+  for a writer that retries.
+- **A claim may be the occasion, never the content** (`:claim`,
+  `agent-river-launch--unmatchable`). An agent hands off by writing a
+  candidate — no tool, no hook, nothing in the fold changes. Its own words go
+  to `:claim`, which `agent-river-launch--field` refuses, so a rule cannot be
+  matched by the prose of the thing it is deciding about; what a source *may*
+  steer is `:occasion`, a token from a small vocabulary a rule author can
+  anticipate. The same split the `intent*` slots have in the state.
+- **A note carries the fact, not the claim**
+  (`agent-river-launch--note-session`). A handoff is folded onto its session
+  via `agent-river-note`, so it shows in the HUD and is counted — but a note
+  is a *measurement* and may feed a signal, so folding the agent's own words
+  into one would launder a claim into an observation. `handoff: review`.
+- **A file too young to parse is not a broken file**
+  (`agent-river-launch-settle`). The contract is write-then-rename and a
+  poller can be held to it; an agent reaches for `Write`, which creates the
+  file where the watch already sees it. Filing half-written JSON under
+  `failed/` loses a handoff over a contract nobody told the agent about, and
+  loses it where the agent cannot find out.
 - **A source adapter is the only thing that knows a dialect**
   (`agent-river-launch-sources`), exactly as `agent-river--event` is for the
   hosts — so a poller moves bytes and understands nothing. The normalised
