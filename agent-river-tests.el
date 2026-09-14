@@ -2794,21 +2794,52 @@ half of what it shows is what is on disk and untouched."
            ,@body)
        (delete-directory ,var t))))
 
-(ert-deftest agent-river-test-the-map-lists-the-quiet-entries-too ()
-  (let ((agent-river-heat-half-life nil))
+(ert-deftest agent-river-test-the-map-lists-only-what-was-reached ()
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        ;; Agents spread over several roots turn the full listing into mostly
+        ;; context, and the map is opened to find the work in it.
+        (should (equal (mapcar (lambda (e) (plist-get e :name))
+                               (agent-river--map-entries root))
+                       '("dialog")))))))
+
+(ert-deftest agent-river-test-the-map-can-list-the-quiet-entries-too ()
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched t))
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root
                                       :file "dialog/src/main/foo.el"))
         (let ((entries (agent-river--map-entries root)))
-          ;; Breadth is the point.  A view of only the touched paths answers
-          ;; "where" without saying where that is relative to anything else.
+          ;; What the filter costs, and what asking for it back buys: a view
+          ;; of only the touched paths answers "where" without saying where
+          ;; that is relative to anything else.
           (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
                          '("common" "dialog" "docs" "build.gradle.kts")))
           ;; Directories first, the way dired lists them.
           (should (plist-get (nth 0 entries) :dir))
           (should-not (plist-get (nth 3 entries) :dir))
           (should-not (plist-get (car entries) :parties)))))))
+
+(ert-deftest agent-river-test-the-filter-never-hides-activity ()
+  ;; The one thing the map exists not to do.  The filter is written as "has
+  ;; no parties" rather than "is not on disk", so an entry the state knows
+  ;; about and the disk does not survives it -- which is exactly the entry a
+  ;; disk-shaped filter would have dropped.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "deleted/gone.el"))
+        (let ((entries (agent-river--map-entries root)))
+          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
+                         '("deleted")))
+          (should (plist-get (car entries) :missing)))))))
 
 (ert-deftest agent-river-test-a-map-entry-carries-what-is-beneath-it ()
   (let ((agent-river-heat-half-life nil))

@@ -3388,6 +3388,25 @@ touched still appears, because activity the map does not show is the one
 thing it exists not to do."
   :type '(repeat regexp))
 
+(defcustom agent-river-map-untouched nil
+  "Whether the map lists entries no agent has reached.
+
+Nil -- the default -- lists only what has been touched.  Agents spread
+over several roots turn the full listing into mostly context: every
+sibling directory of every tree anyone started a session in, with the
+handful of lines that carry an agent somewhere among them.  Filtered, the
+map is a list of where the work is, which is the question it is opened
+with.
+
+This never hides activity, which is the one thing the map exists not to
+do: an entry is dropped only when nothing has been reached beneath it, so
+a `:missing' entry -- known to the state and not to the disk -- always
+stays.  What is lost is the context around the work: which siblings a
+touched directory has, and how much of a tree nobody is in.  Set non-nil
+to get that back, or press \\[agent-river-map-toggle-untouched] in the map,
+which sets it for that buffer alone."
+  :type 'boolean)
+
 (defcustom agent-river-map-refresh-interval 3
   "Seconds between map redraws while anything is still moving.
 
@@ -3567,11 +3586,15 @@ aggregate beneath the entry; `:files' are the reached paths under it, each
 `:rel' relative to the entry, heaviest first.  A file entry has no
 `:files' and carries its own parties.
 
-The listing is the union of what is on disk and what has been reached.
-`:missing' marks an entry only the state knows about -- deleted, renamed,
-or reached through an anchor this root has nothing to do with.  Showing it
-anyway is the point: an artifact whose top component is gone would
-otherwise be activity the map silently drops."
+The listing is the union of what is on disk and what has been reached,
+filtered to the reached half unless `agent-river-map-untouched' says
+otherwise.  `:missing' marks an entry only the state knows about --
+deleted, renamed, or reached through an anchor this root has nothing to do
+with.  Showing it anyway is the point: an artifact whose top component is
+gone would otherwise be activity the map silently drops, and that is also
+why the filter is written as \"has no parties\" rather than \"is not on
+disk\" -- the two coincide for an inert entry and come apart for exactly
+the entries that matter."
   (let* ((reach (agent-river--map-reach root scope))
          (grouped (make-hash-table :test 'equal))
          (names (agent-river--map-listing root))
@@ -3608,9 +3631,13 @@ otherwise be activity the map silently drops."
                              :missing t)
                        orphans))
                grouped)
-      (append (nreverse entries) (sort orphans (lambda (a b)
-                                                 (string< (plist-get a :name)
-                                                          (plist-get b :name))))))))
+      (let ((all (append (nreverse entries)
+                         (sort orphans (lambda (a b)
+                                         (string< (plist-get a :name)
+                                                  (plist-get b :name)))))))
+        (if agent-river-map-untouched
+            all
+          (seq-filter (lambda (entry) (plist-get entry :parties)) all))))))
 
 (defcustom agent-river-map-detail-files 8
   "How many reached files an unfolded map entry lists.
@@ -3907,7 +3934,20 @@ nothing."
                         (insert (propertize
                                  (concat (agent-river--map-marker 'file) "…\n")
                                  'agent-river-map-face 'agent-river-stale
-                                 'agent-river-map-name name)))))))))
+                                 'agent-river-map-name name)))))))
+              ;; An empty listing has to say which kind of empty it is.
+              ;; Filtered, the tree may be full of files nobody has been
+              ;; near, and a blank section then reads as though the map had
+              ;; lost them.  No `agent-river-map-path', so the motions pass
+              ;; over it the way they pass over the elision line.
+              (unless entries
+                (insert (propertize
+                         (concat (agent-river--map-marker 'file)
+                                 (if agent-river-map-untouched
+                                     "*empty*"
+                                   "*nothing reached here — `a` lists everything*")
+                                 "\n")
+                         'agent-river-map-face 'agent-river-stale)))))
           (agent-river--map-shade)
           (agent-river--map-goto here)
           (agent-river--map-settle-point)
@@ -4077,6 +4117,20 @@ first thing anyone does with a new buffer is press one of them."
         (push (cons path (not open)) agent-river--map-folds)))
     (agent-river--map-draw)))
 
+(defun agent-river-map-toggle-untouched ()
+  "Show or hide the entries no agent has reached, in this map buffer.
+
+Buffer-local, so the gesture is undone by the same gesture and never
+edits the user's setting behind their back: `agent-river-map-untouched'
+goes on being what a fresh map opens with."
+  (interactive)
+  (setq-local agent-river-map-untouched (not agent-river-map-untouched))
+  (agent-river--map-draw)
+  (message "map: %s"
+           (if agent-river-map-untouched
+               "listing everything"
+             "listing only what agents have reached")))
+
 (defun agent-river-map-visit ()
   "Descend into the directory at point, or open the file at point.
 The lens is moved rather than widened: one directory is always listed in
@@ -4198,6 +4252,7 @@ makes this a degradation rather than a second view to keep in step."
   (define-key map (kbd "TAB") #'agent-river-map-toggle)
   (define-key map (kbd "RET") #'agent-river-map-visit)
   (define-key map (kbd "^") #'agent-river-map-up)
+  (define-key map (kbd "a") #'agent-river-map-toggle-untouched)
   ;; `markdown-ts-view-mode' binds this to `ignore' to keep `revert-buffer'
   ;; off it; here there is something to revert to.
   (define-key map (kbd "g") #'agent-river-map-refresh)

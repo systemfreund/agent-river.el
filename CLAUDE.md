@@ -421,22 +421,31 @@ Four things about the map are load-bearing:
   number, so that pushing entries down a level for the root headings cannot
   push files into being headings too. Folds are keyed on absolute paths for
   the same reason: `src` under one root is not `src` under another.
-- **Breadth at one level, depth only where there is activity.** A whole tree
-  unfolded is unreadable in a monorepo; a view of only the touched paths says
-  where without saying where that is *relative to* anything. So RET descends
-  (`agent-river-map-descend`) rather than widening, and a file five directories
-  down is shown under the one entry the listing has a line for, with the rest
-  of its path inline.
+- **Depth only where there is activity.** A whole tree unfolded is unreadable
+  in a monorepo, so RET descends (`agent-river-map-descend`) rather than
+  widening, and a file five directories down is shown under the one entry the
+  listing has a line for, with the rest of its path inline.
 - **Weight and position are different readings.** The numbers say where an
   agent has *been*; `:current` says where it *is*, and after a long task those
   are different places. `:current` is computed across everything a party
   reached, not just what falls under the map root, or descending would invent a
   second "most recent" file that only looks like one because the real one is
   out of view.
-- **The listing is the union of disk and state.** `:missing` marks an entry
-  only the state knows about — deleted, renamed, or reached through an anchor
-  this root has nothing to do with. Activity the map does not show is the one
-  thing it exists not to do.
+- **The listing is filtered to what has been reached**
+  (`agent-river-map-untouched` nil, the default; `a` toggles it for one
+  buffer). Agents spread over several roots turn the full listing into mostly
+  context — every sibling of every tree anyone started a session in, with the
+  handful of lines that carry an agent somewhere among them. What the filter
+  gives up is breadth: a view of only the touched paths says where without
+  saying where that is *relative to* anything, which is what the full listing
+  was for, and non-nil buys it back as the union of disk and state.
+  **Activity the map does not show is the one thing it exists not to do**, so
+  the filter drops an entry for having no parties and never for being absent
+  from disk — `:missing`, an entry only the state knows about (deleted,
+  renamed, or reached through an anchor this root has nothing to do with), is
+  precisely what a disk-shaped filter would have swallowed. An empty listing
+  says which kind of empty it is: a filtered tree full of files nobody has
+  been near would otherwise read as a map that had lost them.
 
 Encoding discipline, since there are three facts on a line: weight is shading
 (the same `agent-river-heat-levels` faces), party is text, contention is a
