@@ -220,6 +220,12 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
 (cl-defstruct (agent-river-state (:constructor agent-river--state-create))
   id                ; registry key: "SESSION" or "SESSION/AGENT"
   label             ; human-readable: working directory, or the agent type
+  ;; The absolute working directory the hook reported, which is the anchor
+  ;; `artifacts' is keyed against.  Kept beside the keys rather than folded
+  ;; into them: a key stays relative, so one file reached from a worktree and
+  ;; from the main checkout is still one artifact, and a view that needs to
+  ;; place a key in a real directory tree combines the two deliberately.
+  cwd
   parent            ; key of the session that spawned this one, nil at a root
   agent-type        ; "Explore", "general-purpose", ... nil at a root
   started last-seen ; last-seen is the liveness clock a registry needs
@@ -497,6 +503,15 @@ replaying a session's events from the start."
         (tool (plist-get event :tool))
         (file (plist-get event :file))
         (ms   (plist-get event :ms)))
+    ;; Folded rather than set where the state is addressed, so it keeps the
+    ;; promise the docstring makes: replay the events and the anchor comes
+    ;; back with them.  Refreshed on every event that carries one, because a
+    ;; session that changes directory re-anchors its later keys and the two
+    ;; must not disagree.  Events made inside Emacs -- a note, a signal --
+    ;; carry none and leave it alone.
+    (let ((cwd (plist-get event :cwd)))
+      (when (and cwd (not (string-empty-p cwd)))
+        (setf (agent-river-state-cwd state) (directory-file-name cwd))))
     (cond
      ((equal kind "prompt")
       ;; Archive before resetting: without this the tally of every finished
@@ -791,10 +806,16 @@ streaks are worth a word, the id decides that each of them gets one."
 Never as a long absolute path: two agents touching one file from a
 worktree and from the main checkout have to produce the same string, or
 the view renders a collision as two unrelated files."
-  (if (and cwd (not (string-empty-p cwd))
-           (string-prefix-p (file-name-as-directory cwd) path))
-      (substring path (1+ (length cwd)))
-    (file-name-nondirectory path)))
+  (let ((dir (and cwd (not (string-empty-p cwd)) (file-name-as-directory cwd))))
+    (if (and dir (string-prefix-p dir path))
+        ;; Measured off the slash-terminated form, not off CWD plus one: a
+        ;; cwd that already ends in a slash then had a character too many
+        ;; cut, which silently ate the first letter of the top component --
+        ;; `common/Foo.java' arriving as `ommon/Foo.java'.  Harmless while
+        ;; only a basename was ever read back; not once the key has to place
+        ;; the file in a directory tree.
+        (substring path (length dir))
+      (file-name-nondirectory path))))
 
 (defun agent-river--dur (ms)
   "Format MS compactly."
@@ -923,6 +944,11 @@ what keeps that from folding as a success."
     (list :kind kind
           :session (or (alist-get 'session_id payload) "unknown")
           :label (file-name-nondirectory (directory-file-name cwd))
+          ;; The directory `:file' is relative to, folded so the state can
+          ;; say where its keys are anchored.  The label is only the last
+          ;; component of it and cannot stand in: two checkouts of one
+          ;; project are labelled alike on purpose.
+          :cwd cwd
           :agent (alist-get 'agent_id payload)
           :agent-type (alist-get 'agent_type payload)
           :tool (alist-get 'tool_name payload)
@@ -2305,6 +2331,70 @@ entry carrying no `:last' time, this is the plain count."
       (let ((age (float-time (time-subtract (current-time) last))))
         (* touches (expt 0.5 (/ age agent-river-heat-half-life)))))))
 
+(defun agent-river--party-label (state)
+  "Return the name STATE goes by in a view that shows several of them.
+
+A subagent is named under its root -- `alpha/Explore' -- because its
+artifacts are its own and never its parent's.  A view that folded them
+into the parent's name would state that the parent worked in a file it
+never opened; one that showed the bare agent type would leave an onlooker
+with two `Explore' lines and no way to tell whose."
+  (if (agent-river-state-parent state)
+      (let ((root (gethash (agent-river-state-parent state) agent-river-registry)))
+        (format "%s/%s"
+                (if root (or (agent-river-state-label root) "?") "?")
+                (or (agent-river-state-agent-type state) "subagent")))
+    (or (agent-river-state-label state) "?")))
+
+(defun agent-river--heat-entries (&optional scope)
+  "Return one plist per artifact of per folded session.
+
+Each carries `:party' (`agent-river--party-label'), `:cwd' (the anchor its
+`:file' is relative to), `:file', the age-weighted `:weight' and `:last'.
+SCOPE is `session' for the whole session, `task' or nil for the current
+task.
+
+The one derivation every view of the artifact tables is built from, rather
+than each walking the registry for itself: the basename table below, the
+directory aggregate beside it and the project map all have to answer with
+the same weighting, and a second walk is a second place for them to drift."
+  (let (entries)
+    (maphash
+     (lambda (_id state)
+       (let ((party (agent-river--party-label state))
+             (cwd (agent-river-state-cwd state)))
+         (maphash (lambda (path entry)
+                    (push (list :party party
+                                :cwd cwd
+                                :file path
+                                :weight (agent-river--heat-weight entry)
+                                :last (plist-get entry :last))
+                          entries))
+                  (if (eq scope 'session)
+                      (agent-river-state-artifacts state)
+                    (agent-river-state-task-artifacts state)))))
+     agent-river-registry)
+    entries))
+
+(defun agent-river--heat-absolute (entry)
+  "Return ENTRY's file as an absolute name, or nil when nothing anchors it.
+
+Nil for a state folded with no cwd -- one restored from before the slot
+existed, or reported by a source that names none.  The answer is then
+unknown, and guessing at it would place files in directories no agent
+ever opened.
+
+A key that is a bare name is resolved as a file sitting directly in the
+cwd, which is what it almost always is; `agent-river--rel' degrades a file
+*outside* the cwd to the same shape, and those land here as a file of that
+name in the root.  Contained rather than corrected: a bare name has no
+directory component, so it can never be summed into a subdirectory, and
+the worst it can do is put one line in a listing it does not belong to."
+  (let ((cwd (plist-get entry :cwd))
+        (file (plist-get entry :file)))
+    (and cwd (not (string-empty-p cwd)) file (not (string-empty-p file))
+         (expand-file-name file (file-name-as-directory cwd)))))
+
 (defun agent-river--heat-table (&optional scope)
   "Return a hash of basename to weighted touch count across every folded session.
 
@@ -2317,18 +2407,53 @@ The value is `agent-river--heat-weight', not the raw count: a file still
 being touched keeps its shading, one the agent has moved away from cools
 toward the thresholds and eventually loses its overlay entirely."
   (let ((table (make-hash-table :test 'equal)))
-    (maphash
-     (lambda (_id state)
-       (maphash (lambda (path entry)
-                  (let ((name (file-name-nondirectory path)))
-                    (puthash name
-                             (+ (or (gethash name table) 0)
-                                (agent-river--heat-weight entry))
-                             table)))
-                (if (eq scope 'session)
-                    (agent-river-state-artifacts state)
-                  (agent-river-state-task-artifacts state))))
-     agent-river-registry)
+    (dolist (entry (agent-river--heat-entries scope))
+      (let ((name (file-name-nondirectory (plist-get entry :file))))
+        (puthash name
+                 (+ (or (gethash name table) 0) (plist-get entry :weight))
+                 table)))
+    table))
+
+(defun agent-river--heat-dirs (dir &optional scope)
+  "Return a hash of subdirectory name to weight, for the listing of DIR.
+
+Only the entries DIR itself has a line for: a key resolving to
+DIR/a/b/c.el warms `a' and nothing deeper, because `a' is all the listing
+shows of it.
+
+Summed from keys resolved against each session's own cwd, where the file
+shading is matched on the bare name.  The two rules differ because the
+questions do.  A name is enough to ask \"how hot is this file\" and is
+what keeps a worktree and its main checkout reading as one file; it is not
+enough to ask \"how hot is this directory\", because `src' says nothing
+about which `src', and a directory aggregate matched that way would warm
+every `src' in every project at once.  The price is that a session whose
+anchor does not reach this listing -- a worktree, against the main
+checkout -- contributes no directory shading, only file shading."
+  (let ((prefix (file-name-as-directory (expand-file-name dir)))
+        (table (make-hash-table :test 'equal)))
+    (dolist (entry (agent-river--heat-entries scope))
+      (let ((abs (agent-river--heat-absolute entry)))
+        (when (and abs (string-prefix-p prefix abs))
+          (let* ((rel (substring abs (length prefix)))
+                 (slash (string-search "/" rel)))
+            (when slash
+              (let ((top (substring rel 0 slash)))
+                (puthash top
+                         (+ (or (gethash top table) 0) (plist-get entry :weight))
+                         table)))))))
+    table))
+
+(defun agent-river--heat-listing-table (dir &optional scope)
+  "Return the table the listing of DIR is shaded with.
+The file names every session has touched, plus the aggregate weight of
+each of DIR's subdirectories.  One table because a dired line is one name:
+a directory and a file of the same name cannot both be in one listing, so
+the two halves cannot collide on a real entry."
+  (let ((table (agent-river--heat-table scope)))
+    (maphash (lambda (name weight)
+               (puthash name (+ (or (gethash name table) 0) weight) table))
+             (agent-river--heat-dirs dir scope))
     table))
 
 (defun agent-river--heat-face (touches)
@@ -2366,27 +2491,35 @@ something rather than as this package annotating it."
         (end (dired-move-to-end-of-filename t)))
     (and beg end (cons beg end))))
 
-(defun agent-river--heat-dired (buffer table)
-  "Shade the entries of dired BUFFER by their touch count in TABLE."
+(defun agent-river--heat-dired (buffer)
+  "Shade the entries of dired BUFFER by what the agents have touched.
+
+The table is built per buffer rather than once for all of them, because
+half of it is: a directory's weight is the sum of what lies beneath it in
+*this* listing, and there is no such thing as the weight of `src' in the
+abstract."
   (with-current-buffer buffer
-    (agent-river--heat-clear buffer)
-    (save-excursion
-      (goto-char (point-min))
-      (while (not (eobp))
-        ;; Walking the listing, rather than looking each state path up with
-        ;; `dired-goto-file', is what makes the mismatch cases harmless: the
-        ;; header and total lines simply yield no filename, and a file the
-        ;; agent has just created is an entry that is not there yet.
-        (let* ((name (ignore-errors (dired-get-filename 'no-dir t)))
-               (face (and name (agent-river--heat-face
-                                (or (gethash name table) 0))))
-               (bounds (and face (agent-river--heat-bounds))))
-          (when bounds
-            (let ((overlay (make-overlay (car bounds) (cdr bounds))))
-              (overlay-put overlay 'agent-river-heat t)
-              (overlay-put overlay 'face face)
-              (overlay-put overlay 'evaporate t))))
-        (forward-line 1)))))
+    (let ((table (agent-river--heat-listing-table
+                  (expand-file-name default-directory)
+                  agent-river-heat-scope)))
+      (agent-river--heat-clear buffer)
+      (save-excursion
+        (goto-char (point-min))
+        (while (not (eobp))
+          ;; Walking the listing, rather than looking each state path up with
+          ;; `dired-goto-file', is what makes the mismatch cases harmless: the
+          ;; header and total lines simply yield no filename, and a file the
+          ;; agent has just created is an entry that is not there yet.
+          (let* ((name (ignore-errors (dired-get-filename 'no-dir t)))
+                 (face (and name (agent-river--heat-face
+                                  (or (gethash name table) 0))))
+                 (bounds (and face (agent-river--heat-bounds))))
+            (when bounds
+              (let ((overlay (make-overlay (car bounds) (cdr bounds))))
+                (overlay-put overlay 'agent-river-heat t)
+                (overlay-put overlay 'face face)
+                (overlay-put overlay 'evaporate t))))
+          (forward-line 1))))))
 
 (defun agent-river--dired-buffers (&optional all)
   "Return the dired buffers worth drawing into.
@@ -2408,9 +2541,8 @@ might still be holding an overlay."
 Unconditional, unlike the automatic path: asking for it is asking for it,
 whether or not `agent-river-heat-mode' is driving the redraws."
   (interactive)
-  (let ((table (agent-river--heat-table agent-river-heat-scope)))
-    (dolist (buffer (agent-river--dired-buffers))
-      (agent-river--heat-dired buffer table))))
+  (dolist (buffer (agent-river--dired-buffers))
+    (agent-river--heat-dired buffer)))
 
 ;; The cooling timer, kept deliberately separate from the state block's.
 ;; `agent-river--ensure-timer' runs only while an agent is mid-task; the
@@ -2460,8 +2592,7 @@ A revert replaces the buffer text and takes every overlay with it, so
 without this the shading vanishes at exactly the moment dired refreshes to
 show what the agent has written."
   (when agent-river-heat-mode
-    (agent-river--heat-dired (current-buffer)
-                             (agent-river--heat-table agent-river-heat-scope))))
+    (agent-river--heat-dired (current-buffer))))
 
 ;; The pulse is event-level, where the heat is state-level.  Heat answers
 ;; "what is this task about"; the pulse answers "what happened just now",
@@ -2529,6 +2660,601 @@ worth seeing."
 ;; they are, and `agent-river-heat-mode' would keep claiming to be on.
 (put 'agent-river--dired-observe 'agent-river-retire
      (lambda () (agent-river-heat-mode -1)))
+
+;;; The map -- the project as a whole, one level at a time
+;;
+;; The heat shades the directory you are already in.  This answers the
+;; question that directory cannot: in a repository spread over thirty
+;; modules, with several agents running at once, *where is everyone*.  Same
+;; state, same weighting, a coarser grain -- derived on every redraw like
+;; everything else here, so the two views cannot drift and neither
+;; accumulates anything of its own.
+;;
+;; One level of full breadth, and depth only where there is activity.  A
+;; whole tree unfolded is unreadable in a monorepo; a view of only the
+;; touched paths answers "where" without ever saying where that is relative
+;; to anything else.  So one directory is always listed in full, each entry
+;; carries what has happened beneath it, and RET descends -- the lens is
+;; moved rather than widened.
+;;
+;; Placing a key in a real directory tree is the one thing the artifact
+;; tables were built not to do: they are keyed relative to a session's cwd
+;; precisely so that a worktree and its main checkout read as one file.  The
+;; anchor sits beside them in `agent-river-state-cwd', and putting the two
+;; back together is a deliberate act, done here in the view and nowhere in
+;; the fold.
+;;
+;; Two readings, kept apart on purpose.  The weights say where an agent has
+;; *been*; only `:current' says where it *is*, and after a long task those
+;; are different places.  Folding the second into the first -- a big enough
+;; number must be where the work is -- is exactly the mistake the half-life
+;; was added to stop, one grain up.
+
+(defcustom agent-river-map-scope 'session
+  "Which artifact frame the map is read from.
+
+Defaults the other way round from `agent-river-heat-scope', because the
+questions are different.  A dired buffer is where you already are and the
+useful reading is this turn; the map is opened to find out where everyone
+has been working, and a frame cleared by every prompt would blank half of
+it each time an agent was given its next instruction."
+  :type '(choice (const task) (const session)))
+
+(defcustom agent-river-map-ignore
+  '("\\`\\.git\\'" "\\`\\.#" "\\`#" "~\\'" "\\`\\.DS_Store\\'")
+  "Entries the map leaves out of a listing, as regexps on the bare name.
+Only the listing: an entry dropped here that an agent has nonetheless
+touched still appears, because activity the map does not show is the one
+thing it exists not to do."
+  :type '(repeat regexp))
+
+(defcustom agent-river-map-refresh-interval 3
+  "Seconds between map redraws while anything is still moving.
+
+The map is redrawn on a timer rather than on every event, and that is
+deliberate.  Drawing a whole listing on each tool call means a redraw
+thousands of times a task, and every one of them moves point in a buffer
+someone is reading.  An event marks the map dirty; this decides how often
+dirt is worth a redraw."
+  :type 'number)
+
+(defcustom agent-river-map-name-width 32
+  "Column the map's annotations start at.
+Names longer than this push their annotation right rather than being
+truncated: a path is what the line is for."
+  :type 'integer)
+
+(defcustom agent-river-map-contended-marker "⇄"
+  "Marker for an entry more than one agent is working in.
+
+A marker rather than a fourth colour.  Weight is already drawn as shading,
+and encoding a second, unrelated fact the same way leaves a reader unable
+to say which of the two any given colour means.  This is also the thing
+most worth being able to scan a whole listing for."
+  :type 'string)
+
+(defcustom agent-river-map-here-marker "▸"
+  "Marker for the entry holding an agent's most recent touch."
+  :type 'string)
+
+(defun agent-river--map-weight (parties)
+  "Return the total weight across PARTIES."
+  (apply #'+ (mapcar (lambda (party) (plist-get party :weight)) parties)))
+
+(defun agent-river--map-later (a b)
+  "Return the later of times A and B, either of which may be nil."
+  (cond ((null a) b)
+        ((null b) a)
+        ((time-less-p a b) b)
+        (t a)))
+
+(defun agent-river--map-reach (root &optional scope)
+  "Return what the agents have reached inside ROOT, deepest detail kept.
+
+A list of plists, heaviest first, each carrying `:rel' -- the file's path
+relative to ROOT -- and `:parties', an alist-like list of plists with
+`:party', `:weight', `:last' and `:current'.
+
+`:current' marks the one file a party touched most recently, which is the
+only thing here that says where an agent is now rather than where it has
+been.  Computed across everything the party reached, not just what fell
+inside ROOT, so descending into a subdirectory cannot invent a second
+\"most recent\" file that only looks like one because the real one was out
+of view."
+  (let ((prefix (file-name-as-directory (expand-file-name root)))
+        (by-rel (make-hash-table :test 'equal))
+        (newest (make-hash-table :test 'equal))
+        (entries (agent-river--heat-entries scope)))
+    (dolist (entry entries)
+      (let ((abs (agent-river--heat-absolute entry))
+            (party (plist-get entry :party))
+            (last (plist-get entry :last)))
+        (when abs
+          (let ((seen (gethash party newest)))
+            (when (or (null seen)
+                      (eq last (agent-river--map-later (plist-get seen :last) last)))
+              (puthash party (list :abs abs :last last) newest))))
+        (when (and abs (string-prefix-p prefix abs))
+          (let* ((rel (substring abs (length prefix)))
+                 (parties (or (gethash rel by-rel)
+                              (puthash rel (make-hash-table :test 'equal) by-rel)))
+                 (cell (gethash party parties)))
+            (puthash party
+                     (list :weight (+ (or (plist-get cell :weight) 0)
+                                      (plist-get entry :weight))
+                           :last (agent-river--map-later (plist-get cell :last) last)
+                           ;; The absolute name, so `:current' is decided by
+                           ;; identity rather than by a path that two roots
+                           ;; could both produce.
+                           :abs abs)
+                     parties)))))
+    (let (nodes)
+      (maphash
+       (lambda (rel parties)
+         (let (plists)
+           (maphash (lambda (party cell)
+                      (push (list :party party
+                                  :weight (plist-get cell :weight)
+                                  :last (plist-get cell :last)
+                                  :current (equal (plist-get cell :abs)
+                                                  (plist-get (gethash party newest) :abs)))
+                            plists))
+                    parties)
+           (push (list :rel rel
+                       :parties (sort plists (lambda (a b)
+                                               (> (plist-get a :weight)
+                                                  (plist-get b :weight)))))
+                 nodes)))
+       by-rel)
+      (sort nodes (lambda (a b)
+                    (> (agent-river--map-weight (plist-get a :parties))
+                       (agent-river--map-weight (plist-get b :parties))))))))
+
+(defun agent-river--map-merge-parties (nodes)
+  "Return the parties of NODES summed into one list, heaviest first.
+How a directory's reading is made: it is the aggregate of what lies
+beneath it and never a tally of its own, so the entry and the files under
+it can never disagree about who has been where."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (node nodes)
+      (dolist (party (plist-get node :parties))
+        (let ((cell (gethash (plist-get party :party) table)))
+          (puthash (plist-get party :party)
+                   (list :party (plist-get party :party)
+                         :weight (+ (or (plist-get cell :weight) 0)
+                                    (plist-get party :weight))
+                         :last (agent-river--map-later (plist-get cell :last)
+                                                       (plist-get party :last))
+                         :current (or (plist-get cell :current)
+                                      (plist-get party :current)))
+                   table))))
+    (let (out)
+      (maphash (lambda (_party cell) (push cell out)) table)
+      (sort out (lambda (a b) (> (plist-get a :weight) (plist-get b :weight)))))))
+
+(defun agent-river--map-listing (root)
+  "Return ROOT's own directory entries, directories first, ignores dropped.
+Unreadable or missing, the answer is no entries rather than an error: the
+map still has the reached paths to show, and a root that went away should
+not take the view with it."
+  (let (dirs files)
+    (dolist (name (ignore-errors (directory-files root nil nil t)))
+      (unless (or (member name '("." ".."))
+                  (seq-some (lambda (re) (string-match-p re name))
+                            agent-river-map-ignore))
+        (if (file-directory-p (expand-file-name name root))
+            (push name dirs)
+          (push name files))))
+    (append (sort dirs #'string<) (sort files #'string<))))
+
+(defun agent-river--map-entries (root &optional scope)
+  "Return ROOT's listing, annotated with what the agents have done in it.
+
+One plist per entry in listing order -- directories first -- carrying
+`:name', `:dir', `:parties', `:files' and `:missing'.  `:parties' is the
+aggregate beneath the entry; `:files' are the reached paths under it, each
+`:rel' relative to the entry, heaviest first.  A file entry has no
+`:files' and carries its own parties.
+
+The listing is the union of what is on disk and what has been reached.
+`:missing' marks an entry only the state knows about -- deleted, renamed,
+or reached through an anchor this root has nothing to do with.  Showing it
+anyway is the point: an artifact whose top component is gone would
+otherwise be activity the map silently drops."
+  (let* ((reach (agent-river--map-reach root scope))
+         (grouped (make-hash-table :test 'equal))
+         (names (agent-river--map-listing root))
+         entries)
+    ;; Group the reached paths by the entry the listing has a line for --
+    ;; the top component -- so a file five directories down is still
+    ;; reported under the one name that is on screen.
+    (dolist (node reach)
+      (let* ((rel (plist-get node :rel))
+             (slash (string-search "/" rel))
+             (top (if slash (substring rel 0 slash) rel))
+             (under (if slash (substring rel (1+ slash)) nil)))
+        (push (list :rel under :parties (plist-get node :parties))
+              (gethash top grouped))))
+    (dolist (name names)
+      (let* ((under (nreverse (gethash name grouped)))
+             (dir (file-directory-p (expand-file-name name root))))
+        (remhash name grouped)
+        (push (list :name name
+                    :dir dir
+                    :parties (agent-river--map-merge-parties under)
+                    ;; A file entry's own node comes through the grouping
+                    ;; with a nil `:rel'; there is nothing to unfold under it.
+                    :files (and dir under))
+              entries)))
+    (let (orphans)
+      (maphash (lambda (name under)
+                 (setq under (nreverse under))
+                 (push (list :name name
+                             :dir (seq-some (lambda (n) (plist-get n :rel)) under)
+                             :parties (agent-river--map-merge-parties under)
+                             :files (and (seq-some (lambda (n) (plist-get n :rel)) under)
+                                         under)
+                             :missing t)
+                       orphans))
+               grouped)
+      (append (nreverse entries) (sort orphans (lambda (a b)
+                                                 (string< (plist-get a :name)
+                                                          (plist-get b :name))))))))
+
+(defcustom agent-river-map-detail-files 8
+  "How many reached files an unfolded map entry lists.
+Ordered by weight, so the tail is the least interesting; an ellipsis
+marks what was left off."
+  :type 'integer)
+
+(defconst agent-river-map-buffer-name "*agent-river-map*"
+  "Name of the project map buffer.")
+
+(defvar-local agent-river--map-root nil
+  "The directory the map buffer is currently showing.")
+
+(defvar-local agent-river--map-folds nil
+  "Alist of entry name to whether its files are shown, where the user said.
+
+Only the entries that were toggled by hand.  Everything else falls back to
+the default in `agent-river--map-open-p', so a new directory an agent has
+just moved into opens without needing an entry here -- and a fold made by
+hand survives the redraws, which is the whole reason this is data rather
+than outline overlays.  The block is rebuilt every few seconds and an
+overlay fold would spring open on each one.")
+
+(defvar agent-river--map-dirty nil
+  "Non-nil when an event has landed that the map has not yet drawn.")
+
+(defun agent-river--map-annotation (parties)
+  "Return PARTIES as the bracketed reading a map line ends with, or nil.
+
+The marker is repeated inside the brackets, against the party it belongs
+to.  In the left-hand column it is scannable but anonymous -- on a line
+three agents share it says only that one of them is here -- and \"where is
+this agent now\" is a question about a party rather than about a line."
+  (when parties
+    (concat
+     "["
+     (mapconcat (lambda (party)
+                  (concat (propertize (plist-get party :party)
+                                      'face 'agent-river-session)
+                          ;; Never zero: a weight below one still earned a
+                          ;; line, and `[alpha:0]' would read as a party
+                          ;; that is listed for having done nothing.
+                          (format ":%d" (max 1 (round (plist-get party :weight))))
+                          (if (plist-get party :current)
+                              agent-river-map-here-marker "")))
+                parties " ")
+     "]")))
+
+(defun agent-river--map-line (level name parties &optional missing)
+  "Return one map line: NAME at outline LEVEL, annotated with PARTIES.
+MISSING marks a name only the state knows about, which is greyed rather
+than shaded -- there is no file on disk for the shading to be about."
+  (let* ((stars (concat (make-string level ?*) " "))
+         (face (if missing
+                   'agent-river-stale
+                 (agent-river--heat-face (agent-river--map-weight parties))))
+         (pad (max 1 (- agent-river-map-name-width
+                        (length stars) (string-width name))))
+         (markers
+          (concat (if (> (length parties) 1) agent-river-map-contended-marker " ")
+                  (if (seq-some (lambda (party) (plist-get party :current)) parties)
+                      agent-river-map-here-marker " "))))
+    (string-trim-right
+     (concat stars
+             (propertize name 'face face)
+             (make-string pad ?\s)
+             markers " "
+             (or (agent-river--map-annotation parties) "")))))
+
+(defun agent-river--map-open-p (entry)
+  "Return non-nil when ENTRY's reached files are shown beneath it.
+
+An entry with activity opens by default -- the files are the reason the
+entry is annotated at all -- and a toggle by hand wins from then on."
+  (let ((cell (assoc (plist-get entry :name) agent-river--map-folds)))
+    (if cell (cdr cell) (and (plist-get entry :files) t))))
+
+(defun agent-river--map-header (root entries)
+  "Return the map's own heading for ROOT, given its ENTRIES.
+Says which frame the numbers below come from.  The map defaults to the
+session frame and the dired heat to the task frame, so a reading lifted
+from one and compared against the other is a mistake waiting to be made
+unless the line says which is which."
+  (let ((parties (agent-river--map-merge-parties
+                  (mapcar (lambda (entry)
+                            (list :parties (plist-get entry :parties)))
+                          entries))))
+    (concat "* "
+            (propertize (abbreviate-file-name root) 'face 'agent-river-prompt)
+            (format "  ·  %s frame" (if (eq agent-river-map-scope 'session)
+                                        "session" "task"))
+            (if parties
+                (format "  ·  %d agent%s" (length parties)
+                        (if (= (length parties) 1) "" "s"))
+              "  ·  quiet"))))
+
+(defun agent-river--map-here ()
+  "Return what identifies the line point is on, for a redraw to find again."
+  (let ((beg (line-beginning-position)))
+    (list (get-text-property beg 'agent-river-map-name)
+          (get-text-property beg 'agent-river-map-rel)
+          (line-number-at-pos))))
+
+(defun agent-river--map-goto (here)
+  "Put point back where HERE was, by name if the line is still there.
+By line number otherwise, rather than at the top: an entry that cooled
+out of the listing should not send whoever was reading it back to the
+start of the buffer."
+  (goto-char (point-min))
+  (let ((found nil))
+    (when (nth 0 here)
+      (while (and (not found) (not (eobp)))
+        (if (and (equal (nth 0 here)
+                        (get-text-property (line-beginning-position)
+                                           'agent-river-map-name))
+                 (equal (nth 1 here)
+                        (get-text-property (line-beginning-position)
+                                           'agent-river-map-rel)))
+            (setq found t)
+          (forward-line 1))))
+    (unless found
+      (goto-char (point-min))
+      (forward-line (1- (max 1 (or (nth 2 here) 1)))))))
+
+(defun agent-river--map-draw ()
+  "Redraw the map buffer from the state, if it is still alive."
+  (let ((buffer (get-buffer agent-river-map-buffer-name)))
+    (when buffer
+      (with-current-buffer buffer
+        (let* ((root agent-river--map-root)
+               (entries (agent-river--map-entries root agent-river-map-scope))
+               (here (agent-river--map-here))
+               (inhibit-read-only t))
+          (erase-buffer)
+          (insert (agent-river--map-header root entries) "\n")
+          (dolist (entry entries)
+            (let* ((name (plist-get entry :name))
+                   (dir (plist-get entry :dir))
+                   (path (expand-file-name name root)))
+              (insert (propertize
+                       (concat (agent-river--map-line
+                                2 (concat name (if dir "/" ""))
+                                (plist-get entry :parties)
+                                (plist-get entry :missing))
+                               "\n")
+                       'agent-river-map-name name
+                       'agent-river-map-path path
+                       'agent-river-map-dir dir))
+              (when (agent-river--map-open-p entry)
+                (let* ((files (plist-get entry :files))
+                       (shown (seq-take files agent-river-map-detail-files)))
+                  (dolist (file shown)
+                    (insert (propertize
+                             (concat (agent-river--map-line
+                                      3 (plist-get file :rel)
+                                      (plist-get file :parties))
+                                     "\n")
+                             'agent-river-map-name name
+                             'agent-river-map-rel (plist-get file :rel)
+                             'agent-river-map-path
+                             (expand-file-name (plist-get file :rel) path))))
+                  (when (> (length files) (length shown))
+                    (insert (propertize
+                             (format "*** %s…\n"
+                                     (make-string
+                                      (max 1 (- agent-river-map-name-width 4)) ?\s))
+                             'face 'agent-river-stale
+                             'agent-river-map-name name)))))))
+          (agent-river--map-goto here)
+          (setq agent-river--map-dirty nil))))))
+
+(defun agent-river--map-default-root ()
+  "Return the directory the map opens on.
+
+The cwd of the most recently seen root session, widened to its project
+root where `project' can say where that is: a session started in one
+module of a monorepo has a cwd well below the repository, and opening the
+map there would show that module and label it the project.  With nothing
+folded yet, this buffer's own directory."
+  (let (best)
+    (maphash (lambda (_id state)
+               (when (and (null (agent-river-state-parent state))
+                          (agent-river-state-cwd state)
+                          (or (null best)
+                              (time-less-p (agent-river-state-last-seen best)
+                                           (agent-river-state-last-seen state))))
+                 (setq best state)))
+             agent-river-registry)
+    (let ((dir (if best
+                   (agent-river-state-cwd best)
+                 (directory-file-name (expand-file-name default-directory)))))
+      (or (and (fboundp 'project-current) (fboundp 'project-root)
+               (let ((project (ignore-errors
+                                (project-current nil (file-name-as-directory dir)))))
+                 (and project (directory-file-name
+                               (expand-file-name (project-root project))))))
+          dir))))
+
+(defun agent-river-map-refresh ()
+  "Redraw the map now."
+  (interactive)
+  (agent-river--map-draw))
+
+(defun agent-river-map-toggle ()
+  "Show or hide the reached files under the entry at point."
+  (interactive)
+  (let ((name (get-text-property (line-beginning-position) 'agent-river-map-name)))
+    (unless name (user-error "No entry on this line"))
+    (let* ((entry (seq-find (lambda (e) (equal (plist-get e :name) name))
+                            (agent-river--map-entries agent-river--map-root
+                                                      agent-river-map-scope)))
+           (open (and entry (agent-river--map-open-p entry)))
+           (cell (assoc name agent-river--map-folds)))
+      (if cell
+          (setcdr cell (not open))
+        (push (cons name (not open)) agent-river--map-folds)))
+    (agent-river--map-draw)))
+
+(defun agent-river-map-visit ()
+  "Descend into the directory at point, or open the file at point.
+The lens is moved rather than widened: one directory is always listed in
+full, and going deeper means looking somewhere else."
+  (interactive)
+  (let ((path (get-text-property (line-beginning-position) 'agent-river-map-path))
+        (dir (get-text-property (line-beginning-position) 'agent-river-map-dir)))
+    (cond
+     ((null path) (user-error "Nothing to visit on this line"))
+     (dir (agent-river-map-descend path))
+     ((file-exists-p path) (find-file path))
+     (t (user-error "%s is not on disk" (abbreviate-file-name path))))))
+
+(defun agent-river-map-descend (dir)
+  "Point the map at DIR.
+The hand-made folds are dropped with the listing they were about: the
+names in them belong to the directory being left, and carrying them over
+would fold entries in the new one that happen to share a name."
+  (setq agent-river--map-root (directory-file-name (expand-file-name dir))
+        agent-river--map-folds nil)
+  (agent-river--map-draw))
+
+(defun agent-river-map-up ()
+  "Point the map at the parent of the directory it is showing."
+  (interactive)
+  (let ((up (file-name-directory (directory-file-name agent-river--map-root))))
+    (if (or (null up) (equal (directory-file-name up) agent-river--map-root))
+        (user-error "Already at the root")
+      (agent-river-map-descend up))))
+
+(defvar agent-river-map-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "TAB") #'agent-river-map-toggle)
+    (define-key map (kbd "RET") #'agent-river-map-visit)
+    (define-key map (kbd "^") #'agent-river-map-up)
+    (define-key map (kbd "g") #'agent-river-map-refresh)
+    map)
+  "Keymap for `agent-river-map-mode'.")
+
+(define-derived-mode agent-river-map-mode special-mode "Agent-Map"
+  "Major mode for the project map.
+
+Dired-like on purpose: RET descends, `^' goes up, TAB opens what is under
+a line.  The gestures are the ones the view is an answer to -- it exists
+because a dired buffer can only ever show one directory at a time."
+  (setq-local truncate-lines t)
+  (setq-local outline-regexp "^\\*+ ")
+  (outline-minor-mode 1)
+  (setq-local header-line-format nil)
+  (buffer-disable-undo))
+
+(defun agent-river--map-observe (_state _event)
+  "Mark the map as needing a redraw, and make sure something will do it.
+
+Deliberately does not draw.  This runs on every tool call, and rebuilding
+a whole listing thousands of times a task would move point under whoever
+is reading it -- so an event only says that the drawing is out of date and
+the timer decides how often that is worth acting on."
+  (setq agent-river--map-dirty t)
+  (agent-river--ensure-map-timer))
+
+(defvar agent-river--map-timer nil
+  "Repeating timer redrawing the map, or nil while none runs.")
+
+(defun agent-river--stop-map-timer ()
+  "Stop the map redraw timer."
+  (when (timerp agent-river--map-timer)
+    (cancel-timer agent-river--map-timer))
+  (setq agent-river--map-timer nil))
+
+(defun agent-river--map-tick ()
+  "Redraw the map, or stop the timer once there is nothing left to draw.
+Cooling counts as something to draw: with a half-life set, a listing whose
+agents have all stopped is still changing, and the weights would otherwise
+sit frozen at whatever they were when the last event landed."
+  (condition-case err
+      (cond
+       ((null (get-buffer agent-river-map-buffer-name))
+        (agent-river--map-teardown))
+       ((or agent-river--map-dirty
+            (and agent-river-heat-half-life
+                 (agent-river--heat-visible-p agent-river-map-scope)))
+        (agent-river--map-draw))
+       (t (agent-river--stop-map-timer)))
+    ;; Same bargain as the other two timers: a redraw that throws every few
+    ;; seconds would bury Emacs in messages, so it retires rather than
+    ;; repeats -- and says so rather than going quiet.
+    (error (agent-river--stop-map-timer)
+           (message "agent-river: map refresh stopped (%s)"
+                    (error-message-string err)))))
+
+(defun agent-river--ensure-map-timer ()
+  "Start the map redraw timer if the map is open and none runs."
+  (when (and (null agent-river--map-timer)
+             (get-buffer agent-river-map-buffer-name))
+    (setq agent-river--map-timer
+          (run-at-time agent-river-map-refresh-interval
+                       agent-river-map-refresh-interval
+                       #'agent-river--map-tick))))
+
+(defun agent-river--map-teardown ()
+  "Take the map off the event stream and stop its timer.
+Run when the buffer is killed, and as the observer's retirement: the map
+draws only into its own buffer, so closing that buffer is the whole of
+turning it off."
+  (remove-hook 'agent-river-observers #'agent-river--map-observe)
+  (agent-river--stop-map-timer))
+
+(put 'agent-river--map-observe 'agent-river-retire #'agent-river--map-teardown)
+
+;;;###autoload
+(defun agent-river-map (&optional ask)
+  "Show where the agents are working across the whole project.
+
+The lens over the dired heat: that shades the directory you are already
+in, this lists one directory in full and says what has happened beneath
+each entry, so several agents spread over a large repository are visible
+at once.  With ASK (a prefix argument), prompts for the directory to
+start from instead of deriving it from the sessions.
+
+Needs no mode to be switched on: the buffer is the consent, and killing it
+takes the map off the event stream."
+  (interactive "P")
+  (let ((root (if ask
+                  (read-directory-name "Map: " nil nil t)
+                (agent-river--map-default-root)))
+        (buffer (get-buffer-create agent-river-map-buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'agent-river-map-mode)
+        (agent-river-map-mode))
+      (setq agent-river--map-root (directory-file-name (expand-file-name root))
+            agent-river--map-folds nil)
+      (add-hook 'kill-buffer-hook #'agent-river--map-teardown nil t))
+    (add-hook 'agent-river-observers #'agent-river--map-observe)
+    (agent-river--map-draw)
+    (agent-river--ensure-map-timer)
+    (pop-to-buffer buffer)))
 
 ;;; Foreign saves, noted from Emacs
 ;;

@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (146 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (177 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -167,6 +167,15 @@ These are load-bearing; the tests enforce most of them.
   the session cwd when under it, bare basename otherwise. Stripping only the
   session's own cwd makes one file reached from a worktree and from the main
   checkout render as two, which defeats the contention query.
+- **The anchor lives beside the keys, never inside them** (`agent-river-state-cwd`).
+  A normalised key cannot say which tree it is in, which is the price of the
+  invariant above and not a defect in it. The cwd is folded as a measurement of
+  its own — refreshed by every event carrying one, so a session that changes
+  directory re-anchors — and a view that needs a real path puts the two back
+  together deliberately (`agent-river--heat-absolute`). Resolving is strictly
+  worse than matching on the name for *identity* questions and strictly better
+  for *placement* ones, so both readings exist and each says which it is: file
+  shading still matches on the basename, directory aggregation resolves.
 - **One session, one way in** (`agent-river--claim`). The hooks and the
   agent-shell stream describe the same session, so folding both counts every
   step twice — and a doubled failure streak states a fact that is false, to the
@@ -218,13 +227,27 @@ What a consumer must respect:
   prevent. Observers run for a note too, but one level deep: a note made while
   a note is being handled is refused and returns nil.
 - **The state cannot address a file on disk** — `agent-river--rel` sees to that,
-  and it must keep doing so. Two ways out, both in the heat code: look the file
-  up *from* the consumer's side by basename (what `agent-river-touching`
-  matches on), or read an extra event key the fold ignores. `:path` is that
-  key — the absolute name, carried beside `:file` and never folded.
-- **Off by default, behind a global minor mode.** Writing into buffers the user
-  did not point this at needs a consent gesture, and turning it off has to take
-  the effects with it.
+  and it must keep doing so. Three ways out. Look the file up *from* the
+  consumer's side by basename (what `agent-river-touching` matches on); read an
+  extra event key the fold ignores (`:path`, the absolute name, carried beside
+  `:file` and never folded); or resolve a key against `agent-river-state-cwd`
+  (`agent-river--heat-absolute`), which is the only one that can place a key in
+  a directory tree and the only one that re-splits a worktree from its main
+  checkout. Reach for the third when the question is *where*, not *which*.
+- **Off by default, and the gesture that turns it on is what turns it off.**
+  Writing into buffers the user did not point this at needs consent, which is
+  what the global minor mode is for (`agent-river-heat-mode`). A consumer that
+  draws only into a buffer of its own needs no mode: opening that buffer is the
+  consent and killing it is the retirement (`agent-river-map`, via a local
+  `kill-buffer-hook` that is also the `agent-river-retire` property). What does
+  not change either way is that there is exactly one gesture and it is
+  reversible.
+- **Redraw on a timer, not per event, once the view is bigger than a line.**
+  The runner fires on every tool call. Rebuilding a whole listing that often
+  moves point under whoever is reading it, thousands of times a task. The
+  observer marks dirty and ensures the timer (`agent-river--map-observe`); the
+  timer decides how often dirt is worth acting on, and retires itself when
+  there is neither dirt nor anything left to cool.
 - **Test the derivation, not the rendering.** Frame choice, aggregation and
   thresholds are pure functions of the state; geometry is the host package's
   problem. The contract tests live under `;;; Observers` — point a new
@@ -285,6 +308,41 @@ Reading notes back and deciding what to tell the agent is a separate step, and
 is deliberately not built: `agent-river--signal` still fires on fail streaks
 only. Notes are visible in the HUD (`◉`) and counted in the report (`:notes`)
 first, so the rate can be seen before anything is fed back.
+
+### The two views of the artifact tables
+
+`agent-river-heat-mode` shades the dired buffer you are already in.
+`agent-river-map` (`*agent-river-map*`) is the lens over it: one directory
+listed in full, each entry annotated with what has happened *beneath* it, so
+several agents spread over a large repository are visible at once. Same
+weighting, same `agent-river--heat-entries` derivation, different grain — so
+the two cannot drift.
+
+Three things about the map are load-bearing:
+
+- **Breadth at one level, depth only where there is activity.** A whole tree
+  unfolded is unreadable in a monorepo; a view of only the touched paths says
+  where without saying where that is *relative to* anything. So RET descends
+  (`agent-river-map-descend`) rather than widening, and a file five directories
+  down is shown under the one entry the listing has a line for, with the rest
+  of its path inline.
+- **Weight and position are different readings.** The numbers say where an
+  agent has *been*; `:current` says where it *is*, and after a long task those
+  are different places. `:current` is computed across everything a party
+  reached, not just what falls under the map root, or descending would invent a
+  second "most recent" file that only looks like one because the real one is
+  out of view.
+- **The listing is the union of disk and state.** `:missing` marks an entry
+  only the state knows about — deleted, renamed, or reached through an anchor
+  this root has nothing to do with. Activity the map does not show is the one
+  thing it exists not to do.
+
+Encoding discipline, since there are three facts on a line: weight is shading
+(the same `agent-river-heat-levels` faces), party is text, contention is a
+marker. A fourth colour would leave a reader unable to say which fact any
+given colour meant. The position marker is repeated *inside* the brackets
+against the party it belongs to — in the left-hand column it is scannable but
+anonymous, and "where is this agent now" is a question about a party.
 
 ### Pieces that span files or need context
 

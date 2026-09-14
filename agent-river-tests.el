@@ -2119,5 +2119,315 @@ CALL overrides fields of the tool call record."
         (should-not (memq #'agent-river--after-save after-save-hook))
         (should (string-match-p "save watch stopped" (agent-river-test--hud)))))))
 
+;;; The anchor -- where a session's keys are relative to
+;;
+;; The artifact keys stay relative on purpose, so a worktree and its main
+;; checkout read as one file.  That makes them unable to say *which* tree
+;; they are in, and a view that has to place a key in a real directory needs
+;; both halves.  The anchor is the other half.
+
+(ert-deftest agent-river-test-the-cwd-is-folded-with-the-events ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :cwd "/repo" :file "a.el"))
+    ;; Folded rather than assigned where the state is addressed, so the
+    ;; fold's promise holds: replay the events and the anchor comes back
+    ;; with them.
+    (should (equal (agent-river-state-cwd state) "/repo"))
+    ;; A session that changes directory re-anchors, or its later keys would
+    ;; be read against a directory they were never relative to.
+    (agent-river-fold state '(:kind "act" :cwd "/other" :file "b.el"))
+    (should (equal (agent-river-state-cwd state) "/other"))
+    ;; Events made inside Emacs carry none and must leave it alone rather
+    ;; than blanking it.
+    (agent-river-fold state '(:kind "note" :text "saved"))
+    (should (equal (agent-river-state-cwd state) "/other"))))
+
+(ert-deftest agent-river-test-the-cwd-is-stored-without-its-slash ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :cwd "/repo/" :file "a.el"))
+    ;; One form, so prefix comparisons against it cannot come out two ways.
+    (should (equal (agent-river-state-cwd state) "/repo"))))
+
+(ert-deftest agent-river-test-a-trailing-slash-does-not-eat-the-path ()
+  ;; The length was measured off the cwd plus one rather than off its
+  ;; slash-terminated form, so a cwd that already ended in a slash cut one
+  ;; character too many -- `src/a.el' arriving as `rc/a.el'.  Invisible
+  ;; while only the basename was ever read back; not once the key has to
+  ;; place the file in a directory tree.
+  (should (equal (agent-river--rel "/repo/src/a.el" "/repo") "src/a.el"))
+  (should (equal (agent-river--rel "/repo/src/a.el" "/repo/") "src/a.el"))
+  ;; Outside the cwd it is still the bare name, which is what keeps a path
+  ;; from elsewhere out of this session's tree.
+  (should (equal (agent-river--rel "/elsewhere/a.el" "/repo") "a.el")))
+
+(ert-deftest agent-river-test-the-event-carries-the-anchor ()
+  (let ((event (agent-river--event
+                "act"
+                (agent-river-test--payload
+                 "{\"session_id\":\"s1\",\"cwd\":\"/repo\",
+                   \"tool_name\":\"Edit\",
+                   \"tool_input\":{\"file_path\":\"/repo/src/a.el\"}}"))))
+    ;; The label is only the last component and cannot stand in for it: two
+    ;; checkouts of one project are labelled alike on purpose.
+    (should (equal (plist-get event :cwd) "/repo"))
+    (should (equal (plist-get event :label) "repo"))))
+
+(ert-deftest agent-river-test-resolving-a-key-needs-an-anchor ()
+  ;; Without one the answer is unknown, and guessing would place files in
+  ;; directories no agent ever opened.
+  (should-not (agent-river--heat-absolute '(:file "src/a.el")))
+  (should (equal (agent-river--heat-absolute '(:cwd "/repo" :file "src/a.el"))
+                 "/repo/src/a.el"))
+  ;; A bare key resolves as a file sitting directly in the cwd, which is
+  ;; what it almost always is.
+  (should (equal (agent-river--heat-absolute '(:cwd "/repo" :file "a.el"))
+                 "/repo/a.el")))
+
+(ert-deftest agent-river-test-a-subagent-is-named-under-its-root ()
+  (agent-river-test--with-session state
+    (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
+      ;; Folded into the parent's name it would say the parent worked in a
+      ;; file it never opened; shown as the bare agent type, two `Explore'
+      ;; lines would be indistinguishable.
+      (should (equal (agent-river--party-label state) "alpha"))
+      (should (equal (agent-river--party-label child) "alpha/Explore")))))
+
+
+;;; Directory heat -- the aggregate a dired line can carry
+;;
+;; The file shading is matched on the bare name and stays that way; a
+;; directory cannot be, because `src' says nothing about which `src'.  These
+;; are the tests for the difference.
+
+(ert-deftest agent-river-test-a-directory-sums-what-lies-beneath-it ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-session state
+      (agent-river-fold state '(:kind "act" :cwd "/repo" :file "dialog/src/a.el"))
+      (agent-river-fold state '(:kind "act" :cwd "/repo" :file "dialog/src/b.el"))
+      (agent-river-fold state '(:kind "act" :cwd "/repo" :file "common/c.el"))
+      (let ((dirs (agent-river--heat-dirs "/repo")))
+        ;; Only the entry the listing has a line for: `src' is two levels
+        ;; down and has no line of its own here.
+        (should (equal (gethash "dialog" dirs) 2))
+        (should (equal (gethash "common" dirs) 1))
+        (should-not (gethash "src" dirs))))))
+
+(ert-deftest agent-river-test-a-bare-key-warms-no-directory ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-session state
+      ;; `agent-river--rel' degrades a file outside the cwd to a bare name,
+      ;; which is indistinguishable from one sitting in the cwd.  It has no
+      ;; directory component, so the worst it can do is put a line in the
+      ;; root's own listing -- it can never be summed into a subdirectory.
+      (agent-river-fold state '(:kind "act" :cwd "/repo" :file "stray.el"))
+      (should (zerop (hash-table-count (agent-river--heat-dirs "/repo")))))))
+
+(ert-deftest agent-river-test-a-directory-elsewhere-stays-cold ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-session state
+      (agent-river-fold state '(:kind "act" :cwd "/other" :file "src/a.el"))
+      ;; The price of resolving rather than matching on the name: a session
+      ;; anchored somewhere else contributes no directory shading here.  It
+      ;; is the right way round -- a `src' aggregate matched on the name
+      ;; would warm every `src' in every project at once.
+      (should (zerop (hash-table-count (agent-river--heat-dirs "/repo"))))
+      ;; The file shading is unaffected, because that question a bare name
+      ;; can answer.
+      (should (equal (gethash "a.el" (agent-river--heat-table)) 1)))))
+
+(ert-deftest agent-river-test-a-listing-table-carries-both-readings ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-session state
+      (agent-river-fold state '(:kind "act" :cwd "/repo" :file "dialog/src/a.el"))
+      (agent-river-fold state '(:kind "act" :cwd "/repo" :file "README.md"))
+      (let ((table (agent-river--heat-listing-table "/repo")))
+        ;; One table because a dired line is one name: a directory and a
+        ;; file of the same name cannot both be in one listing.
+        (should (equal (gethash "dialog" table) 1))
+        (should (equal (gethash "README.md" table) 1))))))
+
+
+;;; The map -- the project, one level at a time
+;;
+;; The derivation is tested, the rendering is not, for the same reason as
+;; the heat: which frame a number came from, how two agents on one directory
+;; add up, and where an agent is *now* as against where it has been are pure
+;; functions of the state.  Where the lines land on screen is not.
+
+(defmacro agent-river-test--with-tree (var &rest body)
+  "Bind VAR to a throwaway project tree and run BODY, then remove it.
+The map's listing is the one thing here that genuinely needs a directory:
+half of what it shows is what is on disk and untouched."
+  (declare (indent 1))
+  `(let ((,var (make-temp-file "agent-river-map" t)))
+     (unwind-protect
+         (progn
+           (make-directory (expand-file-name "dialog/src/main" ,var) t)
+           (make-directory (expand-file-name "common" ,var) t)
+           (make-directory (expand-file-name "docs" ,var) t)
+           (write-region "" nil (expand-file-name "dialog/src/main/foo.el" ,var))
+           (write-region "" nil (expand-file-name "common/c.el" ,var))
+           (write-region "" nil (expand-file-name "build.gradle.kts" ,var))
+           ,@body)
+       (delete-directory ,var t))))
+
+(ert-deftest agent-river-test-the-map-lists-the-quiet-entries-too ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        (let ((entries (agent-river--map-entries root)))
+          ;; Breadth is the point.  A view of only the touched paths answers
+          ;; "where" without saying where that is relative to anything else.
+          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
+                         '("common" "dialog" "docs" "build.gradle.kts")))
+          ;; Directories first, the way dired lists them.
+          (should (plist-get (nth 0 entries) :dir))
+          (should-not (plist-get (nth 3 entries) :dir))
+          (should-not (plist-get (car entries) :parties)))))))
+
+(ert-deftest agent-river-test-a-map-entry-carries-what-is-beneath-it ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        (let ((dialog (seq-find (lambda (e) (equal (plist-get e :name) "dialog"))
+                                (agent-river--map-entries root))))
+          ;; The entry's reading is the aggregate of its files and never a
+          ;; tally of its own, so the two can never disagree.
+          (should (equal (plist-get (car (plist-get dialog :parties)) :weight) 2))
+          ;; A file five directories down is still reported under the one
+          ;; name that is on screen, with the rest of its path inline.
+          (should (equal (mapcar (lambda (f) (plist-get f :rel))
+                                 (plist-get dialog :files))
+                         '("src/main/foo.el"))))))))
+
+(ert-deftest agent-river-test-the-map-shows-two-agents-on-one-directory ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (let ((other (agent-river-state "s2" "beta")))
+          (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+          (agent-river-fold other (list :kind "act" :cwd root :file "common/c.el"))
+          (agent-river-fold other (list :kind "act" :cwd root :file "common/c.el"))
+          (let* ((common (seq-find (lambda (e) (equal (plist-get e :name) "common"))
+                                   (agent-river--map-entries root)))
+                 (parties (plist-get common :parties)))
+            ;; Two agents in one place is the case the map earns its keep
+            ;; on -- and the one thing a dired line has no room to say.
+            (should (equal (mapcar (lambda (p) (plist-get p :party)) parties)
+                           '("beta" "alpha")))
+            (should (equal (plist-get (car parties) :weight) 2))))))))
+
+(ert-deftest agent-river-test-the-map-says-where-an-agent-is-now ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        ;; Weight alone cannot answer this.  After a long task the file with
+        ;; the most touches is where the agent *was*; only the newest touch
+        ;; says where it is, and those are different places.
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        (let ((entries (agent-river--map-entries root)))
+          (should-not (plist-get (car (plist-get
+                                       (seq-find (lambda (e) (equal (plist-get e :name) "common"))
+                                                 entries)
+                                       :parties))
+                                 :current))
+          (should (plist-get (car (plist-get
+                                   (seq-find (lambda (e) (equal (plist-get e :name) "dialog"))
+                                             entries)
+                                   :parties))
+                             :current)))))))
+
+(ert-deftest agent-river-test-where-an-agent-is-survives-descending ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        ;; Descending into `common' must not invent a second "most recent"
+        ;; file that only looks like one because the real one is out of
+        ;; view -- the map would then point at an agent that left.
+        (let* ((entries (agent-river--map-entries (expand-file-name "common" root)))
+               (c (seq-find (lambda (e) (equal (plist-get e :name) "c.el")) entries)))
+          (should (plist-get c :parties))
+          (should-not (plist-get (car (plist-get c :parties)) :current)))))))
+
+(ert-deftest agent-river-test-the-map-reads-the-frame-it-is-asked-for ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-fold state '(:kind "prompt" :text "next"))
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        (let ((session (agent-river--map-entries root 'session))
+              (task (agent-river--map-entries root 'task)))
+          ;; The map defaults to the session frame and the dired heat to the
+          ;; task frame, so the two readings must be genuinely different
+          ;; things and the header has to say which is being shown.
+          (should (plist-get (seq-find (lambda (e) (equal (plist-get e :name) "common"))
+                                       session)
+                             :parties))
+          (should-not (plist-get (seq-find (lambda (e) (equal (plist-get e :name) "common"))
+                                           task)
+                                 :parties)))))))
+
+(ert-deftest agent-river-test-the-map-still-shows-a-file-that-is-gone ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "deleted/old.el"))
+        (let ((gone (seq-find (lambda (e) (equal (plist-get e :name) "deleted"))
+                              (agent-river--map-entries root))))
+          ;; Activity the map does not show is the one thing it exists not
+          ;; to do, so a path whose top component is gone is listed and
+          ;; marked rather than dropped.
+          (should gone)
+          (should (plist-get gone :missing))
+          (should (plist-get gone :parties)))))))
+
+(ert-deftest agent-river-test-a-subagent-is-named-on-the-map ()
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
+          (agent-river-fold child (list :kind "act" :cwd root :file "common/c.el"))
+          (let ((common (seq-find (lambda (e) (equal (plist-get e :name) "common"))
+                                  (agent-river--map-entries root))))
+            ;; The note the map is addressed to a human rather than to the
+            ;; agent, but the reasoning is the same as a foreign save's: a
+            ;; file a child holds, reported under the parent's name, reads
+            ;; as a statement about the parent's own work.
+            (should (equal (plist-get (car (plist-get common :parties)) :party)
+                           "alpha/Explore"))))))))
+
+(ert-deftest agent-river-test-a-map-fold-made-by-hand-wins ()
+  (let ((agent-river--map-folds nil))
+    ;; An entry with activity opens by default -- the files are why it is
+    ;; annotated at all.
+    (should (agent-river--map-open-p '(:name "dialog" :files ((:rel "a.el")))))
+    (should-not (agent-river--map-open-p '(:name "docs" :files nil)))
+    ;; And a toggle wins from then on, because the map is redrawn every few
+    ;; seconds and a fold that sprang back each time would not be a fold.
+    (let ((agent-river--map-folds '(("dialog" . nil))))
+      (should-not (agent-river--map-open-p '(:name "dialog" :files ((:rel "a.el"))))))))
+
+(ert-deftest agent-river-test-the-map-is-not-on-the-stream-until-opened ()
+  ;; No mode to switch on, because the map draws only into its own buffer:
+  ;; opening it is the consent, and killing it is the retirement.
+  (should-not (memq #'agent-river--map-observe agent-river-observers))
+  (should-not (get-buffer agent-river-map-buffer-name)))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here
