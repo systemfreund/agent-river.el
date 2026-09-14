@@ -3120,6 +3120,33 @@ most worth being able to scan a whole listing for."
         ((time-less-p a b) b)
         (t a)))
 
+(defun agent-river--map-all-roots (&optional scope)
+  "Return all unique roots from touched files, sorted by recency.
+
+Each root is the session's cwd from which files were touched.
+Roots are sorted by the most recent touch time within them."
+  (let ((roots (make-hash-table :test 'equal))
+        (entries (agent-river--heat-entries scope)))
+    (dolist (entry entries)
+      (let ((cwd (plist-get entry :cwd)))
+        (when (and cwd (not (string-empty-p cwd)))
+          (puthash cwd
+                   (agent-river--map-later
+                    (gethash cwd roots)
+                    (plist-get entry :last))
+                   roots))))
+    ;; Convert to a sorted list: most recent first
+    (let (result)
+      (maphash (lambda (root last-time)
+                 (push (cons root last-time) result))
+               roots)
+      (sort result (lambda (a b)
+                     (let ((a-time (cdr a))
+                           (b-time (cdr b)))
+                       (if (and a-time b-time)
+                           (time-less-p b-time a-time)
+                         (and a-time (not b-time)))))))))
+
 (defun agent-river--map-reach (root &optional scope)
   "Return what the agents have reached inside ROOT, deepest detail kept.
 
@@ -3283,7 +3310,8 @@ marks what was left off."
   "Name of the project map buffer.")
 
 (defvar-local agent-river--map-root nil
-  "The directory the map buffer is currently showing.")
+  "The directory the map buffer is currently showing.
+When nil, the map shows all touched roots; when set, it shows only that root.")
 
 (defvar-local agent-river--map-folds nil
   "Alist of entry name to whether its files are shown, where the user said.
@@ -3453,54 +3481,89 @@ start of the buffer."
       (forward-line (1- (max 1 (or (nth 2 here) 1)))))))
 
 (defun agent-river--map-draw ()
-  "Redraw the map buffer from the state, if it is still alive."
+  "Redraw the map buffer from the state, if it is still alive.
+
+If agent-river--map-root is set, shows only that root (single-root mode).
+Otherwise shows all touched roots organized by root directory (multi-root mode)."
   (let ((buffer (get-buffer agent-river-map-buffer-name)))
     (when buffer
       (with-current-buffer buffer
-        (let* ((root agent-river--map-root)
-               (entries (agent-river--map-entries root agent-river-map-scope))
-               (here (agent-river--map-here))
-               (inhibit-read-only t))
+        (let* ((here (agent-river--map-here))
+               (inhibit-read-only t)
+               (single-root-mode agent-river--map-root)
+               ;; In single-root mode, show only the specified root.
+               ;; In multi-root mode, gather all touched roots.
+               (roots (if single-root-mode
+                          (list agent-river--map-root)
+                        (mapcar #'car (agent-river--map-all-roots agent-river-map-scope)))))
           (erase-buffer)
-          (insert (agent-river--map-header root entries) "\n")
-          (dolist (entry entries)
-            (let* ((name (plist-get entry :name))
-                   (dir (plist-get entry :dir))
-                   (path (expand-file-name name root)))
-              (insert (propertize
-                       (concat (agent-river--map-line
-                                2 (concat name (if dir "/" ""))
-                                (plist-get entry :parties)
-                                (plist-get entry :missing))
-                               "\n")
-                       'agent-river-map-name name
-                       'agent-river-map-path path
-                       'agent-river-map-dir dir
-                       ;; What `agent-river-map-next-active' stops on.  Read
-                       ;; off the parties rather than off the annotation
-                       ;; text, so the motion and the reading cannot come
-                       ;; apart if the line is ever formatted differently.
-                       'agent-river-map-active (and (plist-get entry :parties) t)))
-              (when (agent-river--map-open-p entry)
-                (let* ((files (plist-get entry :files))
-                       (shown (seq-take files agent-river-map-detail-files)))
-                  (dolist (file shown)
+          ;; Render appropriate header based on mode
+          (if (or (not single-root-mode) (= (length roots) 1))
+              ;; Single root mode, or multi-root with only one root: use traditional header
+              (let* ((root (car roots))
+                     (entries (and root (agent-river--map-entries root agent-river-map-scope))))
+                (insert (if root
+                            (agent-river--map-header root entries)
+                          (concat (agent-river--map-marker 1) "No activity yet"))
+                        "\n"))
+            ;; Multi-root mode with multiple roots
+            (insert (agent-river--map-marker 1) "Touched roots · "
+                    (format "%d root%s\n" (length roots) (if (= (length roots) 1) "" "s"))))
+          ;; Render each root section
+          (dolist (root roots)
+            (let ((entries (and root (agent-river--map-entries root agent-river-map-scope))))
+              ;; In multi-root mode with multiple roots, show root as level-1 heading
+              (when (and (not single-root-mode) (> (length roots) 1) root)
+                (let ((all-parties (agent-river--map-merge-parties
+                                    (mapcar (lambda (entry)
+                                              (list :parties (plist-get entry :parties)))
+                                            entries))))
+                  (insert (agent-river--map-line 1 (abbreviate-file-name root)
+                                                 all-parties)
+                          "\n")))
+              ;; Render entries under this root
+              (when entries
+                (dolist (entry entries)
+                  (let* ((name (plist-get entry :name))
+                         (dir (plist-get entry :dir))
+                         (path (expand-file-name name root))
+                         ;; In single-root or multi-root with one root, entries are level 2;
+                         ;; in multi-root with multiple roots, entries are level 2.
+                         (level (if (and (not single-root-mode) (> (length roots) 1)) 2 2)))
                     (insert (propertize
                              (concat (agent-river--map-line
-                                      3 (plist-get file :rel)
-                                      (plist-get file :parties))
+                                      level (concat name (if dir "/" ""))
+                                      (plist-get entry :parties)
+                                      (plist-get entry :missing))
                                      "\n")
                              'agent-river-map-name name
-                             'agent-river-map-rel (plist-get file :rel)
-                             'agent-river-map-path
-                             (expand-file-name (plist-get file :rel) path)
-                             'agent-river-map-active
-                             (and (plist-get file :parties) t))))
-                  (when (> (length files) (length shown))
-                    (insert (propertize
-                             (concat (agent-river--map-marker 3) "…\n")
-                             'agent-river-map-face 'agent-river-stale
-                             'agent-river-map-name name)))))))
+                             'agent-river-map-path path
+                             'agent-river-map-dir dir
+                             ;; What `agent-river-map-next-active' stops on.  Read
+                             ;; off the parties rather than off the annotation
+                             ;; text, so the motion and the reading cannot come
+                             ;; apart if the line is ever formatted differently.
+                             'agent-river-map-active (and (plist-get entry :parties) t)))
+                    (when (agent-river--map-open-p entry)
+                      (let* ((files (plist-get entry :files))
+                             (shown (seq-take files agent-river-map-detail-files)))
+                        (dolist (file shown)
+                          (insert (propertize
+                                   (concat (agent-river--map-line
+                                            (+ level 1) (plist-get file :rel)
+                                            (plist-get file :parties))
+                                           "\n")
+                                   'agent-river-map-name name
+                                   'agent-river-map-rel (plist-get file :rel)
+                                   'agent-river-map-path
+                                   (expand-file-name (plist-get file :rel) path)
+                                   'agent-river-map-active
+                                   (and (plist-get file :parties) t))))
+                        (when (> (length files) (length shown))
+                          (insert (propertize
+                                   (concat (agent-river--map-marker (+ level 1)) "…\n")
+                                   'agent-river-map-face 'agent-river-stale
+                                   'agent-river-map-name name))))))))))
           (agent-river--map-shade)
           (agent-river--map-goto here)
           (agent-river--map-settle-point)
@@ -3863,16 +3926,22 @@ turning it off."
 The lens over the dired heat: that shades the directory you are already
 in, this lists one directory in full and says what has happened beneath
 each entry, so several agents spread over a large repository are visible
-at once.  With ASK (a prefix argument), prompts for the directory to
-start from instead of deriving it from the sessions.
+at once.
+
+With ASK (a prefix argument):
+  - C-u: Prompt for a specific directory to show (single-root mode)
+  - C-u C-u: Show all touched roots (multi-root mode)
 
 Needs no mode to be switched on: the buffer is the consent, and killing it
 takes the map off the event stream."
   (interactive "P")
-  (let ((root (if ask
-                  (read-directory-name "Map: " nil nil t)
-                (agent-river--map-default-root)))
-        (buffer (get-buffer-create agent-river-map-buffer-name)))
+  (let* ((multi-root-mode (and ask (listp ask) (= (car ask) 16)))
+         (ask-single (and ask (not multi-root-mode)))
+         (root (cond
+                (multi-root-mode nil)  ; nil means multi-root mode
+                (ask-single (read-directory-name "Map: " nil nil t))
+                (t (agent-river--map-default-root))))
+         (buffer (get-buffer-create agent-river-map-buffer-name)))
     (with-current-buffer buffer
       ;; Set unconditionally rather than only on a fresh buffer: the answer
       ;; can change between two calls -- a grammar installed, or this file
@@ -3880,7 +3949,8 @@ takes the map off the event stream."
       (if (agent-river--markdown-ts-p)
           (agent-river-map-mode)
         (agent-river-map-plain-mode))
-      (setq agent-river--map-root (directory-file-name (expand-file-name root))
+      (setq agent-river--map-root (if multi-root-mode nil
+                                       (directory-file-name (expand-file-name root)))
             agent-river--map-folds nil)
       (add-hook 'kill-buffer-hook #'agent-river--map-teardown nil t))
     (add-hook 'agent-river-observers #'agent-river--map-observe)

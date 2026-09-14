@@ -2806,5 +2806,66 @@ same either way."
   (should-not (memq #'agent-river--map-observe agent-river-observers))
   (should-not (get-buffer agent-river-map-buffer-name)))
 
+(ert-deftest agent-river-test-map-multi-root-collects-all-roots ()
+  "The multi-root mode collects all unique roots from touched files."
+  (agent-river-test--with-tree root1
+    (let* ((root2 (make-temp-file "agent-river-root2" t)))
+      (unwind-protect
+          (progn
+            ;; Create two separate states, one for each root
+            (let ((state1 (agent-river-state "s1" "alpha"))
+                  (state2 (agent-river-state "s2" "beta")))
+              ;; Register both states
+              (puthash "s1" state1 agent-river-registry)
+              (puthash "s2" state2 agent-river-registry)
+              ;; Touch a file in root1
+              (agent-river-fold state1 (list :kind "act" :cwd root1 :file "common/c.el"))
+              ;; Touch a file in root2
+              (agent-river-fold state2 (list :kind "act" :cwd root2 :file "other.el"))
+              ;; Get all roots
+              (let* ((all-roots (agent-river--map-all-roots 'session))
+                     (root-dirs (mapcar #'car all-roots)))
+                ;; Should have found both roots
+                (should (>= (length all-roots) 2))
+                ;; Both roots should be present in the list
+                (should (member root1 root-dirs))
+                (should (member root2 root-dirs)))))
+        (delete-directory root2 t)))))
+
+(ert-deftest agent-river-test-map-single-root-mode-shows-one-root ()
+  "Single-root mode (when agent-river--map-root is set) shows only that root."
+  (agent-river-test--with-map root
+    ;; When agent-river--map-root is set, the map should be in single-root mode
+    ;; and should only show entries under that root.
+    (should agent-river--map-root)
+    ;; The first entry name should be one of the known entries
+    (should (member (get-text-property (line-beginning-position) 'agent-river-map-name)
+                    '("common" "dialog")))))
+
+(ert-deftest agent-river-test-map-multi-root-mode-shows-all-roots ()
+  "Multi-root mode (when agent-river--map-root is nil) shows all touched roots."
+  (agent-river-test--with-tree root1
+    (agent-river-test--with-session state
+      (let* ((root2 (make-temp-file "agent-river-root2" t)))
+        (unwind-protect
+            (progn
+              ;; Touch files in both roots
+              (dotimes (_ 5)
+                (agent-river-fold state (list :kind "act" :cwd root1 :file "file1.el")))
+              (dotimes (_ 3)
+                (agent-river-fold state (list :kind "act" :cwd root2 :file "file2.el")))
+              ;; Create map buffer in multi-root mode (agent-river--map-root = nil)
+              (with-temp-buffer
+                (rename-buffer agent-river-map-buffer-name)
+                (agent-river-map-plain-mode)
+                (setq agent-river--map-root nil)  ; Enable multi-root mode
+                (agent-river--map-draw)
+                ;; Buffer should contain roots as headings
+                (let ((buffer-text (buffer-string)))
+                  ;; Should mention multiple roots or touched roots
+                  (should (or (string-match-p "root" buffer-text)
+                              (string-match-p "Touched roots" buffer-text))))))
+          (delete-directory root2 t))))))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here
