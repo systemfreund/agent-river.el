@@ -788,6 +788,260 @@ many candidates were taken in."
     taken))
 
 
+;;; Launchers -- the one end that starts a process
+;;
+;; A launcher is a plist, in the shape the contributors and the sources use:
+;;
+;;   :name         what the decision log calls it.
+;;   :available-p  can it run here at all -- is the package it drives loaded.
+;;   :launch       (CANDIDATE PROMPT) -> a handle, or signals.
+;;   :resolve      (HANDLE) -> the session key, or nil while it is not known.
+;;
+;; The split between `:launch' and `:resolve' is forced by a real asymmetry
+;; and is not a tidiness.  With agent-shell the ACP session id appears after
+;; the process is up, so a launch can hand back only a handle -- the buffer --
+;; and the binding candidate -> session is resolved afterwards.  With a
+;; headless CLI the session id can be passed *in*, so the key is known before
+;; the process starts and `:resolve' has nothing to do.  Where we control the
+;; invocation we assign identity; where we do not, we resolve it after the
+;; fact.
+;;
+;; Three switches stand between a candidate and a process, and each answers a
+;; different question.  `agent-river-launch-launcher' says whether anything
+;; can launch at all; a rule's `:prompt' says whether *this* rule may, since
+;; there is nothing to say to an agent without one; and
+;; `agent-river-launch-auto' says whether it happens without being asked.
+;; That is the ladder: a launcher configured is rung 2, arming one rule is
+;; rung 3, `auto' is rung 4 -- and each is a thing you can see yourself turn
+;; on.
+
+(declare-function agent-shell--start "agent-shell")
+(declare-function agent-shell--insert-to-shell-buffer "agent-shell")
+(declare-function shell-maker-busy "shell-maker")
+(defvar agent-shell--state)
+
+(defcustom agent-river-launch-launcher nil
+  "Name of the launcher in `agent-river-launch-launchers', or nil.
+
+Nil is shadow mode, and the default: an accepted candidate is decided
+`ready' and filed, so the pipeline runs end to end with a no-op where the
+process would go.  Read the decision log for a fortnight before setting
+this, which is the whole reason it runs before there is anything to set."
+  :type '(choice (const :tag "Shadow -- nothing starts" nil) string))
+
+(defcustom agent-river-launch-auto nil
+  "Launch an accepted candidate without being asked.
+
+Nil holds it in the queue as `armed' and waits for RET, which is the
+difference between watching it decide and letting it act.  Turn it on for
+one rule's worth of evidence at a time; `:budget' and
+`agent-river-launch-max-generation' are what stand between it and a bad
+night."
+  :type 'boolean)
+
+(defcustom agent-river-launch-max-generation 2
+  "How deep a chain of launches may go.
+
+A launched agent produces events, which this layer sees, which can launch
+another.  Left alone that feeds itself, and unlike a runaway observer every
+iteration of it spends tokens and writes to a repository.
+
+A candidate from a session we started is one generation deeper than that
+session.  This is checked on every candidate whatever the rules say, since
+a guard you have to remember to add to each rule is not a guard.  The
+provenance guard -- not acting on what we ourselves caused -- is the
+sharper instrument and belongs in a rule; this is the blunt one that holds
+when the sharp one is missing."
+  :type 'integer)
+
+(defvar agent-river-launch--generations (make-hash-table :test 'equal)
+  "Session key to the generation it was launched at.
+A session nobody here started is absent, and reads as generation 0.")
+
+(defun agent-river-launch--generation (candidate)
+  "Return which generation CANDIDATE would be launched at."
+  (let ((parent (plist-get candidate :session)))
+    (1+ (or (and parent (gethash parent agent-river-launch--generations)) 0))))
+
+(defcustom agent-river-launch-shell-config
+  (lambda ()
+    (when (fboundp 'agent-shell-anthropic-make-claude-code-config)
+      (funcall (intern "agent-shell-anthropic-make-claude-code-config"))))
+  "Function returning the agent-shell config a launch should start.
+
+A function rather than a value because the config is built, and building
+it reaches for authentication that need not exist when this file loads."
+  :type 'function)
+
+(defun agent-river-launch--shell-available-p ()
+  "Return non-nil if agent-shell can host a session here."
+  (and (fboundp 'agent-shell--start)
+       (fboundp 'agent-shell--insert-to-shell-buffer)
+       (functionp agent-river-launch-shell-config)
+       ;; Built, not merely nameable: the config reaches for authentication,
+       ;; and a launcher that reports itself available and then fails on its
+       ;; first candidate has told the queue something untrue.
+       (condition-case nil
+           (and (funcall agent-river-launch-shell-config) t)
+         (error nil))))
+
+(defcustom agent-river-launch-shell-tries 60
+  "How many seconds a launched shell is given to accept its prompt.
+
+The session is not ready the moment the buffer exists -- the ACP handshake
+is still running -- and there is no readiness signal to subscribe to, so
+the prompt is offered once a second until it is taken.  Giving up says so
+in the log rather than leaving a started agent sitting with nothing to do."
+  :type 'integer)
+
+(defun agent-river-launch--shell-send (buffer text tries)
+  "Offer TEXT to the agent-shell in BUFFER, retrying up to TRIES times.
+
+Busy means not ready rather than queue it: a prompt enqueued into a shell
+that has never run one is processed when the *current* prompt completes,
+and a shell still shaking hands has no current prompt for it to wait
+behind."
+  (when (buffer-live-p buffer)
+    (unless (condition-case nil
+                (with-current-buffer buffer
+                  (unless (shell-maker-busy)
+                    (agent-shell--insert-to-shell-buffer
+                     :text text :submit t :no-focus t)
+                    t))
+              (error nil))
+      (if (> tries 0)
+          (run-with-timer 1 nil #'agent-river-launch--shell-send
+                          buffer text (1- tries))
+        (agent-river-log "fail" (format "launch: %s never took its prompt"
+                                        (buffer-name buffer)))))))
+
+(defun agent-river-launch--shell-launch (candidate prompt)
+  "Start an agent-shell session for CANDIDATE and hand it PROMPT."
+  (let* ((default-directory (or (plist-get candidate :cwd) default-directory))
+         (buffer (agent-shell--start
+                  :config (funcall agent-river-launch-shell-config)
+                  :no-focus t :new-session t)))
+    (unless (buffer-live-p buffer)
+      (error "agent-shell started no buffer"))
+    (agent-river-launch--shell-send buffer prompt
+                                    agent-river-launch-shell-tries)
+    buffer))
+
+(defun agent-river-launch--shell-resolve (handle)
+  "Return the session id agent-shell gave HANDLE, once it has one."
+  (when (buffer-live-p handle)
+    (with-current-buffer handle
+      (alist-get :id (alist-get :session (bound-and-true-p agent-shell--state))))))
+
+(defvar agent-river-launch-launchers
+  (list (list :name "agent-shell"
+              :available-p #'agent-river-launch--shell-available-p
+              :launch #'agent-river-launch--shell-launch
+              :resolve #'agent-river-launch--shell-resolve))
+  "Available launchers, as plists.  See the section comment above.
+
+agent-shell is the calibration launcher rather than the operating one: a
+buffer at three in the morning waiting on a permission prompt is an agent
+spending the night waiting for a human.  A headless launcher is the one
+rung 4 wants, and it goes here beside this one.")
+
+(defun agent-river-launch--launcher ()
+  "Return the configured launcher, or nil for shadow mode."
+  (when agent-river-launch-launcher
+    (seq-find (lambda (l) (equal (plist-get l :name) agent-river-launch-launcher))
+              agent-river-launch-launchers)))
+
+(defun agent-river-launch-context (candidate)
+  "Return what is measured about CANDIDATE's session, as Markdown.
+
+For a rule's `:prompt' to build on.  It is the Markdown export and not a
+fourth rendering of the state: that export exists for where the state
+*leaves* the package -- an issue, a pull request, a message -- and a
+prompt to another agent is exactly that, so it already escapes the
+agent's words and already marks a claim as a claim.
+
+The claim is appended last and quoted, for the same reason `intent' is
+last and marked twice over there.  It is the one thing here that is not a
+measurement, and a reader -- the next agent -- who takes it for one has no
+way back to the distinction."
+  (let* ((session (plist-get candidate :session))
+         (state (and (fboundp 'agent-river-markdown) session
+                     (agent-river-markdown session)))
+         (claim (plist-get candidate :claim)))
+    (concat (or state "")
+            (when claim
+              (format "\n> %s said, of its own work: %s\n"
+                      (or (plist-get candidate :actor) "the agent")
+                      (agent-river--md-escape (agent-river--squish claim)))))))
+
+(defun agent-river-launch--prompt (rule candidate)
+  "Return what RULE would say to an agent about CANDIDATE, or nil.
+
+Nil means this rule cannot launch and never will -- there is nothing to
+say to an agent -- which is what makes `:prompt' the per-rule arming
+switch rather than a setting of its own."
+  (let ((prompt (plist-get rule :prompt)))
+    (cond
+     ((functionp prompt) (funcall prompt candidate))
+     ((agent-river-launch--string prompt) prompt))))
+
+(defvar agent-river-launch--launched nil
+  "Launch records, newest first.
+Each is (:key :at :rule :launcher :handle :session :generation).  Kept
+only so a session we started can be recognised as the parent of whatever
+it hands off -- see `agent-river-launch--generations'.")
+
+(defun agent-river-launch--resolve-pending ()
+  "Ask each unresolved launch record for its session key.
+
+Late binding, and it has to stay able to give up: a launcher that started
+something which never announced a session would otherwise be asked about
+it on every drain for as long as Emacs runs.  A handle that is gone is
+dropped."
+  (dolist (record agent-river-launch--launched)
+    (unless (plist-get record :session)
+      (let* ((launcher (seq-find (lambda (l)
+                                   (equal (plist-get l :name)
+                                          (plist-get record :launcher)))
+                                 agent-river-launch-launchers))
+             (resolve (plist-get launcher :resolve))
+             (session (and resolve
+                           (condition-case nil
+                               (funcall resolve (plist-get record :handle))
+                             (error nil)))))
+        (when session
+          (plist-put record :session session)
+          (puthash session (plist-get record :generation)
+                   agent-river-launch--generations))))))
+
+(defun agent-river-launch--launch (rule candidate)
+  "Start something for CANDIDATE under RULE, and return its decision.
+
+Never lets a launcher's failure take the drain with it: a launch that
+throws is a decision like any other, so the candidate is finished rather
+than left in a queue that would try it again every minute."
+  (let ((launcher (agent-river-launch--launcher))
+        (prompt (agent-river-launch--prompt rule candidate)))
+    (condition-case err
+        (let* ((handle (funcall (plist-get launcher :launch) candidate prompt))
+               (record (list :key (plist-get candidate :key)
+                             :at (current-time)
+                             :rule (plist-get rule :name)
+                             :launcher (plist-get launcher :name)
+                             :handle handle
+                             :generation (agent-river-launch--generation
+                                          candidate))))
+          (push record agent-river-launch--launched)
+          (agent-river-launch--finish
+           candidate 'launched
+           (format "rule %s via %s" (plist-get rule :name)
+                   (plist-get launcher :name))))
+      (error
+       (agent-river-log "fail" (format "launch failed: %s"
+                                       (error-message-string err)))
+       (agent-river-launch--finish candidate 'failed
+                                   (error-message-string err))))))
+
 ;;; The drain
 ;;
 ;; Where a gate is asked and, one commit from now, where a launcher is called.
@@ -805,8 +1059,55 @@ many candidates were taken in."
 ;; hour.  Draining on `agent-river-observers' would be sharper and belongs
 ;; with the launcher, debounced: that hook fires on every tool call.
 
+(defun agent-river-launch--say (candidate decision reason)
+  "Decide DECISION about CANDIDATE for REASON, unless that is what it said last.
+
+A candidate that stays in the queue is asked again every minute, and
+sixty identical lines an hour would bury the transitions this log exists
+to show.  What is remembered is the pair: a hold whose *reason* changes is
+news, and so is a held candidate becoming armed."
+  (let ((said (cons decision reason)))
+    (unless (equal said (plist-get candidate :said))
+      (agent-river-launch--decide decision candidate reason))
+    (plist-put candidate :said said)))
+
+(defun agent-river-launch--act (rule candidate)
+  "Do for CANDIDATE whatever RULE and the switches allow.
+Return non-nil if it should stay in the queue."
+  (let* ((launcher (agent-river-launch--launcher))
+         (prompt (and launcher (agent-river-launch--prompt rule candidate))))
+    (cond
+     ;; Nothing to launch with, or nothing to say: the dry run, which is
+     ;; where every rule starts and where a rule without a `:prompt' stays
+     ;; however the other two switches are set.
+     ((null prompt)
+      (agent-river-launch--spend rule)
+      (agent-river-launch--finish
+       candidate 'ready
+       (format "rule %s, %s" (plist-get rule :name)
+               (if launcher "which has no :prompt" "nothing to launch it with")))
+      nil)
+     (agent-river-launch-auto
+      (agent-river-launch--spend rule)
+      (agent-river-launch--launch rule candidate)
+      nil)
+     ;; Armed: everything agrees except that nobody has said now.  It stays
+     ;; in the queue, which is what RET acts on -- and the budget is not
+     ;; spent, or a candidate waiting an hour would spend it sixty times.
+     (t
+      (agent-river-launch--say candidate 'armed
+                               (format "rule %s, waiting for RET"
+                                       (plist-get rule :name)))
+      t))))
+
+(defun agent-river-launch--spend (rule)
+  "Record that RULE let one through, for `:budget' to count."
+  (push (cons (current-time) (plist-get rule :name))
+        agent-river-launch--accepted))
+
 (defun agent-river-launch--drain ()
-  "Ask each queued candidate's gate, and file the ones that may go."
+  "Ask each queued candidate's gate, and act on the ones that may go."
+  (agent-river-launch--resolve-pending)
   (let (keep)
     (dolist (candidate agent-river-launch--queue)
       (let ((rule (agent-river-launch--rule-for candidate)))
@@ -816,24 +1117,49 @@ many candidates were taken in."
          ((null rule)
           (agent-river-launch--finish candidate 'unmatched
                                       "no rule matches it any more"))
+         ;; The chain guard, asked whatever the rules say.  A generation is a
+         ;; property of the candidate, so this is as final as a match: no
+         ;; amount of waiting makes a fourth-generation launch a third.
+         ((> (agent-river-launch--generation candidate)
+             agent-river-launch-max-generation)
+          (agent-river-launch--finish
+           candidate 'refused
+           (format "generation %d, cap %d"
+                   (agent-river-launch--generation candidate)
+                   agent-river-launch-max-generation)))
          (t
           (let ((reason (agent-river-launch--gate rule candidate)))
             (cond
              (reason
-              ;; Logged on change only.  A candidate held by a budget for an
-              ;; hour is asked sixty times, and sixty identical lines would
-              ;; bury the transitions this log exists to show.
-              (unless (equal reason (plist-get candidate :held))
-                (agent-river-launch--decide 'held candidate reason))
-              (push (plist-put candidate :held reason) keep))
-             (t
-              (push (cons (current-time) (plist-get rule :name))
-                    agent-river-launch--accepted)
-              (agent-river-launch--finish
-               candidate 'ready
-               (format "rule %s, nothing to launch it with yet"
-                       (plist-get rule :name))))))))))
+              (agent-river-launch--say candidate 'held reason)
+              (push candidate keep))
+             ((agent-river-launch--act rule candidate)
+              (push candidate keep))))))))
     (setq agent-river-launch--queue (nreverse keep))))
+
+;;;###autoload
+(defun agent-river-launch-now (candidate)
+  "Launch CANDIDATE now, whatever its gate says.
+
+The gesture rung 2 is made of, and it overrides the gate deliberately:
+a gate is this layer\='s guess about whether the moment is right, and a
+person pressing RET is not a guess.  What it cannot override is the rule
+having nothing to say -- there is no prompt to invent -- or there being no
+launcher configured at all."
+  (let ((rule (agent-river-launch--rule-for candidate)))
+    (cond
+     ((null (agent-river-launch--launcher))
+      (user-error "No launcher: set `agent-river-launch-launcher' first"))
+     ((null rule)
+      (user-error "No rule matches this candidate any more"))
+     ((null (agent-river-launch--prompt rule candidate))
+      (user-error "Rule `%s' has no :prompt, so it can only ever be a dry run"
+                  (plist-get rule :name)))
+     (t
+      (agent-river-launch--spend rule)
+      (agent-river-launch--launch rule candidate)
+      (setq agent-river-launch--queue (delq candidate agent-river-launch--queue))
+      (agent-river-launch--redraw)))))
 
 ;;;###autoload
 (defun agent-river-launch-drain ()
@@ -927,7 +1253,11 @@ rebuilds the queue from disk."
 ;; the issue, and the HUD is not Markdown for exactly that reason.
 
 (defvar agent-river-launch--decision-faces
-  '((ready . agent-river-prompt)
+  '((launched . agent-river-prompt)
+    (armed . agent-river-signal)
+    (failed . agent-river-fail)
+    (refused . agent-river-stale)
+    (ready . agent-river-prompt)
     (queued . agent-river-act)
     (held . agent-river-signal)
     (duplicate . agent-river-stale)
@@ -941,6 +1271,29 @@ the theme already means by these -- no colour is chosen here.")
   "Render TIME as a short local clock reading."
   (if time (format-time-string "%H:%M:%S" time) "--:--:--"))
 
+(defmacro agent-river-launch--with-candidate (candidate &rest body)
+  "Run BODY, marking everything it inserts as belonging to CANDIDATE."
+  (declare (indent 1))
+  `(let ((start (point)))
+     ,@body
+     (put-text-property start (point) 'agent-river-launch-candidate ,candidate)))
+
+(defun agent-river-launch-candidate-at-point ()
+  "Return the candidate the point is in, or nil."
+  (get-text-property (point) 'agent-river-launch-candidate))
+
+(defun agent-river-queue-launch ()
+  "Launch the candidate at point now.
+
+Deliberately overrides its gate: a gate is this layer\='s guess about
+whether the moment is right, and a person pressing RET is not a guess."
+  (interactive)
+  (let ((candidate (agent-river-launch-candidate-at-point)))
+    (unless candidate
+      (user-error "No candidate here"))
+    (agent-river-launch-now candidate)
+    (message "agent-river: launched")))
+
 (defun agent-river-launch--draw ()
   "Render the queue and the recent decisions into the current buffer."
   (let ((inhibit-read-only t))
@@ -952,11 +1305,26 @@ the theme already means by these -- no colour is chosen here.")
                                  (agent-river-launch--dir nil))
                                 (if agent-river-launch-mode "watching" "off"))
                         'face 'agent-river-time))
-    (insert (propertize "  no launcher yet -- nothing here starts\n\n"
-                        'face 'agent-river-stale))
+    ;; What the three switches are set to, because that is the whole answer
+    ;; to "why did nothing start" and it is the one thing here that changes
+    ;; without an event to announce it.
+    (insert (propertize
+             (format "  %s\n\n"
+                     (cond
+                      ((null (agent-river-launch--launcher))
+                       "shadow -- no launcher, nothing starts")
+                      (agent-river-launch-auto
+                       (format "%s, automatic"
+                               agent-river-launch-launcher))
+                      (t (format "%s, RET to launch"
+                                 agent-river-launch-launcher))))
+             'face 'agent-river-stale))
     (if (null agent-river-launch--queue)
         (insert (propertize "  queue empty\n" 'face 'agent-river-stale))
       (dolist (candidate agent-river-launch--queue)
+       ;; The whole block is marked, not just its first line: RET has to work
+       ;; from wherever the eye stopped, and a candidate is three lines deep.
+       (agent-river-launch--with-candidate candidate
         (insert (propertize (agent-river-launch--when
                              (plist-get candidate :at))
                             'face 'agent-river-time)
@@ -976,12 +1344,15 @@ the theme already means by these -- no colour is chosen here.")
         ;; in it leaves the one question a reader has -- why has this not
         ;; happened -- to be answered from the decision log by hand.
         (let ((rule (agent-river-launch--rule-for candidate))
-              (held (plist-get candidate :held)))
+              (said (plist-get candidate :said)))
           (insert (propertize (format "         %s%s\n"
                                       (if rule
                                           (format "rule %s" (plist-get rule :name))
                                         "no rule")
-                                      (if held (format " -- held: %s" held) ""))
+                                      (if said
+                                          (format " -- %s: %s"
+                                                  (car said) (cdr said))
+                                        ""))
                               'face 'agent-river-think)))
         ;; The claim last and marked as a quotation, for the reason the
         ;; Markdown export puts `intent' last and marks it twice: it is the
@@ -992,7 +1363,7 @@ the theme already means by these -- no colour is chosen here.")
             (insert (propertize (format "         \"%s\"\n"
                                         (agent-river--clip
                                          (agent-river--squish claim) 60))
-                                'face 'agent-river-intent))))))
+                                'face 'agent-river-intent)))))))
     (insert (propertize "\ndecisions\n" 'face 'agent-river-prompt))
     (if (null agent-river-launch--decisions)
         (insert (propertize "  none yet\n" 'face 'agent-river-stale))
@@ -1038,6 +1409,7 @@ rebuild-per-tool-call problem here to debounce away."
   (buffer-disable-undo))
 
 (define-key agent-river-queue-mode-map (kbd "g") #'agent-river-queue-refresh)
+(define-key agent-river-queue-mode-map (kbd "RET") #'agent-river-queue-launch)
 
 ;;;###autoload
 (defun agent-river-queue ()

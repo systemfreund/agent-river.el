@@ -686,18 +686,22 @@ file to read before altering behaviour rather than building on it.
 
 ## A third direction: starting a session from an event
 
-**Mostly designed, partly built.** The code is `agent-river-launch.el`, a
-fifth file, optional and opt-in; this section is the whole shape, and what it
-has to answer to. The first of the four rungs below exists — the spool, the
-rules, the ledger and the queue, with **no launcher**, so the pipeline runs
-end to end with a no-op where the process would go. The launcher is next. The
-rest of this section is written in the present tense because it is the
-design, not because it is all there.
+**Built, and deliberately unarmed.** The code is `agent-river-launch.el`, a
+fifth file, optional and opt-in; this section is both the design and what it
+has to answer to. All five roles exist, including the launcher — what does
+not exist is a reason for it to fire, because three switches stand in front
+of it and all three are off by default.
 
 ```elisp
 (agent-river-launch-mode 1)   ; watch the spool
 M-x agent-river-queue         ; read what was delivered and decided
 ```
+
+Out of the box that is rung 1: candidates arrive, are matched, are gated, and
+are decided `ready` — the whole pipeline with a no-op where the process would
+go. Set `agent-river-launch-launcher` and give one rule a `:prompt` and that
+rule can be launched with `RET`; set `agent-river-launch-auto` and it goes by
+itself.
 
 The want is ordinary: a GitHub issue is opened and an agent goes to work on
 it. GitHub is only the example. The same mechanism should serve a file
@@ -879,6 +883,26 @@ idea with a counter instead of a flag, plus a rate budget and a kill switch
 that stops everything without anyone first having to work out which rule was
 at fault.
 
+### Three switches, three different questions
+
+Between a candidate and a process stand `agent-river-launch-launcher` (can
+*anything* launch), a rule's `:prompt` (may *this rule*, since there is
+nothing to say to an agent without one) and `agent-river-launch-auto` (does it
+happen *without being asked*). They are the rungs: a launcher configured is
+2, arming one rule is 3, `auto` is 4 — and each is something you can see
+yourself turn on. A rule with no `:prompt` stays a dry run however the other
+two are set, which is what lets one rule be armed while the rest keep
+producing evidence.
+
+`RET` in the queue overrides a candidate's **gate** and nothing else. A gate
+is this layer's guess about whether the moment is right, and a person
+pressing `RET` is not a guess; but it cannot invent a prompt a rule does not
+have, and it cannot launch with no launcher.
+
+The budget is spent by launching and never by waiting. An armed candidate is
+asked again every minute, and charging it each time would spend a
+four-an-hour budget fifteen times over in an hour of sitting still.
+
 ### Identity is assigned where we control the call, and resolved where we do not
 
 A launcher is a plist — `:name :launch :resolve :available-p` — in the shape
@@ -995,11 +1019,25 @@ transitions the log exists to show.
 
 ### Left open on purpose
 
-Two questions are deliberately unanswered, because the answers are likely to
-be obvious later and guessed wrong now:
+One of the two questions left open here has answered itself, and it is worth
+saying how, because the answer was smaller than the question.
 
-- How a rule builds a prompt out of the state without becoming a fourth
-  renderer beside the panel, the report and the Markdown export.
+**How a rule builds a prompt out of the state** without becoming a fourth
+renderer: it does not render anything. `agent-river-launch-context` hands back
+the **Markdown export**, which exists precisely for where the state leaves the
+package — an issue, a pull request, a message — and a prompt to another agent
+is exactly that. It already escapes the agent's words and already marks a
+claim as a claim. The claim is appended last and quoted, for the same reason
+`intent` is last and marked twice over there.
+
+Still open, and still not guessed at:
+
 - What becomes of a candidate that never resolves — the launcher started
-  something and no session ever appeared.
+  something and no session ever appeared. Today the record is simply asked
+  again on every drain and a dead handle is dropped, which is enough while
+  the only consumer is the generation counter.
+- The **provenance filter** — not acting on what we ourselves caused — which
+  is the sharp instrument next to `agent-river-launch-max-generation`. It
+  needs a fortnight of decisions to say what noise it would actually be
+  filtering.
 

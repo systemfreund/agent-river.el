@@ -810,9 +810,9 @@ state it decides on. The README section *"A third direction: starting a
 session from an event"* is the design document for all of it, including the
 parts not written yet; read it before adding to this file.
 
-Built so far: source, rule, ledger, queue. **No launcher** — the pipeline
-runs end to end with a no-op where the process would go, so it is a dry run
-rather than a half-built one. What is load-bearing already:
+Built so far: all five roles. Rungs 1 and 2 of four — the pipeline runs end
+to end, and `agent-river-launch-launcher` decides whether the last step is a
+process or a no-op. What is load-bearing already:
 
 - **The spool is the only door**, and the state *is* the filesystem —
   `<spool>/` inbox, `queued/`, `done/`, `failed/`. No second account of what
@@ -877,6 +877,38 @@ rather than a half-built one. What is load-bearing already:
   sixty times, and sixty identical lines bury the transitions the log exists
   to show. Once a rule can refuse, the reason has to become *durable* too —
   right now only the fact is, as which directory the file ended in.
+- **Three switches, three different questions**
+  (`agent-river-launch-launcher`, a rule's `:prompt`,
+  `agent-river-launch-auto`). *Can* anything launch; may *this rule*, since
+  there is nothing to say to an agent without a prompt; does it happen
+  *without being asked*. That is the ladder — a launcher configured is rung
+  2, arming one rule is rung 3, `auto` is rung 4 — and each is a thing the
+  user can see themselves turn on. A rule with no `:prompt` stays a dry run
+  however the other two are set.
+- **`:launch` and `:resolve` are split by a real asymmetry.** agent-shell's
+  ACP session id appears after the process is up, so a launch hands back a
+  handle (the buffer) and the key is resolved afterwards; a headless CLI can
+  be *told* its session id, so the key is known before the process starts and
+  `:resolve` is nil. Where we control the invocation we assign identity;
+  where we do not, we resolve it after. `agent-river-launch--resolve-pending`
+  runs at the head of every drain.
+- **The chain cap is not a gate** (`agent-river-launch-max-generation`,
+  default 2). It is checked on every candidate whatever the rules say,
+  because a guard you have to remember to add per rule is not a guard. It is
+  *final* like a match, not deferred like a gate: no amount of waiting makes
+  a fourth-generation launch a third. The provenance filter is the sharp
+  instrument and belongs in a rule; this is the blunt one that holds when the
+  sharp one is missing.
+- **A launcher that throws is a decision** (`failed`, filed). Left in the
+  queue it would be retried every minute, turning one broken launcher into a
+  process attempt a minute for as long as Emacs runs.
+- **RET overrides the gate and nothing else** (`agent-river-launch-now`). A
+  gate is this layer's guess about whether the moment is right and a person
+  pressing RET is not a guess — but it cannot invent a prompt a rule does not
+  have, and it cannot launch with no launcher.
+- **The budget is spent by launching, never by waiting.** An armed candidate
+  sitting in the queue is asked every minute; charging it each time would
+  spend a four-an-hour budget fifteen times over in one hour of waiting.
 - **The drain has to run with nothing delivered.** The gates read the world,
   and an agent going idle is what releases a held candidate; no file arrives
   to say so. `agent-river-launch-poll-interval` is therefore the drain's

@@ -6389,6 +6389,11 @@ intake therefore gate it shut and tests about gating supply their own."
            (list (cons "river" #'agent-river-launch--read-river)
                  (cons "handoff" #'agent-river-launch--read-handoff)))
           (agent-river-registry (make-hash-table :test 'equal))
+          (agent-river-launch-launcher nil)
+          (agent-river-launch-auto nil)
+          (agent-river-launch--launched nil)
+          (agent-river-launch--generations (make-hash-table :test 'equal))
+          (agent-river-launch-test--started nil)
           (agent-river-auto-display nil))
      (unwind-protect
          (progn (agent-river-launch--ensure-dirs) ,@body)
@@ -6903,6 +6908,195 @@ file the moment it appears, and a half-written one reads as malformed."
       ;; A gate nobody implements is a typo in a config, and reading it as
       ;; "nothing to check" would silently arm a rule its author gated.
       (should (= 1 (length agent-river-launch--queue))))))
+
+
+;;; Launchers -- the one end that starts a process
+
+(defvar agent-river-launch-test--started nil
+  "Calls the fake launcher saw, as (KEY . PROMPT), newest first.")
+
+(defun agent-river-launch-test--launcher (&optional handle)
+  "Return a launcher that records rather than starts, handing back HANDLE.
+
+A fake here is not a shortcut: it is the test of whether the protocol is
+one.  If the drain needed to know that agent-shell was behind it, the
+headless launcher rung 4 wants could not be dropped in beside it."
+  (list :name "fake"
+        :available-p (lambda () t)
+        :launch (lambda (candidate prompt)
+                  (push (cons (plist-get candidate :key) prompt)
+                        agent-river-launch-test--started)
+                  (or handle 'handle))
+        :resolve (lambda (h) (and (stringp h) h))))
+
+(defmacro agent-river-launch-test--with-launcher (spec &rest body)
+  "Run BODY with the fake launcher configured.  SPEC is (HANDLE AUTO)."
+  (declare (indent 1))
+  `(let ((agent-river-launch-launchers
+          (list (agent-river-launch-test--launcher ,(car spec))))
+         (agent-river-launch-launcher "fake")
+         (agent-river-launch-auto ,(cadr spec)))
+     ,@body))
+
+(defun agent-river-launch-test--rule (&rest extra)
+  "Return a rule matching everything, plus EXTRA."
+  (append (list :name "r" :match t) extra))
+
+(ert-deftest agent-river-launch-test-a-rule-without-a-prompt-stays-a-dry-run ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher (nil t)
+      (let ((agent-river-launch-rules (list (agent-river-launch-test--rule))))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-scan)
+        ;; A launcher configured and even `auto' on is not enough: there is
+        ;; nothing to say to an agent, so this rule can only ever be a dry
+        ;; run.  That is what makes `:prompt' the per-rule arming switch.
+        (should (null agent-river-launch-test--started))
+        (should (eq 'ready (car (agent-river-launch-test--decisions))))
+        (should (string-match-p "no :prompt"
+                                (plist-get (car agent-river-launch--decisions)
+                                           :reason)))))))
+
+(ert-deftest agent-river-launch-test-armed-waits-in-the-queue-for-ret ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher (nil nil)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule :prompt "go"))))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-scan)
+        (should (null agent-river-launch-test--started))
+        (should (= 1 (length agent-river-launch--queue)))
+        (should (eq 'armed (car (agent-river-launch-test--decisions))))
+        ;; Asked again every minute, and said once.
+        (agent-river-launch-drain)
+        (agent-river-launch-drain)
+        (should (equal '(armed queued) (agent-river-launch-test--decisions)))
+        ;; And the budget is not spent by waiting, or an hour in the queue
+        ;; would spend a four-an-hour budget fifteen times over.
+        (should (null agent-river-launch--accepted))))))
+
+(ert-deftest agent-river-launch-test-auto-launches-what-the-gate-let-through ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher (nil t)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule :prompt "review it"))))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-scan)
+        (should (equal '(("river/1" . "review it"))
+                       agent-river-launch-test--started))
+        (should (null agent-river-launch--queue))
+        (should (eq 'launched (car (agent-river-launch-test--decisions))))
+        (should (= 1 (length (agent-river-launch-test--files "done"))))))))
+
+(ert-deftest agent-river-launch-test-a-prompt-may-be-computed ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher (nil t)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule
+                    :prompt (lambda (c) (format "about %s"
+                                                (plist-get c :key)))))))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-scan)
+        (should (equal "about river/1"
+                       (cdar agent-river-launch-test--started)))))))
+
+(ert-deftest agent-river-launch-test-ret-overrides-the-gate ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher (nil nil)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule
+                    :prompt "go"
+                    :gate (lambda (_c) "not now")))))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-scan)
+        (should (eq 'held (car (agent-river-launch-test--decisions))))
+        ;; A gate is this layer's guess about the moment; a person pressing
+        ;; RET is not a guess.
+        (agent-river-launch-now (car agent-river-launch--queue))
+        (should (equal '(("river/1" . "go")) agent-river-launch-test--started))
+        (should (null agent-river-launch--queue))))))
+
+(ert-deftest agent-river-launch-test-ret-refuses-what-it-cannot-do ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules
+           (list (agent-river-launch-test--rule :prompt "go"))))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      ;; No launcher at all: there is nothing RET could mean.
+      (agent-river-launch-scan)
+      (should-error (agent-river-launch-now '(:key "river/1" :source "river"))
+                    :type 'user-error))
+    (agent-river-launch-test--with-launcher (nil nil)
+      (let ((agent-river-launch-rules (list (agent-river-launch-test--rule))))
+        ;; A launcher, but the rule has no prompt.  RET must not invent one.
+        (should-error (agent-river-launch-now '(:key "river/2" :source "river"))
+                      :type 'user-error)))))
+
+(ert-deftest agent-river-launch-test-a-launcher-that-throws-is-a-decision ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-launchers
+           (list (list :name "broken" :available-p (lambda () t)
+                       :launch (lambda (_c _p) (error "no process for you")))))
+          (agent-river-launch-launcher "broken")
+          (agent-river-launch-auto t)
+          (agent-river-launch-rules
+           (list (agent-river-launch-test--rule :prompt "go"))))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      ;; Finished rather than left in the queue: a candidate that stays gets
+      ;; tried again every minute, which turns one broken launcher into a
+      ;; process attempt a minute for as long as Emacs runs.
+      (should (eq 'failed (car (agent-river-launch-test--decisions))))
+      (should (null agent-river-launch--queue))
+      (should (= 1 (length (agent-river-launch-test--files "done")))))))
+
+(ert-deftest agent-river-launch-test-a-launched-session-is-one-generation-on ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher ("s-child" t)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule :prompt "go"))))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-scan)
+        ;; Resolution is late: the launcher hands back a handle and the
+        ;; session key arrives afterwards.
+        (agent-river-launch-drain)
+        (should (= 1 (gethash "s-child" agent-river-launch--generations)))
+        ;; What that session hands off is a generation deeper.
+        (should (= 2 (agent-river-launch--generation
+                      '(:session "s-child"))))
+        ;; And a session nobody here started is where counting begins.
+        (should (= 1 (agent-river-launch--generation '(:session "s-other"))))))))
+
+(ert-deftest agent-river-launch-test-the-chain-has-a-cap ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher (nil t)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule :prompt "go")))
+            (agent-river-launch-max-generation 1))
+        (puthash "s-deep" 1 agent-river-launch--generations)
+        (agent-river-launch-test--deliver '((source . "handoff")
+                                            (session . "s-deep")))
+        (agent-river-launch-scan)
+        ;; Checked whatever the rules say: a guard you have to remember to
+        ;; add to each rule is not a guard.  And final, since no amount of
+        ;; waiting makes a second-generation launch a first.
+        (should (null agent-river-launch-test--started))
+        (should (eq 'refused (car (agent-river-launch-test--decisions))))
+        (should (null agent-river-launch--queue))))))
+
+(ert-deftest agent-river-launch-test-context-marks-the-claim-as-a-claim ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--busy "s1" "alpha")
+    (let* ((candidate (agent-river-launch--read-handoff
+                       "handoff" (list (cons 'session "s1")
+                                       (cons 'text "I think this is done"))))
+           (context (agent-river-launch-context candidate)))
+      ;; The measured state comes through the Markdown export rather than a
+      ;; fourth rendering of its own.
+      (should (string-match-p "agent-river" context))
+      ;; And the claim is last, quoted, and attributed -- the next agent is a
+      ;; reader who has no way back to the distinction otherwise.
+      (should (string-match-p "said, of its own work" context))
+      (should (string-match-p "I think this is done" context)))))
 
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here
