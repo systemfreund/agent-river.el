@@ -3085,7 +3085,7 @@ with two `Explore' lines and no way to tell whose."
     (or (agent-river-state-label state) "?")))
 
 (defun agent-river--heat-entries (&optional scope)
-  "Return one plist per artifact of per folded session.
+  "Return one plist per artifact of every folded session.
 
 Each carries `:party' (`agent-river--party-label'), `:cwd' (the anchor its
 `:file' is relative to), `:file', the age-weighted `:weight' and `:last'.
@@ -3094,10 +3094,19 @@ nil for everything under it -- see `agent-river--anchor'.
 SCOPE is `session' for the whole session, `task' or nil for the current
 task.
 
-The one derivation every view of the artifact tables is built from, rather
-than each walking the registry for itself: the basename table below, the
-directory aggregate beside it and the project map all have to answer with
-the same weighting, and a second walk is a second place for them to drift."
+The one derivation every *weighted* view of the artifact tables is built
+from, rather than each walking the registry for itself: the basename table
+below, the directory aggregate beside it and the project map all have to
+answer with the same weighting, and a second walk is a second place for
+them to drift.
+
+Not every reading of those tables is a weighted one, and the panel's is
+not: `agent-river--hottest' and `agent-river--artifact-list' take the raw
+cumulative `:touches' straight off the tables.  That is deliberate and not
+a view that got missed -- they answer \"how often\", and say so in the
+words they render (\"6 touches\"), where this answers \"how hot\".  A tally
+that aged would leave the panel's number disagreeing with itself between
+two redraws with nothing having happened in between."
   (let (entries)
     (maphash
      (lambda (_id state)
