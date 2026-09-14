@@ -3250,6 +3250,133 @@ is how a test asks what the view looks like once the work has moved on."
     (should (eq (lookup-key agent-river-map-mode-map (kbd key))
                 (lookup-key agent-river-map-plain-mode-map (kbd key))))))
 
+;;; The disk, beside the stream
+;;
+;; The diffstat is the one thing on a map line that is not folded from an
+;; event, so nothing above tests it.  What is tested is the derivation --
+;; git's output in, a reading out -- and never the commands: a test that
+;; ran git would be testing git, slowly, and on whatever happened to be
+;; uncommitted in the checkout it ran from.
+
+(defun agent-river-test--numstat (output &optional root)
+  "Return OUTPUT parsed as a diffstat table under ROOT."
+  (agent-river--vc-parse output (or root "/repo") (make-hash-table :test 'equal)))
+
+(ert-deftest agent-river-test-numstat-reads-git-s-three-record-shapes ()
+  (let ((table (agent-river-test--numstat
+                (concat "2\t0\tREADME.md\0"
+                        ;; A rename spends three records: the counts with an
+                        ;; empty name, then the old name and the new one.
+                        "0\t0\t\0hook.sh\0bridge.sh\0"
+                        ;; And a binary file has no line counts to give.
+                        "-\t-\tlogo.png\0"))))
+    (should (equal (gethash "/repo/README.md" table) '(2 . 0)))
+    ;; The new name is the one the listing can have a line for; the old one
+    ;; is not there to annotate.
+    (should (equal (gethash "/repo/bridge.sh" table) '(0 . 0)))
+    (should-not (gethash "/repo/hook.sh" table))
+    ;; Recorded at zero rather than dropped: it still differs from HEAD,
+    ;; and a file that changed must not read like a file that did not.
+    (should (equal (gethash "/repo/logo.png" table) '(0 . 0)))))
+
+(ert-deftest agent-river-test-a-diffstat-covers-the-tree-beneath-a-name ()
+  (let ((table (agent-river-test--numstat
+                (concat "10\t6\tsrc/a.el\0" "1\t1\tsrc/deep/b.el\0"
+                        "3\t0\tdoc.md\0" "5\t5\tsrcaux/c.el\0"))))
+    ;; The same grain as the parties: a directory line reports the whole
+    ;; subtree, because that is what the listing gives it a line for.
+    (should (equal (agent-river--vc-under table "/repo/src") '(11 7 nil)))
+    (should (equal (agent-river--vc-under table "/repo/src/a.el") '(10 6 nil)))
+    (should (equal (agent-river--vc-under table "/repo") '(19 12 nil)))
+    ;; Matched as a directory, so a sibling whose name merely starts the
+    ;; same way does not get counted into it.
+    (should-not (member 5 (agent-river--vc-under table "/repo/src")))
+    ;; Nothing beneath it is a different answer from nobody having asked,
+    ;; and the caller tells them apart by which of the two is nil.
+    (should-not (agent-river--vc-under table "/repo/elsewhere"))
+    (should-not (agent-river--vc-under nil "/repo/src"))))
+
+(ert-deftest agent-river-test-an-untracked-file-is-marked-rather-than-counted ()
+  ;; A file the agent has just written has no HEAD version to have differed
+  ;; from -- and it is exactly the line a map of the work most wants
+  ;; annotated, so it says so with git's own word rather than nothing.
+  (let ((table (make-hash-table :test 'equal)))
+    (puthash "/repo/src/new.el" 'new table)
+    (puthash "/repo/src/a.el" '(4 . 0) table)
+    (should (equal (agent-river--vc-under table "/repo/src") '(4 0 t)))
+    (should (equal (agent-river--vc-column (agent-river--vc-under table "/repo/src"))
+                   "+4 ?"))
+    (should (equal (agent-river--vc-column
+                    (agent-river--vc-under table "/repo/src/new.el"))
+                   "?"))))
+
+(ert-deftest agent-river-test-a-diffstat-shows-only-what-is-not-zero ()
+  (should (equal (agent-river--vc-column '(10 6 nil)) "+10 -6"))
+  ;; `+12 -0' makes a reader look at a number to find out it means nothing.
+  (should (equal (agent-river--vc-column '(12 0 nil)) "+12"))
+  (should (equal (agent-river--vc-column '(0 3 nil)) "-3"))
+  ;; Nothing to say at all is nil, which the caller turns into an empty
+  ;; column rather than into a line that claims a change of size zero.
+  (should-not (agent-river--vc-column '(0 0 nil)))
+  (should-not (agent-river--vc-column nil)))
+
+(ert-deftest agent-river-test-the-diffstat-rides-on-the-map-s-own-face-property ()
+  ;; Same reason as the shading: tree-sitter owns `face' in that buffer and
+  ;; refontifies over anything written there.
+  (let ((column (agent-river--vc-column '(10 6 nil))))
+    (should-not (text-property-not-all 0 (length column) 'face nil column))
+    (should (text-property-any 0 (length column) 'agent-river-map-face
+                               'agent-river-added column))
+    (should (text-property-any 0 (length column) 'agent-river-map-face
+                               'agent-river-removed column))))
+
+(ert-deftest agent-river-test-a-quiet-line-still-holds-the-diffstat-column-open ()
+  (let* ((agent-river-map-name-width 24)
+         (agent-river-map-vc-width 11)
+         (parties '((:party "alpha" :weight 9)))
+         (changed (agent-river--map-line 'file "a.el" parties nil "+10 -6"))
+         (quiet (agent-river--map-line 2 "common/" parties nil ""))
+         (none (agent-river--map-line 'file "a.el" parties)))
+    ;; The brackets are ragged by nature, so the column before them is what
+    ;; can be read down the listing -- and only if every line reserves it.
+    (should (= (string-match-p "\\[" changed) (string-match-p "\\[" quiet)))
+    ;; With no repository under the map at all, no line reserves anything:
+    ;; an empty column on every line is a column that says nothing.
+    (should (< (string-match-p "\\[" none) (string-match-p "\\[" changed)))))
+
+(ert-deftest agent-river-test-the-diffstat-column-is-reserved-buffer-wide ()
+  (let ((table (agent-river-test--numstat "2\t0\ta.el\0")))
+    ;; `agent-river--map-draw' decides once for the whole buffer, so the
+    ;; reading is empty rather than absent where there is nothing to report.
+    (should (equal (agent-river--vc-reading table "/repo/a.el" t) "+2"))
+    (should (equal (agent-river--vc-reading table "/repo/b.el" t) ""))
+    (should-not (agent-river--vc-reading table "/repo/a.el" nil))))
+
+(ert-deftest agent-river-test-turning-the-diffstat-off-asks-git-nothing ()
+  (let ((agent-river--vc-cache (make-hash-table :test 'equal))
+        (agent-river-map-vc nil))
+    (should-not (agent-river--vc-stats "/repo"))
+    ;; Not merely undrawn: a view switched off must not be spending
+    ;; subprocesses on a column nobody is going to see.
+    (should (zerop (hash-table-count agent-river--vc-cache)))))
+
+(ert-deftest agent-river-test-a-failed-read-is-an-answer-like-any-other ()
+  (let ((agent-river--vc-cache (make-hash-table :test 'equal)))
+    ;; A directory that is not a repository is an ordinary thing for the map
+    ;; to be pointed at.  Stored, so the failure is throttled by the TTL
+    ;; rather than retried on every redraw for as long as Emacs runs.
+    (agent-river--vc-store "/tmp" nil)
+    (should-not (agent-river--vc-stats "/tmp"))
+    (should (gethash "/tmp" agent-river--vc-cache))
+    (should-not (plist-get (gethash "/tmp" agent-river--vc-cache) :proc))))
+
+(ert-deftest agent-river-test-the-map-header-says-the-diffstat-has-no-frame ()
+  ;; Every other number on a line is read from a frame and the header says
+  ;; which; the diffstat is read from HEAD and has none, so a long session
+  ;; would otherwise have `+10 -6' taken for this task's work.
+  (should (string-match-p "vs HEAD" (agent-river--map-header "/repo" nil nil t)))
+  (should-not (string-match-p "HEAD" (agent-river--map-header "/repo" nil nil nil))))
+
 ;;; Moving about the map
 ;;
 ;; The text here is ours rather than a host package's, so the motion over it

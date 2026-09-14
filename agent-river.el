@@ -3507,6 +3507,55 @@ most worth being able to scan a whole listing for."
   "Marker for the entry holding an agent's most recent touch."
   :type 'string)
 
+(defcustom agent-river-map-vc t
+  "Whether map lines carry a diffstat of the tree beneath them.
+
+Answers what no reading of the event stream can: an agent that read a
+file forty times and an agent that rewrote it once weigh the same, and
+\"what is different from HEAD\" is the question a map of the work is most
+often opened next to.  Nil leaves the column out entirely and runs no
+commands at all."
+  :type 'boolean)
+
+(defcustom agent-river-vc-program "git"
+  "The git executable the diffstat column is read with.
+Missing or unreadable, the column is simply absent -- like every other
+part of this package, a view that cannot be drawn must not take anything
+else down with it."
+  :type 'string)
+
+(defcustom agent-river-map-vc-ttl 10
+  "Seconds a root's diffstat is reused before it is read again.
+
+The map redraws every `agent-river-map-refresh-interval' seconds while an
+agent works, and a diffstat costs two subprocesses per root.  Reading it
+on every redraw would spend most of that budget re-answering a question
+the disk rarely changes the answer to between one redraw and the next.
+The read is asynchronous either way, so this sets how stale the column
+may be, never how long a redraw waits: nothing waits.  \\[agent-river-map-refresh]
+drops the cache, so the reading someone asked for by hand is fresh."
+  :type 'number)
+
+(defcustom agent-river-map-vc-width 11
+  "Column width reserved for the diffstat, when it is shown at all.
+
+Reserved on every line once any root has a repository under it, so the
+brackets stay in one place: a width chosen per line would put the party
+names somewhere different on every row and give up the one thing a column
+is for.  A stat wider than this pushes that line's brackets right rather
+than being truncated, the same bargain `agent-river-map-name-width' makes."
+  :type 'integer)
+
+(defcustom agent-river-map-new-marker "?"
+  "Marker for a name git has never seen, beside its neighbours' line counts.
+
+Git's own word for untracked, and it says the one thing the counts
+cannot: there is no HEAD version to have differed from.  A file the agent
+has just written is untracked, which makes this exactly the line a map of
+the work most wants annotated -- reading only the diff would leave the
+newest work as the one thing the column said nothing about."
+  :type 'string)
+
 (defun agent-river--map-weight (parties)
   "Return the total weight across PARTIES."
   (apply #'+ (mapcar (lambda (party) (plist-get party :weight)) parties)))
@@ -3833,6 +3882,235 @@ one -- without it `foo_bar_baz.el' renders with `bar' in italics and half
 the underscores eaten, which is a filename the view would be lying about."
   (concat "`" name "`"))
 
+;;; What the disk says, beside what the agents did
+;;
+;; The map's four facts are all readings of the event stream: how heavily a
+;; name was reached, by whom, by how many at once, and whether it is still
+;; on disk.  None of them can say whether anything actually changed, so a
+;; fifth fact is read straight off the working tree -- and it earns its
+;; place exactly because no fold of the stream could produce it.
+;;
+;; It is neither folded nor observed.  A diffstat is a current-state fact
+;; in the sense of the producer rules: true of the disk right now,
+;; recomputable at any moment, and wrong again by the next write.  So it is
+;; queried where it is read, the way `buffer-modified-p' is, and nothing
+;; downstream of the fold knows it exists.  Putting it in the state would
+;; be a second account of something the disk already holds, kept in step by
+;; hope.
+;;
+;; What it is not is an attribution.  Git cannot say who changed a file, so
+;; a line's stat is a statement about the tree beneath that name and
+;; nothing more -- deliberately not intersected with what the agents
+;; reached, which would read as "the agent changed this much" and become a
+;; lie the moment a human edited a file the agent only read.  The brackets
+;; say who has been here and the column says what is different; two facts
+;; side by side, neither dressed as the other.
+
+(defface agent-river-added '((t :inherit success :weight normal))
+  "Face for the added half of a diffstat.
+
+Inherited rather than coloured here, so the shade is the one the user's
+theme already means \"good\" by -- the same reason nearly every face in
+this package inherits.  Only the weight is overridden: `success' is bold
+in most themes, and a column that is bold down its whole length stops
+being scannable for the lines that matter.")
+
+(defface agent-river-removed '((t :inherit error :weight normal))
+  "Face for the removed half of a diffstat.
+
+Red is `agent-river-fail's channel in the HUD, and free here: nothing in
+the map means failure, and removed-is-red is the one convention a reader
+arrives with.")
+
+(defvar agent-river--vc-cache (make-hash-table :test 'equal)
+  "Absolute root to what the last git read found there.
+
+Each value is a plist: `:at' when the read finished, `:table' its result,
+`:proc' the read still running.  A `:table' of nil is a real answer --
+not a repository, or no git -- and is stored like any other so a failure
+is throttled by the TTL rather than retried on every redraw.")
+
+(defun agent-river--vc-claim (root process)
+  "Record PROCESS as the read currently in flight for ROOT."
+  (let ((cell (gethash root agent-river--vc-cache)))
+    (puthash root (list :at (or (plist-get cell :at) 0)
+                        :table (plist-get cell :table)
+                        :proc process)
+             agent-river--vc-cache)))
+
+(defun agent-river--vc-store (root table)
+  "Record TABLE as ROOT's diffstat and ask the map to draw it.
+
+The map is marked dirty rather than redrawn, and its timer started if it
+had retired: the answer arrives while nothing else is happening, and a
+column that landed in the cache but never on screen would be the same as
+not having read it."
+  (puthash root (list :at (current-time) :table table :proc nil)
+           agent-river--vc-cache)
+  (when (get-buffer agent-river-map-buffer-name)
+    (setq agent-river--map-dirty t)
+    (agent-river--ensure-map-timer)))
+
+(defun agent-river--vc-run (root args callback)
+  "Run git with ARGS in ROOT and pass its output to CALLBACK.
+
+Asynchronous, and that is the whole point.  The map redraws every few
+seconds while an agent works, and a diff on a large repository takes long
+enough that reading it inline would stop Emacs on a timer.  Nothing ever
+waits: a draw shows whatever the last read left behind, so the column is
+at worst one redraw behind the disk -- the same bargain the weights above
+it already make.
+
+A non-zero exit is not an error to report but an answer to record: a
+directory that is not a repository is an ordinary thing for the map to be
+pointed at, and it must cost a line its column and nothing else."
+  (let* ((buffer (generate-new-buffer " *agent-river-vc*" t))
+         (process
+          (make-process
+           :name "agent-river-vc"
+           :buffer buffer
+           :noquery t
+           :connection-type 'pipe
+           :coding 'utf-8-unix
+           :command (append (list agent-river-vc-program "-C" root) args)
+           :sentinel
+           (lambda (process _event)
+             (unless (process-live-p process)
+               (let ((output (with-current-buffer buffer (buffer-string)))
+                     (ok (eq (process-exit-status process) 0)))
+                 (kill-buffer buffer)
+                 ;; Released before the callback runs, because a callback
+                 ;; that starts the next command claims the slot again.
+                 (agent-river--vc-claim root nil)
+                 (condition-case nil
+                     (if ok
+                         (funcall callback output)
+                       (agent-river--vc-store root nil))
+                   (error (agent-river--vc-store root nil)))))))))
+    (agent-river--vc-claim root process)))
+
+(defun agent-river--vc-parse (output root table)
+  "Fold git's NUL-separated numstat OUTPUT into TABLE, keyed under ROOT.
+
+One record per changed file, `ADDED\\tREMOVED\\tNAME', except for a rename:
+there the name is empty and the two records after it are the old name and
+the new one.  The new one is what the listing can have a line for.
+
+Binary files come back with `-' for both counts, which `string-to-number'
+reads as zero -- recorded all the same, so the file still counts as
+differing from HEAD even though there are no lines to say by how much."
+  (let ((fields (split-string output "\0")))
+    (while fields
+      (let ((record (pop fields)))
+        (when (string-match "\\`\\([0-9]+\\|-\\)\t\\([0-9]+\\|-\\)\t" record)
+          (let ((added (string-to-number (match-string 1 record)))
+                (removed (string-to-number (match-string 2 record)))
+                (name (substring record (match-end 0))))
+            (when (string-empty-p name)
+              (pop fields)
+              (setq name (or (pop fields) "")))
+            (unless (string-empty-p name)
+              (puthash (expand-file-name name root) (cons added removed)
+                       table))))))
+    table))
+
+(defun agent-river--vc-refresh (root)
+  "Start reading ROOT's diffstat in the background.
+
+Two commands, chained rather than raced, so the second cannot land in a
+table the first has not filled yet.  `diff' reports the tracked files that
+differ from HEAD; `ls-files --others' the ones git has never seen, which
+is what a file an agent has just written is.
+
+Both are read with ROOT as the working directory and scoped to it --
+`--relative' for the diff, which is also what makes its paths relative to
+ROOT rather than to the top of the checkout.  A session started in a
+subdirectory of a repository is therefore annotated with its own subtree,
+not with every change in a tree it has nothing to do with."
+  (let ((table (make-hash-table :test 'equal)))
+    (condition-case nil
+        (agent-river--vc-run
+         root '("diff" "--numstat" "--relative" "-z" "HEAD" "--")
+         (lambda (output)
+           (agent-river--vc-parse output root table)
+           (agent-river--vc-run
+            root '("ls-files" "--others" "--exclude-standard" "-z")
+            (lambda (others)
+              (dolist (name (split-string others "\0" t))
+                (puthash (expand-file-name name root) 'new table))
+              (agent-river--vc-store root table)))))
+      ;; No git on PATH at all.  Stored like any other answer, so the map
+      ;; loses its column rather than throwing once every redraw.
+      (error (agent-river--vc-store root nil)))))
+
+(defun agent-river--vc-stats (root)
+  "Return ROOT's diffstat table, starting a fresh read when this one is old.
+
+Returns what is cached, including nil, and never waits for the read it
+starts: the caller is a redraw."
+  (when agent-river-map-vc
+    (let ((cell (gethash root agent-river--vc-cache)))
+      (when (and (not (process-live-p (plist-get cell :proc)))
+                 (or (null cell)
+                     (> (float-time (time-since (plist-get cell :at)))
+                        agent-river-map-vc-ttl)))
+        (agent-river--vc-refresh root))
+      (plist-get cell :table))))
+
+(defun agent-river--vc-forget ()
+  "Drop every cached diffstat, so the next draw reads the disk again."
+  (clrhash agent-river--vc-cache))
+
+(defun agent-river--vc-under (table path)
+  "Return (ADDED REMOVED NEW) for PATH and all of TABLE beneath it, or nil.
+
+The same grain as the parties: a directory line reports the whole subtree
+under it, because that is what the listing gives it a line for.  Nil says
+nothing there differs from HEAD, which is a different answer from a nil
+TABLE -- that one says nobody asked git."
+  (when table
+    (let ((prefix (file-name-as-directory path))
+          (added 0) (removed 0) new found)
+      (maphash (lambda (key value)
+                 (when (or (equal key path) (string-prefix-p prefix key))
+                   (setq found t)
+                   (if (eq value 'new)
+                       (setq new t)
+                     (setq added (+ added (car value))
+                           removed (+ removed (cdr value))))))
+               table)
+      (and found (list added removed new)))))
+
+(defun agent-river--vc-column (stat)
+  "Return STAT as the reading a map line's diffstat column shows, or nil.
+
+Only what is non-zero: a file with additions and no deletions says `+12'
+rather than `+12 -0', because the second half of that is a number a
+reader has to look at to find out it means nothing.  Nil when there is
+nothing at all to say, which the caller turns into an empty column."
+  (when stat
+    (let ((parts (delq nil
+                       (list (and (> (nth 0 stat) 0)
+                                  (agent-river--map-mark
+                                   (format "+%d" (nth 0 stat)) 'agent-river-added))
+                             (and (> (nth 1 stat) 0)
+                                  (agent-river--map-mark
+                                   (format "-%d" (nth 1 stat)) 'agent-river-removed))
+                             (and (nth 2 stat)
+                                  (agent-river--map-mark
+                                   agent-river-map-new-marker 'agent-river-added))))))
+      (and parts (mapconcat #'identity parts " ")))))
+
+(defun agent-river--vc-reading (table path column)
+  "Return PATH's diffstat for `agent-river--map-line', given TABLE.
+
+COLUMN says whether the buffer is showing the column at all -- nil when
+no root under the map is a repository, in which case no line reserves the
+width.  With it on, a path with nothing to report still returns the empty
+string rather than nil, so the column is held open and the brackets after
+it stay where they were on the line above."
+  (and column (or (agent-river--vc-column (agent-river--vc-under table path)) "")))
+
 (defun agent-river--map-annotation (parties)
   "Return PARTIES as the bracketed reading a map line ends with, or nil.
 
@@ -3875,12 +4153,19 @@ indentation -- hidden, a directory and the files under it start in the
 same column and the tree stops being one."
   (pcase level (1 "# ") (2 "## ") (3 "### ") (_ "- ")))
 
-(defun agent-river--map-line (level name parties &optional missing)
+(defun agent-river--map-line (level name parties &optional missing stat)
   "Return one map line: NAME at LEVEL, annotated with PARTIES.
 MISSING marks a name only the state knows about, which is struck through
 rather than shaded -- there is no file on disk for the shading to be
 about, and a line that reads as gone cannot be mistaken for a place an
-agent is still working in."
+agent is still working in.
+
+STAT is the diffstat reading (`agent-river--vc-reading'), padded here to
+`agent-river-map-vc-width'.  It sits after the markers and before the
+brackets: the brackets are ragged by nature -- a variable-length list of
+party names -- so anything that wants reading down the listing has to
+come before them.  Nil leaves the column out for every line in the
+buffer, which is what happens when there is no repository under the map."
   (let* ((marker (agent-river--map-marker level))
          (face (if missing
                    'agent-river-gone
@@ -3897,6 +4182,12 @@ agent is still working in."
              (agent-river--map-mark shown face)
              (make-string pad ?\s)
              markers " "
+             (if stat
+                 (concat stat (make-string
+                               (max 1 (- agent-river-map-vc-width
+                                         (string-width stat)))
+                               ?\s))
+               "")
              (or (agent-river--map-annotation parties) "")))))
 
 (defun agent-river--map-shade ()
@@ -3923,13 +4214,19 @@ entry is annotated at all -- and a toggle by hand wins from then on."
                      agent-river--map-folds)))
     (if cell (cdr cell) (and (plist-get entry :files) t))))
 
-(defun agent-river--map-header (root entries &optional roots)
+(defun agent-river--map-header (root entries &optional roots vc)
   "Return the map's own heading for ROOT, given its ENTRIES.
 
 Says which frame the numbers below come from.  The map defaults to the
 session frame and the dired heat to the task frame, so a reading lifted
 from one and compared against the other is a mistake waiting to be made
 unless the line says which is which.
+
+VC says the diffstat column is being shown, and it is named here for the
+same reason -- with the opposite answer.  Every other number on a line is
+read from a frame; the diffstat is read from HEAD and has no frame at
+all, so on a session that has run through several prompts `+10 -6' would
+otherwise be taken for this task's work.
 
 ROOT is nil in the overview, which spans ROOTS trees and has no one path
 to be named after.  Titling it with any of them -- the most recent, say --
@@ -3947,6 +4244,7 @@ project and the others were somewhere inside it."
                                    'agent-river-prompt)
             (format "  ·  %s frame" (if (eq agent-river-map-scope 'session)
                                         "session" "task"))
+            (if vc "  ·  diff vs HEAD" "")
             (if parties
                 (format "  ·  %d agent%s" (length parties)
                         (if (= (length parties) 1) "" "s"))
@@ -4007,20 +4305,30 @@ nothing."
                           ;; into it.
                           (list (agent-river--map-default-root))))
                (sections (mapcar (lambda (root)
-                                   (cons root (agent-river--map-entries
-                                               root agent-river-map-scope)))
+                                   (list root
+                                         (agent-river--map-entries
+                                          root agent-river-map-scope)
+                                         (agent-river--vc-stats root)))
                                  roots))
+               ;; One decision for the whole buffer: a column reserved on
+               ;; some lines and not others would put the brackets in a
+               ;; different place per section, which is the column's whole
+               ;; purpose spent on nothing.
+               (column (and (seq-some (lambda (section) (nth 2 section)) sections) t))
                (split (> (length sections) 1))
                (level (if split 3 2)))
           (erase-buffer)
           (insert (if split
                       (agent-river--map-header
-                       nil (apply #'append (mapcar #'cdr sections)) (length sections))
-                    (agent-river--map-header (caar sections) (cdar sections)))
+                       nil (apply #'append (mapcar #'cadr sections))
+                       (length sections) column)
+                    (agent-river--map-header (car (car sections))
+                                             (nth 1 (car sections)) nil column))
                   "\n")
           (dolist (section sections)
             (let ((root (car section))
-                  (entries (cdr section)))
+                  (entries (nth 1 section))
+                  (stats (nth 2 section)))
               (when split
                 (insert (propertize
                          (concat (agent-river--map-line
@@ -4028,7 +4336,9 @@ nothing."
                                   (agent-river--map-merge-parties
                                    (mapcar (lambda (entry)
                                              (list :parties (plist-get entry :parties)))
-                                           entries)))
+                                           entries))
+                                  nil
+                                  (agent-river--vc-reading stats root column))
                                  "\n")
                          ;; A root is a place like any other line's, so RET
                          ;; zooms into it and the motions stop on it.
@@ -4045,7 +4355,8 @@ nothing."
                            (concat (agent-river--map-line
                                     level (concat name (if dir "/" ""))
                                     (plist-get entry :parties)
-                                    (plist-get entry :missing))
+                                    (plist-get entry :missing)
+                                    (agent-river--vc-reading stats path column))
                                    "\n")
                            'agent-river-map-name name
                            'agent-river-map-path path
@@ -4062,7 +4373,13 @@ nothing."
                         (insert (propertize
                                  (concat (agent-river--map-line
                                           'file (plist-get file :rel)
-                                          (plist-get file :parties))
+                                          (plist-get file :parties)
+                                          nil
+                                          (agent-river--vc-reading
+                                           stats
+                                           (expand-file-name
+                                            (plist-get file :rel) path)
+                                           column))
                                          "\n")
                                  'agent-river-map-name name
                                  'agent-river-map-rel (plist-get file :rel)
@@ -4233,8 +4550,15 @@ first thing anyone does with a new buffer is press one of them."
       (goto-char (point-min)))))
 
 (defun agent-river-map-refresh ()
-  "Redraw the map now."
+  "Redraw the map now, and read the disk again while doing it.
+
+The weights are recomputed on every draw anyway; the diffstat is cached
+for `agent-river-map-vc-ttl' seconds, so dropping it here is what makes
+this the authoritative reading.  Someone who asks for a refresh by hand
+is asking about now.  The read is still asynchronous, so the numbers land
+on the redraw after this one."
   (interactive)
+  (agent-river--vc-forget)
   (agent-river--map-draw))
 
 (defun agent-river-map-toggle ()

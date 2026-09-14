@@ -494,9 +494,40 @@ Four things about the map are load-bearing:
   says which kind of empty it is: a filtered tree full of files nobody has
   been near would otherwise read as a map that had lost them.
 
-Encoding discipline, since there are four facts on a line: weight is shading
+- **The diffstat is the one fact on a line the fold cannot produce**
+  (`agent-river-map-vc`, default on). Weight says how heavily a name was
+  reached, and an agent that read a file forty times and one that rewrote it
+  once weigh the same — so `(+10 -6)` is read straight off the working tree
+  instead. It is neither folded nor observed: a diffstat is a *current-state*
+  fact in the producer sense, true of the disk now and wrong again by the next
+  write, so it is queried where it is read (`agent-river--vc-stats`) the way
+  `buffer-modified-p` is, and nothing downstream of the fold knows it exists.
+  Four things it owes. It is **not an attribution** — git cannot say who
+  changed a file, so a line's stat is about the tree beneath that name and is
+  deliberately *not* intersected with what the agents reached, which would read
+  as "the agent changed this much" and become a lie the moment a human edited a
+  file the agent only read; the brackets say who has been here and the column
+  says what is different. It **never blocks** — two subprocesses per root,
+  asynchronous, cached for `agent-river-map-vc-ttl` against a timer that
+  redraws every few seconds, so a draw shows the last answer and is at worst
+  one redraw behind the disk (`g` drops the cache, because a reading asked for
+  by hand is about now). It **names untracked files** rather than counting
+  them (`agent-river-map-new-marker`), since a file an agent has just written
+  is exactly the line the column would otherwise be silent about, and it is
+  read `--relative` so a session started inside a subdirectory is annotated
+  with its own subtree rather than the whole checkout. And it **says in the
+  header that it has no frame** — every other number on a line comes from the
+  task or session frame, this one comes from HEAD, and after several prompts
+  `+10 -6` would otherwise be taken for this task's work.
+
+Encoding discipline, since there are five facts on a line: weight is shading
 (the same `agent-river-heat-levels` faces), party is text, contention is a
-marker, and existence is a strike-through. That last one is deliberately not
+marker, existence is a strike-through, and the diffstat is a fixed column of
+its own — placed before the brackets, because the brackets are a
+variable-length list of names and anything meant to be read *down* the listing
+has to come before them, and reserved on every line as soon as any root is a
+repository, since a width chosen per line is a column in name only. The
+strike-through is deliberately not
 a colour: `:missing` used to be drawn in the grey `agent-river-stale`, which
 put "this file is gone" on the same channel as the heat, where grey already
 meant stale and cold and elided besides. A fifth colour would leave a reader
@@ -507,6 +538,17 @@ the brackets are for, into the margin. The position marker is repeated
 *inside* the brackets against the party it belongs to — in the left-hand
 column it is scannable but anonymous, and "where is this agent now" is a
 question about a party.
+
+The green and red in the diffstat are not a counter-example to that, and the
+distinction is worth keeping straight: they do not encode a fact of their own,
+they separate the two halves of one — and `+` and `-` have already said which
+is which, so the colour is reinforcement inside a column, not a channel a
+reader has to decode. (They are also `success` and `error` inherited rather
+than chosen, so they are whatever the user's theme already means by good and
+bad. That is the rule for colour here generally: inherit a face the theme
+knows unless the value needs a shade no built-in face has — the three
+`agent-river-heat-*` and `agent-river-pulse` are the only four that do, and
+they are spelled out per light and dark background for exactly that reason.)
 
 The buffer is Markdown, rendered by `markdown-ts-view-mode` — the read-only
 variant, which already has `special-mode` among its parents, and a view of a
