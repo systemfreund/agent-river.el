@@ -816,9 +816,10 @@ The two agent-shell functions the label derivation borrows from are
 stubbed here so the tests do not depend on agent-shell being installed."
   (declare (indent 1))
   `(let ((buffers nil)
-         ;; Both are sticky for the Emacs session in real use; a test is a
-         ;; session of its own, so it starts with neither.
+         ;; All three are sticky for the Emacs session in real use; a test is
+         ;; a session of its own, so it starts with none of them.
          (agent-river--shell-seen nil)
+         (agent-river--shell-sessions (make-hash-table :test 'equal))
          (agent-river--teardown-hooked (make-hash-table :test 'eq)))
      (unwind-protect
          (progn
@@ -913,6 +914,52 @@ stubbed here so the tests do not depend on agent-shell being installed."
         (should (agent-river--active-p child))
         (setf (agent-river-state-last-seen child) (time-subtract (current-time) 600))
         (should-not (agent-river--active-p child))))))
+
+(ert-deftest agent-river-test-gone-is-narrower-than-inactive ()
+  ;; Inactive is an estimate wherever the TTL answers it, and a view that
+  ;; withdraws a name or a marker has to act on facts: a buffer that was
+  ;; killed, or a SubagentStop.  A session that has merely gone quiet is
+  ;; quiet, not gone.
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-session-ttl 300))
+    (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
+      ;; What the first event through `agent-river-observe' does: the one
+      ;; session with a buffer here is recorded as having had one.
+      (agent-river--ensure-shell-teardown "s1")
+      (let ((hosted (agent-river-state "s1" "repo"))
+            (elsewhere (agent-river-state "cli" "repo"))
+            (child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
+        (should-not (agent-river--gone-p hosted))
+        ;; A session run from a terminal never had a buffer to lose, so its
+        ;; silence says nothing -- where `agent-river--active-p', which takes
+        ;; agent-shell for the authority over every root once it has seen
+        ;; one, calls it inactive.
+        (setf (agent-river-state-last-seen elsewhere) (time-subtract (current-time) 9999))
+        (should-not (agent-river--active-p elsewhere))
+        (should-not (agent-river--gone-p elsewhere))
+        ;; A subagent is gone when it says so, and when its root is.
+        (setf (agent-river-state-last-seen child) (time-subtract (current-time) 9999))
+        (should-not (agent-river--gone-p child))
+        (agent-river-fold child '(:kind "done"))
+        (should (agent-river--gone-p child))
+        (kill-buffer (agent-river--shell-buffer "s1"))
+        ;; The kill hook the registration installed schedules a block redraw
+        ;; there is no buffer for here.
+        (cancel-function-timers #'agent-river--redraw-block)
+        (should (agent-river--gone-p hosted))
+        (should (agent-river--gone-p (agent-river-state "s1/a2" "Explore" "s1" "Explore")))))))
+
+(ert-deftest agent-river-test-a-killed-session-marks-the-map-dirty ()
+  ;; Nothing else can say so.  A killed session sends no further events, so
+  ;; with no other agent running the map would have gone on naming it and
+  ;; pointing at it until someone pressed `g'.
+  (let ((agent-river--map-dirty nil))
+    (unwind-protect
+        (with-temp-buffer
+          (agent-river--shell-died (current-buffer))
+          (should agent-river--map-dirty))
+      ;; The block redraw it also schedules has no buffer to draw into here.
+      (cancel-function-timers #'agent-river--redraw-block))))
 
 (ert-deftest agent-river-test-session-line-is-visitable ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -2955,6 +3002,111 @@ is how a test asks what the view looks like once the work has moved on."
           (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
                          '("scratch.el")))
           (should (plist-get (car entries) :missing))
+          (should (plist-get (car (plist-get (car entries) :parties)) :current)))))))
+
+(ert-deftest agent-river-test-a-killed-session-stops-being-pointed-at ()
+  ;; The marker is the map's one present-tense reading.  Over a session whose
+  ;; agent-shell buffer has been killed it is an arrow pointing at nobody --
+  ;; and it was held there for as long as the registry kept the state.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
+      (agent-river-test--with-tree root
+        (agent-river-test--with-session state
+          ;; What the first event through `agent-river-observe' does.
+          (agent-river--ensure-shell-teardown "s1")
+          (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+          (should (plist-get (car (plist-get (car (agent-river--map-entries root))
+                                             :parties))
+                             :current))
+          (kill-buffer (agent-river--shell-buffer "s1"))
+          (let ((parties (plist-get (car (agent-river--map-entries root)) :parties)))
+            ;; The file is still warm and still named: it was touched, which
+            ;; is history and stays.  Only the claim about now is withdrawn.
+            (should parties)
+            (should-not (plist-get (car parties) :current))))))))
+
+(ert-deftest agent-river-test-a-killed-session-lets-its-name-fade ()
+  ;; The exemption is granted for the sake of a question -- "where is this
+  ;; agent now" -- that a session which no longer exists cannot be asked.
+  ;; Without this the map accumulated one permanent line per session ever run.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
+      (agent-river-test--with-tree root
+        (agent-river-test--with-session state
+          ;; What the first event through `agent-river-observe' does.
+          (agent-river--ensure-shell-teardown "s1")
+          (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+          (agent-river-test--cool state "common/c.el" 3600)
+          ;; Alive: cold as it is, the file it reached last keeps it named.
+          (should (equal (mapcar (lambda (e) (plist-get e :name))
+                                 (agent-river--map-entries root))
+                         '("common")))
+          (kill-buffer (agent-river--shell-buffer "s1"))
+          (should-not (agent-river--map-entries root))
+          ;; And a root the exemption was the only reason to draw goes too,
+          ;; rather than heading a section with nothing under it.
+          (should-not (agent-river--map-all-roots)))))))
+
+(ert-deftest agent-river-test-a-finished-subagent-stops-being-pointed-at ()
+  ;; SubagentStop is authoritative, so a child that has ended is gone in the
+  ;; same sense a killed buffer is.  Its last file says where it was, and
+  ;; there is nobody left for the marker to be about.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
+          (agent-river-fold child (list :kind "act" :cwd root :file "common/c.el"))
+          (agent-river-test--cool child "common/c.el" 3600)
+          (should (agent-river--map-entries root))
+          (agent-river-fold child '(:kind "done"))
+          (should-not (agent-river--map-entries root)))))))
+
+(ert-deftest agent-river-test-a-live-sibling-keeps-the-party-named ()
+  ;; A party is a label and two sessions can share one -- both `Explore'
+  ;; subagents of alpha are `alpha/Explore'.  So whether it has ended is a
+  ;; fold over all of them: asked per session, a finished sibling would have
+  ;; taken the marker off a party that is still running.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (let ((live (agent-river-state "s1/a1" "Explore" "s1" "Explore"))
+              (done (agent-river-state "s1/a2" "Explore" "s1" "Explore")))
+          (agent-river-fold live (list :kind "act" :cwd root :file "docs/d.el"))
+          ;; Enough to order the two touches without cooling either past the
+          ;; floor, so the party's newest file is the finished one's.
+          (agent-river-test--cool live "docs/d.el" 10)
+          (agent-river-fold done (list :kind "act" :cwd root :file "common/c.el"))
+          (agent-river-fold done '(:kind "done"))
+          (let ((common (seq-find (lambda (e) (equal (plist-get e :name) "common"))
+                                  (agent-river--map-entries root))))
+            (should (equal (plist-get (car (plist-get common :parties)) :party)
+                           "alpha/Explore"))
+            (should (plist-get (car (plist-get common :parties)) :current))))))))
+
+(ert-deftest agent-river-test-a-quiet-session-keeps-its-name-and-marker ()
+  ;; The TTL is a guess at a process we cannot see, and a name is not thrown
+  ;; away on a guess.  A CLI session outside Emacs that has simply not been
+  ;; given a prompt for a while is still there.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-test--cool state "common/c.el" 3600)
+        (setf (agent-river-state-last-seen state) (time-subtract (current-time) 9999))
+        (should-not (agent-river--active-p state))
+        (let ((entries (agent-river--map-entries root)))
+          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
+                         '("common")))
           (should (plist-get (car (plist-get (car entries) :parties)) :current)))))))
 
 (ert-deftest agent-river-test-a-cold-root-stops-heading-a-section ()

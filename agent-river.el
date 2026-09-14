@@ -371,6 +371,18 @@ back to the TTL.  A session that `agent-shell-restart' killed then reads as
 active for the whole TTL, so its panel line lingers, unopenable.  Seen once,
 agent-shell stays the authority for as long as this Emacs runs.")
 
+(defvar agent-river--shell-sessions (make-hash-table :test 'equal)
+  "Session ids agent-shell has been seen hosting, as id -> t.
+
+The same fact as `agent-river--shell-seen' asked one session at a time,
+and both are kept because they answer for different costs.  The sticky
+flag says \"agent-shell is the authority around here\", which is enough to
+call a session with no buffer inactive; `agent-river--gone-p' declares a
+session *ended*, and that must not be said of a session run from a
+terminal which never had a buffer to lose.  Recorded where the teardown
+hook is installed, so a session is in here exactly when we have seen its
+buffer, and kept after the buffer dies -- that is the whole point of it.")
+
 (defun agent-river--shell-default-name (buffer)
   "Return the name agent-shell would give BUFFER, or nil.
 Reconstructed with agent-shell's own formatter rather than guessed
@@ -480,6 +492,39 @@ something we could not see."
    (t (let ((seen (agent-river-state-last-seen state)))
         (and seen (< (float-time (time-subtract (current-time) seen))
                      agent-river-session-ttl))))))
+
+(defun agent-river--gone-p (state)
+  "Return non-nil when STATE's session is known to have ended.
+
+Deliberately narrower than the negation of `agent-river--active-p': that
+one falls back to the TTL, and a session that has merely gone quiet for
+longer than the TTL is a guess at something we cannot see.  This is asked
+where a view stops saying something -- the map's position markers, and
+the names it keeps on a cold file -- so it answers from facts only: a
+session we saw agent-shell hosting whose buffer has since been killed,
+and a subagent whose own SubagentStop said it was finished.  A silent
+session nobody here owns is not gone, it is silent, and withdrawing a
+reading over that would be acting on an estimate.
+
+Which is also why this asks `agent-river--shell-sessions' rather than the
+sticky `agent-river--shell-seen' that `agent-river--active-p' asks.  That
+one makes agent-shell the authority over *every* root as soon as it has
+hosted any of them, and the cost is a session run from a terminal with
+hooks wired, which has no buffer here and never did: called merely
+inactive it loses a word in the panel, called gone it would lose its name
+and its marker on the map while it was still working.
+
+A subagent goes with its root as well, since a child of a session that no
+longer exists cannot still be running -- and the TTL, which is all a
+subagent otherwise has, would take minutes to notice."
+  (cond
+   ((agent-river-state-parent state)
+    (or (and (agent-river-state-done state) t)
+        (let ((root (gethash (agent-river-state-parent state)
+                             agent-river-registry)))
+          (and root (agent-river--gone-p root)))))
+   ((gethash (agent-river-state-id state) agent-river--shell-sessions)
+    (not (agent-river--shell-buffer (agent-river-state-id state))))))
 
 (defun agent-river--state-working-p (state)
   "Return non-nil while STATE is mid-turn, as opposed to merely alive.
@@ -1251,9 +1296,17 @@ calls a hosted session whose buffer is gone by what it is.
 
 Deferred by a tick, because `kill-buffer-hook' runs while the buffer is
 still live: redrawn inline, `agent-river--shell-buffer' would still find
-the dying buffer and draw the session straight back in."
+the dying buffer and draw the session straight back in.
+
+The map is told as well, and it has to be told here.  Its names and its
+position markers are the other view that reads a session as existing, and
+nothing else will ever say otherwise: a killed session sends no further
+events, so with no other agent running the map would have sat there
+naming it until someone pressed `g'.  Marking it dirty is enough -- the
+map's timer defers the redraw for us, past this buffer's death."
   (remhash buffer agent-river--teardown-hooked)
-  (run-at-time 0 nil #'agent-river--redraw-block))
+  (run-at-time 0 nil #'agent-river--redraw-block)
+  (agent-river--map-invalidate))
 
 (defun agent-river--ensure-shell-teardown (id)
   "Ensure BUFFER's session teardown is installed for session ID at most once.
@@ -1263,6 +1316,7 @@ reaches us -- no hook event reports it, and a watched session sees only
   (let ((buffer (agent-river--shell-buffer id)))
     (when buffer
       (setq agent-river--shell-seen t)
+      (puthash id t agent-river--shell-sessions)
       (unless (gethash buffer agent-river--teardown-hooked)
         (puthash buffer t agent-river--teardown-hooked)
         (with-current-buffer buffer
@@ -2620,6 +2674,7 @@ half that also folds."
   ;; belong to buffers, not to what was folded out of them.
   (clrhash agent-river--source)
   (clrhash agent-river--tool-calls)
+  (clrhash agent-river--shell-sessions)
   (agent-river--stop-timer)
   (agent-river--stop-spinner))
 
@@ -3180,6 +3235,28 @@ with two `Explore' lines and no way to tell whose."
                 (or (agent-river-state-agent-type state) "subagent")))
     (or (agent-river-state-label state) "?")))
 
+(defun agent-river--gone-parties ()
+  "Return a hash of party label to whether every session behind it has ended.
+
+A party is a label, not a session, and two sessions can share one: two
+`Explore' subagents of the same root are both `alpha/Explore'.  So the
+answer is a fold over all of them rather than a lookup -- one live
+sibling keeps the party alive, and asking per session would have buried
+it with the finished one.
+
+Kept apart from `agent-river--heat-entries': who still exists is a fact
+about the registry and not about the artifact tables, and pushing a copy
+of it onto every entry would be a second account of the same thing."
+  (let ((gone (make-hash-table :test 'equal)))
+    (maphash (lambda (_id state)
+               (let ((party (agent-river--party-label state)))
+                 (puthash party
+                          (and (gethash party gone t)
+                               (agent-river--gone-p state))
+                          gone)))
+             agent-river-registry)
+    gone))
+
 (defun agent-river--heat-entries (&optional scope)
   "Return one plist per artifact of every folded session.
 
@@ -3600,7 +3677,10 @@ most worth being able to scan a whole listing for."
   :type 'string)
 
 (defcustom agent-river-map-here-marker "▸"
-  "Marker for the entry holding an agent's most recent touch."
+  "Marker for the entry holding an agent's most recent touch.
+Drawn only while that agent still exists: the marker is the map's one
+present-tense reading, and over a session that has ended it points at
+where nobody is."
   :type 'string)
 
 (defcustom agent-river-map-vc t
@@ -3677,11 +3757,16 @@ At the default half-life a single touch falls under this in about four
 minutes and a file touched ten times in about eleven, so what is left is
 where the work has been recently rather than everywhere it has ever been.
 
-A party is never dropped from the one file it reached most recently,
-whatever that weighs.  Cold is not the same as gone: that file is the
-answer to \"where is this agent now\", which is the map's most useful
-single fact, and an idle agent is exactly when it is asked.  So a quiet
-map settles at one line per agent rather than at none.
+A party that still exists is never dropped from the one file it reached
+most recently, whatever that weighs.  Cold is not the same as gone: that
+file is the answer to \"where is this agent now\", which is the map's most
+useful single fact, and an idle agent is exactly when it is asked.  So a
+quiet map settles at one line per agent rather than at none.
+
+A party that has *gone* -- an agent-shell buffer killed, a subagent
+finished -- keeps no such file, because there is no longer anyone for
+\"now\" to be about.  Its name fades through this floor like any other and
+its position marker is dropped at once; see `agent-river--map-newest'.
 
 Nil turns the floor off and restores the old behaviour, where a touch is
 named for as long as the session is folded."
@@ -3692,13 +3777,25 @@ named for as long as the session is folded."
 
 Computed across every entry, not just the ones under some root: taken per
 root, descending into a subdirectory would invent a second \"most recent\"
-file that only looks like one because the real one is out of view."
-  (let ((newest (make-hash-table :test 'equal)))
+file that only looks like one because the real one is out of view.
+
+A party `agent-river--gone-parties' calls finished is left out of the
+hash altogether, and that is what cleans it off the map.  Both readings
+taken from here are present tense -- the position marker says where an
+agent *is*, and the floor exemption below keeps its name on that file for
+as long as there is an agent to ask about -- so for a session whose
+agent-shell buffer has been killed the two together pinned a name and an
+arrow to a file forever, on behalf of nobody.  Absent from the hash, the
+marker is not drawn and the name is left to fade at the floor like any
+other: the file was still touched, which is history and stays, and it is
+only the present tense that is withdrawn."
+  (let ((newest (make-hash-table :test 'equal))
+        (gone (agent-river--gone-parties)))
     (dolist (entry entries)
       (let ((abs (agent-river--heat-absolute entry))
             (party (plist-get entry :party))
             (last (plist-get entry :last)))
-        (when abs
+        (when (and abs (not (gethash party gone)))
           (let ((seen (gethash party newest)))
             (when (or (null seen)
                       (eq last (agent-river--map-later (plist-get seen :last) last)))
@@ -3709,7 +3806,9 @@ file that only looks like one because the real one is out of view."
   "Return non-nil while ENTRY still earns its party a name on the map.
 
 Above `agent-river-map-party-floor', or the one file NEWEST says that
-party reached last.  Asked in both places that read the artifact tables
+party reached last -- which a party whose sessions have all ended does
+not have, so its names fade rather than being pinned for as long as the
+registry holds it.  Asked in both places that read the artifact tables
 for the map -- which trees to draw, and what to draw in them -- because a
 root kept alive by a touch too cold to name would head a section with
 nothing under it.
@@ -3770,7 +3869,8 @@ relative to ROOT -- and `:parties', an alist-like list of plists with
 
 `:current' marks the one file a party touched most recently, which is the
 only thing here that says where an agent is now rather than where it has
-been.  Computed across everything the party reached, not just what fell
+been -- and is therefore nil throughout for a party that no longer
+exists.  Computed across everything the party reached, not just what fell
 inside ROOT, so descending into a subdirectory cannot invent a second
 \"most recent\" file that only looks like one because the real one was out
 of view."
@@ -4839,15 +4939,21 @@ makes this a degradation rather than a second view to keep in step."
   (define-key map (kbd ">") #'agent-river-map-next-active)
   (define-key map (kbd "<") #'agent-river-map-previous-active))
 
-(defun agent-river--map-observe (_state _event)
-  "Mark the map as needing a redraw, and make sure something will do it.
+(defun agent-river--map-invalidate ()
+  "Say the map is out of date and make sure something will redraw it.
 
-Deliberately does not draw.  This runs on every tool call, and rebuilding
-a whole listing thousands of times a task would move point under whoever
-is reading it -- so an event only says that the drawing is out of date and
-the timer decides how often that is worth acting on."
+Deliberately does not draw.  The event path below runs on every tool
+call, and rebuilding a whole listing thousands of times a task would move
+point under whoever is reading it -- so a caller only says that the
+drawing is out of date and the timer decides how often that is worth
+acting on.  Which also makes this safe to call from a `kill-buffer-hook',
+where drawing inline would read a buffer that is still live."
   (setq agent-river--map-dirty t)
   (agent-river--ensure-map-timer))
+
+(defun agent-river--map-observe (_state _event)
+  "Mark the map as needing a redraw after an event."
+  (agent-river--map-invalidate))
 
 (defvar agent-river--map-timer nil
   "Repeating timer redrawing the map, or nil while none runs.")

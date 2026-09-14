@@ -441,14 +441,35 @@ Four things about the map are load-bearing:
   brackets had none. The weights decay exponentially, so they approach zero
   without reaching it, and after an hour in a small repository every file
   carried a name and every line read alike. A view where everything is marked
-  marks nothing. Two things hold it together: **a party is never dropped from
-  the one file it reached most recently**, whatever that weighs, because cold
-  is not the same as gone and that file is the answer to "where is this agent
-  now" — so a quiet map settles at one line per agent rather than at none;
-  and the floor is applied at **both** reads of the artifact tables
-  (`agent-river--map-live-p`, asked by `agent-river--map-all-roots` and
-  `agent-river--map-reach`), since a root kept alive by a touch too cold to
-  name would head a section with nothing under it.
+  marks nothing. Two things hold it together: **a party that still exists is
+  never dropped from the one file it reached most recently**, whatever that
+  weighs, because cold is not the same as gone and that file is the answer to
+  "where is this agent now" — so a quiet map settles at one line per agent
+  rather than at none; and the floor is applied at **both** reads of the
+  artifact tables (`agent-river--map-live-p`, asked by
+  `agent-river--map-all-roots` and `agent-river--map-reach`), since a root
+  kept alive by a touch too cold to name would head a section with nothing
+  under it.
+- **A party that is gone keeps no file, and no marker** (`agent-river--gone-p`,
+  applied in `agent-river--map-newest`). Both of the readings above are
+  present tense, so for a session that has ended they claim a position on
+  behalf of nobody — and the exemption made that permanent: an agent-shell
+  buffer killed, and its name and `▸` stayed pinned to one file for as long as
+  the registry held the state, since nothing decays past a floor it is exempt
+  from. Left out of the `newest` hash, a gone party loses the marker at once
+  and the name fades at the floor like any other. Three things to keep:
+  **gone is narrower than not-active** — `agent-river--active-p` falls back to
+  the TTL, which is a guess, and a name is not withdrawn on a guess; the facts
+  are a killed buffer (recorded per session in `agent-river--shell-sessions`,
+  *not* the sticky `agent-river--shell-seen`, which would call a hooks-only CLI
+  session gone for never having had a buffer here) and a subagent's own
+  `SubagentStop`, plus a subagent whose root is gone. **Gone is folded over
+  the party, not the session** (`agent-river--gone-parties`): two `Explore`
+  children of one root share the label `alpha/Explore`, so one live sibling
+  keeps the party. And **the kill has to say so itself** — a dead session
+  sends no further events, so `agent-river--shell-died` marks the map dirty
+  (`agent-river--map-invalidate`) and lets the timer redraw past the dying
+  buffer; without that the map goes on naming it until someone presses `g`.
 - **A file that is gone is struck through, not dropped**
   (`agent-river-gone`, set on `:missing`). Removing them was tried first, in
   two shapes, and both lost something. Dropping a deletion outright throws
