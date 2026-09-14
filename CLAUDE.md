@@ -439,6 +439,20 @@ Four things about the map are load-bearing:
   (`agent-river--map-live-p`, asked by `agent-river--map-all-roots` and
   `agent-river--map-reach`), since a root kept alive by a touch too cold to
   name would head a section with nothing under it.
+- **A deleted file is not where an agent is.** The exemption above is refused
+  to a file that is not on disk: it exists to say where an agent is *now*, and
+  without the check the map went on pointing `:current` at a name nothing
+  would ever touch again — the exemption holds whatever the weight decays to,
+  so that line never faded either. Only the exemption is checked, never the
+  floor. A file deleted a moment ago is still warm, and the deletion is
+  something the agent did; hiding it the instant it happens would drop the one
+  thing worth seeing about it. It fades out afterwards like anything else,
+  which is what makes the narrow rule enough — blanket removal was the
+  alternative and would also have made the map flicker every time a branch
+  switch took files away and put them back. The consequence to know: an agent
+  whose last act was a deletion, and which has since gone cold, is named
+  nowhere. That is the honest answer, and its next touch of a file that exists
+  brings it back.
 - **Fading is not finishing** (`agent-river-forget-artifacts`). The floor
   handles the everyday case on its own, but work that has just landed — a
   merge, a release — is history rather than cold, and only the user knows

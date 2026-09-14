@@ -3548,12 +3548,26 @@ Above `agent-river-map-party-floor', or the one file NEWEST says that
 party reached last.  Asked in both places that read the artifact tables
 for the map -- which trees to draw, and what to draw in them -- because a
 root kept alive by a touch too cold to name would head a section with
-nothing under it."
+nothing under it.
+
+The second clause is refused to a file that is not there.  It exists to
+answer \"where is this agent now\", and a deleted file is not a place an
+agent can be: without the check the map went on pointing `:current' at a
+name nothing would ever touch again, since the exemption holds whatever
+the weight has decayed to.  Only the exemption is checked, never the
+floor -- a file deleted a moment ago is still warm, and that deletion is
+activity the map has no business hiding while it is the news.  It fades
+out afterwards like everything else, which is what makes this enough.
+
+One `file-exists-p' per party at worst: an entry above the floor never
+reaches the clause, and an entry below it is stat-ed only if it is that
+party's most recent."
   (let ((abs (agent-river--heat-absolute entry)))
     (and abs
          (or (null agent-river-map-party-floor)
              (>= (plist-get entry :weight) agent-river-map-party-floor)
-             (equal abs (plist-get (gethash (plist-get entry :party) newest) :abs))))))
+             (and (equal abs (plist-get (gethash (plist-get entry :party) newest) :abs))
+                  (file-exists-p abs))))))
 
 (defun agent-river--map-all-roots (&optional scope)
   "Return every directory tree the agents have touched, newest first.
