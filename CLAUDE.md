@@ -741,10 +741,11 @@ together:
   (`agent-river--spinning-p`). The gate is the same one — `agent-river--star`
   marks a star exactly when `agent-river--state-working-p` holds — but read
   off the rendering the panel has already done. Asking the registry per tick
-  meant `agent-river--active-p` per session, which for an agent-shell session
-  walks every buffer in Emacs: measured at ~3 ms a tick in a long-lived one
-  (10k buffers), six times a second, most of it consing a buffer list for the
-  collector. Reading the marks is ~3 µs, and the whole tick 61 µs. The price
+  meant `agent-river--active-p` per session, which then walked every buffer
+  in Emacs for a hosted one: ~3 ms a tick in a long-lived Emacs (10k
+  buffers), most of it consing a buffer list for the collector. That lookup
+  is indexed now, but the gate stays here — reading the marks is ~3 µs and
+  the whole tick 9 µs, and it derives nothing at all. The price
   is that something has to take the marks away when a turn ends with no event
   to announce it — a killed agent-shell buffer reports nothing — so
   `agent-river--tick` redraws *before* it retires the refresh timer, which it

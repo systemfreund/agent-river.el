@@ -124,16 +124,23 @@ boxes.  Each frame should be one column wide, or the line will shift as
 it spins."
   :type '(repeat string))
 
-(defcustom agent-river-spinner-interval 0.15
+(defcustom agent-river-spinner-interval 0.6
   "Seconds between frames of the session marker's animation.
 Separate from `agent-river-refresh-interval' because the two do different
 amounts of work: a frame moves one text property, a refresh rebuilds the
-whole block, and a block rebuilt eight times a second would fight whoever
-is reading it.
+whole block, and a block rebuilt at an animation's rate would fight
+whoever is reading it.
 
 It is also the phase's unit: a marker's frame is how long its own turn has
 been running divided by this, so changing it re-times the animation
-without anything having to be restarted."
+without anything having to be restarted -- though a timer already running
+keeps the rate it was started at until the next turn.
+
+Slow on purpose.  The marker says an agent is working, which is a fact
+that holds for minutes; at a frame every 0.15 s it read as something
+demanding attention, and with several sessions the block flickered.  It is
+also what makes two markers being out of phase legible at all -- at speed
+they are a blur either way."
   :type 'number)
 
 (defcustom agent-river-phase-window 8
@@ -3055,18 +3062,19 @@ than at whatever the previous tick drew."
 ;; whole block that often would both cost far more than the animation is
 ;; worth and drag the block out from under anybody reading it.  So this one
 ;; writes a `display' property onto the stars the panel already marked and
-;; touches nothing else; it derives nothing, which is what makes it safe to
-;; run eight times a second.
+;; touches nothing else; it derives nothing, which is what would make it
+;; safe to run many times a second.
 ;;
 ;; Nothing includes the question of whether to keep running.  Asking the
-;; registry looks cheap and is not: for a session agent-shell hosts,
-;; `agent-river--active-p' finds its buffer by walking every buffer in
-;; Emacs, and in a long-lived one that is thousands of them -- measured at
-;; ~3 ms a tick, six times a second, most of it consing a buffer list for
-;; the garbage collector.  The panel has already decided the same question
-;; when it marked the stars, so the marks are the gate, and the refresh
-;; timer's last redraw is what takes them away when a turn ends with no
-;; event to announce it.
+;; registry looked cheap and was not: `agent-river--active-p' used to find a
+;; hosted session's buffer by walking every buffer in Emacs, which in a
+;; long-lived one measured ~3 ms a tick, most of it consing a buffer list
+;; for the garbage collector.  That lookup is indexed now, but the gate
+;; stays where it was put: the panel has already decided the same question
+;; when it marked the stars, so the marks are the gate and this loop
+;; derives nothing at all.  What that costs is a redraw from the refresh
+;; timer before it retires, since the marks are also what has to be taken
+;; away when a turn ends with no event to announce it.
 
 (defvar agent-river--spinner-timer nil
   "Repeating timer animating the session markers, or nil while none runs.")
@@ -3137,11 +3145,11 @@ though it were still working."
   "Draw each session marker at its own phase, or stop once none is left.
 
 Derives nothing: every frame it needs is written on the mark it is
-painting, and whether to carry on is `agent-river--spinning-p'.  This runs
-six times a second, and a tick that asked the registry instead spent
-almost all of that walking every buffer in Emacs to decide whether
-anything was still working -- an answer the panel had already reached
-when it drew the block."
+painting, and whether to carry on is `agent-river--spinning-p'.  A tick
+that asked the registry instead spent almost all of itself walking every
+buffer in Emacs to decide whether anything was still working -- ~3 ms of
+it, against 9 us for this -- an answer the panel had already reached when
+it drew the block."
   (condition-case err
       (let ((buffer (get-buffer agent-river-buffer-name)))
         ;; get-buffer, not agent-river--buffer: a tick must never resurrect
