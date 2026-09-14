@@ -573,6 +573,37 @@ Four things about the map are load-bearing:
   comes from HEAD, so after several prompts `+10 -6` is not this task's work.
   The header used to say so and no longer does; see the header below for why
   a caption is the wrong place to keep that.
+- **Landed is the one reading neither git nor the fold can give alone**
+  (`agent-river-map-landed-marker`, `agent-river--vc-landed-p`). Git can say a
+  file is identical to the main branch; it cannot say whether that is because
+  the work landed there or because nobody ever changed it — and most of what
+  an agent touches, it only read, so marking on git's answer alone puts a tick
+  down nearly every line. The fold therefore counts **writes apart from
+  touches** (`agent-river--writing-p`, read off the `editing` bucket of
+  `agent-river-phase-buckets` rather than from a second list of tool names),
+  and the marker is the intersection: an agent wrote this, and git says
+  nothing of ours is left outside the main branch. Four things it owes.
+  **Three dots, not two** — `MAIN...HEAD` asks what *this branch* did since it
+  diverged, so a main branch that has moved on since does not read as this
+  branch's work still being out. **`:ahead` unset is "do not know", never
+  "landed"** — no main branch here, or the read has not come back — because
+  the marker says work is safely in the main branch and that is the last
+  thing to claim on a guess; an *empty* `:ahead` is the opposite and is what
+  a landing looks like. **The three readings are one question** (what state
+  is the work on this line in), so they are exclusive and ordered: pending
+  changes outrank a landing, because a file you can still lose is the news.
+  And **a failed read costs the marker only** — the diffstat is stored before
+  any of this runs, and every step here falls back to `:ahead` unset, so the
+  column never blinks out over a question that was extra to begin with.
+- **How long the landing holds: as long as the line does, and never more
+  than one poll stale.** It is not a remembered event with a lifetime — it is
+  re-derived from git on every read, so it is at worst `agent-river-map-vc-ttl`
+  seconds behind the disk and corrects itself: write the file again and it is
+  pending again, rebase again and it comes back. The only thing remembered is
+  the write count in the artifact tables, which lives exactly as long as the
+  line it annotates — cleared by a new prompt in the task frame, by
+  `agent-river-forget-artifacts` when work lands and the user says so, and
+  faded out of view by `agent-river-map-party-floor` like everything else.
 
 Encoding discipline, since there are five facts on a line: weight is shading
 (the same `agent-river-heat-levels` faces), party is text, contention is a

@@ -2984,6 +2984,10 @@ is how a test asks what the view looks like once the work has moved on."
       (when entry
         (puthash path
                  (list :touches (plist-get entry :touches)
+                       ;; Carried, not dropped: a write does not stop having
+                       ;; happened because the touch is being aged, and the
+                       ;; landed marker is read from it.
+                       :writes (plist-get entry :writes)
                        :last (time-subtract (plist-get entry :last) seconds))
                  table)))))
 
@@ -3674,9 +3678,121 @@ is how a test asks what the view looks like once the work has moved on."
   (let ((table (agent-river-test--numstat "2\t0\ta.el\0")))
     ;; `agent-river--map-draw' decides once for the whole buffer, so the
     ;; reading is empty rather than absent where there is nothing to report.
-    (should (equal (agent-river--vc-reading table "/repo/a.el" t) "+2"))
-    (should (equal (agent-river--vc-reading table "/repo/b.el" t) ""))
-    (should-not (agent-river--vc-reading table "/repo/a.el" nil))))
+    (should (equal (agent-river--vc-reading "/repo" table "/repo/a.el" t) "+2"))
+    (should (equal (agent-river--vc-reading "/repo" table "/repo/b.el" t) ""))
+    (should-not (agent-river--vc-reading "/repo" table "/repo/a.el" nil))))
+
+(defun agent-river-test--ahead (root paths)
+  "Record PATHS as the ones ROOT's branch still has outside the main branch."
+  (let ((ahead (make-hash-table :test 'equal)))
+    (dolist (path paths) (puthash path t ahead))
+    (puthash root (list :at (current-time) :table (make-hash-table :test 'equal)
+                        :ahead ahead :main "main" :proc nil)
+             agent-river--vc-cache)))
+
+(ert-deftest agent-river-test-a-landed-file-says-so-in-the-column ()
+  ;; Merged or rebased look the same from the file's side and are the same
+  ;; fact about it: what this branch did to the file is now only in the main
+  ;; branch, so there is nothing here to show and nothing left to land.
+  (let ((agent-river--vc-cache (make-hash-table :test 'equal))
+        (agent-river-map-landed-marker "✓")
+        (table (make-hash-table :test 'equal)))
+    (agent-river-test--ahead "/repo" '("/repo/pending.el"))
+    (should (equal (agent-river--vc-reading "/repo" table "/repo/landed.el" t 3)
+                   "✓"))
+    ;; Still outside the main branch: nothing to say yet.
+    (should (equal (agent-river--vc-reading "/repo" table "/repo/pending.el" t 3)
+                   ""))))
+
+(ert-deftest agent-river-test-a-file-only-read-has-not-landed ()
+  ;; Git can say a file is identical to the main branch; it cannot say
+  ;; whether that is because the work landed there or because nobody ever
+  ;; changed it.  Most of what an agent touches it only read, so marking on
+  ;; git's answer alone would put a tick down nearly every line -- a view
+  ;; where everything is marked marks nothing.
+  (let ((agent-river--vc-cache (make-hash-table :test 'equal))
+        (table (make-hash-table :test 'equal)))
+    (agent-river-test--ahead "/repo" nil)
+    (should (equal (agent-river--vc-reading "/repo" table "/repo/read.el" t 0) ""))
+    (should (equal (agent-river--vc-reading "/repo" table "/repo/read.el" t nil) ""))))
+
+(ert-deftest agent-river-test-an-unanswered-branch-lands-nothing ()
+  ;; `:ahead' unset means nobody could ask -- no main branch here, or the
+  ;; read is still out.  The marker says work is safely in the main branch,
+  ;; which is the last thing to say on a guess.
+  (let ((agent-river--vc-cache (make-hash-table :test 'equal))
+        (table (make-hash-table :test 'equal)))
+    (should-not (agent-river--vc-landed-p "/repo" "/repo/a.el"))
+    (should (equal (agent-river--vc-reading "/repo" table "/repo/a.el" t 3) ""))
+    ;; And an *empty* answer is the opposite of an absent one: everything
+    ;; this branch changed is in the main branch now.
+    (agent-river-test--ahead "/repo" nil)
+    (should (agent-river--vc-landed-p "/repo" "/repo/a.el"))))
+
+(ert-deftest agent-river-test-pending-work-outranks-a-landing ()
+  ;; The three readings are one question -- what state is the work on this
+  ;; line in -- so a file with uncommitted changes shows those.  Its earlier
+  ;; landings are not the news.
+  (let ((agent-river--vc-cache (make-hash-table :test 'equal))
+        (table (agent-river-test--numstat "2\t1\ta.el\0")))
+    (agent-river-test--ahead "/repo" nil)
+    (should (equal (agent-river--vc-reading "/repo" table "/repo/a.el" t 3)
+                   "+2 -1"))))
+
+(ert-deftest agent-river-test-a-directory-lands-when-everything-under-it-has ()
+  ;; The same grain as the parties: a directory line reports the subtree,
+  ;; because that is what the listing gives it a line for.
+  (let ((agent-river--vc-cache (make-hash-table :test 'equal))
+        (table (make-hash-table :test 'equal)))
+    (agent-river-test--ahead "/repo" '("/repo/src/pending.el"))
+    (should-not (agent-river--vc-landed-p "/repo" "/repo/src"))
+    (should (agent-river--vc-landed-p "/repo" "/repo/docs"))))
+
+(ert-deftest agent-river-test-the-main-branch-is-what-the-remote-says-it-is ()
+  ;; `for-each-ref' sorts by refname, so taking git's order would make the
+  ;; answer alphabetical and put `master' ahead of what the remote itself
+  ;; calls its main branch.
+  (should (equal (agent-river--vc-main-rev '("refs/heads/master"
+                                             "refs/remotes/origin/HEAD"))
+                 "origin/HEAD"))
+  (should (equal (agent-river--vc-main-rev '("refs/heads/master")) "master"))
+  ;; A project that calls it something else says so, and is not overruled.
+  (let ((agent-river-map-main-branch "trunk"))
+    (should (equal (agent-river--vc-main-rev '("refs/heads/main")) "trunk")))
+  ;; Nothing resolves: no main branch here, which costs the marker only.
+  (should-not (agent-river--vc-main-rev '("refs/heads/topic"))))
+
+(ert-deftest agent-river-test-a-write-is-counted-apart-from-a-read ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :tool "Read" :file "a.el"))
+    (let ((entry (gethash "a.el" (agent-river-state-artifacts state))))
+      (should (= (plist-get entry :touches) 1))
+      (should (= (plist-get entry :writes) 0)))
+    (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"))
+    (let ((entry (gethash "a.el" (agent-river-state-artifacts state))))
+      (should (= (plist-get entry :touches) 2))
+      (should (= (plist-get entry :writes) 1)))
+    ;; Both frames, like the touches themselves: the map reads the session
+    ;; frame and the dired heat the task frame.
+    (should (= (plist-get (gethash "a.el" (agent-river-state-task-artifacts state))
+                          :writes)
+               1))))
+
+(ert-deftest agent-river-test-writes-reach-the-map-line ()
+  ;; The count has to survive the derivation the line is built from, or the
+  ;; marker cannot be asked for: reach sums it per party, merging sums it
+  ;; across them, and a directory's answer is its subtree's.
+  (let ((agent-river-heat-half-life nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :tool "Edit"
+                                      :cwd root :file "common/c.el"))
+        (agent-river-fold state (list :kind "act" :tool "Read"
+                                      :cwd root :file "common/c.el"))
+        (let ((common (seq-find (lambda (e) (equal (plist-get e :name) "common"))
+                                (agent-river--map-entries root))))
+          (should (= (agent-river--map-writes (plist-get common :parties)) 1))
+          (should (= (agent-river--map-weight (plist-get common :parties)) 2)))))))
 
 (ert-deftest agent-river-test-turning-the-diffstat-off-asks-git-nothing ()
   (let ((agent-river--vc-cache (make-hash-table :test 'equal))

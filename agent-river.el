@@ -615,16 +615,34 @@ view of it cannot drift out of step with the child's own state."
 
 ;;; The fold
 
-(defun agent-river--touch-1 (table path)
-  "Record one touch of PATH in TABLE."
+(defun agent-river--writing-p (tool)
+  "Return non-nil when TOOL is one that changes a file.
+
+Read off the `editing' bucket of `agent-river-phase-buckets' rather than
+from a list of its own: that bucket is already this package's answer to
+\"did this step change something\", and a second list would be a second
+place to teach it a host\='s dialect."
+  (and tool
+       (member tool (cdr (assoc "editing" agent-river-phase-buckets)))
+       t))
+
+(defun agent-river--touch-1 (table path &optional wrote)
+  "Record one touch of PATH in TABLE, a writing one with WROTE.
+
+Writes are counted apart from touches because reading a file and changing
+it are different things to have done, and one view needs to tell them
+apart: git can say a file is identical to the main branch, but not whether
+that is because the work landed there or because nobody ever changed it.
+Only what the agent did can answer that half."
   (let ((entry (gethash path table)))
     (puthash path
              (list :touches (1+ (or (plist-get entry :touches) 0))
+                   :writes (+ (or (plist-get entry :writes) 0) (if wrote 1 0))
                    :last (current-time))
              table)))
 
-(defun agent-river--touch (state path)
-  "Record that the session behind STATE touched PATH.
+(defun agent-river--touch (state path &optional wrote)
+  "Record that the session behind STATE touched PATH, writing it with WROTE.
 
 Kept in two frames on purpose.  The session-wide tally is what
 `agent-river-touching' needs to spot two agents on one file, and it must
@@ -633,8 +651,8 @@ survive a change of task.  The per-task tally is what an observer wants:
 afternoon\".  Reporting one while labelling it the other is how a panel
 starts misleading people."
   (when (and path (not (string-empty-p path)))
-    (agent-river--touch-1 (agent-river-state-artifacts state) path)
-    (agent-river--touch-1 (agent-river-state-task-artifacts state) path)))
+    (agent-river--touch-1 (agent-river-state-artifacts state) path wrote)
+    (agent-river--touch-1 (agent-river-state-task-artifacts state) path wrote)))
 
 (defun agent-river--anchor (state key path)
   "Record where KEY really sits, given the absolute PATH it was folded from.
@@ -735,7 +753,7 @@ replaying a session's events from the start."
       (let ((window (nthcdr (1- agent-river-phase-window)
                             (agent-river-state-recent state))))
         (when window (setcdr window nil)))
-      (agent-river--touch state file)
+      (agent-river--touch state file (agent-river--writing-p tool))
       (agent-river--anchor state file path))
 
      ((equal kind "think")
@@ -3413,6 +3431,7 @@ two redraws with nothing having happened in between."
                                 :anchor (and anchors (gethash path anchors))
                                 :file path
                                 :weight (agent-river--heat-weight entry)
+                                :writes (or (plist-get entry :writes) 0)
                                 :last (plist-get entry :last))
                           entries))
                   (if (eq scope 'session)
@@ -3853,9 +3872,37 @@ the work most wants annotated -- reading only the diff would leave the
 newest work as the one thing the column said nothing about."
   :type 'string)
 
+(defcustom agent-river-map-landed-marker "✓"
+  "Marker for a file whose work has reached the main branch.
+
+The third thing the diffstat column can say, and the three are one
+question: what state is the work on this line in.  `+12 -3\=' is work that
+is still here, `?\=' work git has never seen, and this is work that is no
+longer anywhere but the main branch -- merged or rebased in, which look
+the same from the file\='s side and are the same fact about it."
+  :type 'string)
+
+(defcustom agent-river-map-main-branch nil
+  "The branch a file counts as landed in, or nil to work it out.
+
+Nil tries `origin/HEAD\=', `main\=', `master\=' and `origin/main\=' in that
+order and takes the first that resolves -- `origin/HEAD\=' first because it
+is what the remote itself says its main branch is, rather than a guess
+from a list of popular names.  Set it to a string for a project that
+calls it something else; a name that does not resolve is the same as
+having no main branch, which costs the marker and nothing else."
+  :type '(choice (const :tag "Work it out" nil) string))
+
 (defun agent-river--map-weight (parties)
   "Return the total weight across PARTIES."
   (apply #'+ (mapcar (lambda (party) (plist-get party :weight)) parties)))
+
+(defun agent-river--map-writes (parties)
+  "Return how many of PARTIES\=' touches changed the file rather than read it.
+Unweighted, where the heat is weighted: this is not a reading about how
+recent the work was but about whether there was any, and a write does not
+stop having happened because it was a while ago."
+  (apply #'+ (mapcar (lambda (party) (or (plist-get party :writes) 0)) parties)))
 
 (defun agent-river--map-later (a b)
   "Return the later of times A and B, either of which may be nil."
@@ -4016,6 +4063,8 @@ of view."
             (puthash party
                      (list :weight (+ (or (plist-get cell :weight) 0)
                                       (plist-get entry :weight))
+                           :writes (+ (or (plist-get cell :writes) 0)
+                                      (or (plist-get entry :writes) 0))
                            :last (agent-river--map-later (plist-get cell :last) last)
                            ;; The absolute name, so `:current' is decided by
                            ;; identity rather than by a path that two roots
@@ -4029,6 +4078,7 @@ of view."
            (maphash (lambda (party cell)
                       (push (list :party party
                                   :weight (plist-get cell :weight)
+                                  :writes (plist-get cell :writes)
                                   :last (plist-get cell :last)
                                   :current (equal (plist-get cell :abs)
                                                   (plist-get (gethash party newest) :abs)))
@@ -4057,6 +4107,8 @@ it can never disagree about who has been where."
                    (list :party (plist-get party :party)
                          :weight (+ (or (plist-get cell :weight) 0)
                                     (plist-get party :weight))
+                         :writes (+ (or (plist-get cell :writes) 0)
+                                    (or (plist-get party :writes) 0))
                          :last (agent-river--map-later (plist-get cell :last)
                                                        (plist-get party :last))
                          :current (or (plist-get cell :current)
@@ -4239,36 +4291,65 @@ Red is `agent-river-fail's channel in the HUD, and free here: nothing in
 the map means failure, and removed-is-red is the one convention a reader
 arrives with.")
 
+(defface agent-river-landed '((t :inherit shadow))
+  "Face for the marker on a file whose work has reached the main branch.
+
+Quiet on purpose, where the counts beside it are not.  The column is
+scanned for work that is still to be dealt with; a landed file is the
+answer \"nothing here\", and printing that in a colour that catches the eye
+would make the finished lines compete with the unfinished ones.  Grey
+means several things elsewhere in this package -- stale, cold, elided --
+and nothing else in this column, which is what makes it free here.")
+
 (defvar agent-river--vc-cache (make-hash-table :test 'equal)
   "Absolute root to what the last git read found there.
 
 Each value is a plist: `:at' when the read finished, `:table' its result,
-`:proc' the read still running.  A `:table' of nil is a real answer --
-not a repository, or no git -- and is stored like any other so a failure
-is throttled by the TTL rather than retried on every redraw.")
+`:ahead' the paths this branch has changed against the main branch,
+`:main' the revision that branch resolved to (or `none'), `:proc' the read
+still running.  A `:table' of nil is a real answer -- not a repository, or
+no git -- and is stored like any other so a failure is throttled by the
+TTL rather than retried on every redraw.
+
+`:ahead' is nil for \"not asked, or could not be asked\", which is a
+different answer from an empty table: empty says every path this branch
+touched is in the main branch, nil says we do not know, and nothing is
+marked landed on a nil.")
 
 (defun agent-river--vc-claim (root process)
   "Record PROCESS as the read currently in flight for ROOT."
   (let ((cell (gethash root agent-river--vc-cache)))
     (puthash root (list :at (or (plist-get cell :at) 0)
                         :table (plist-get cell :table)
+                        :ahead (plist-get cell :ahead)
+                        :main (plist-get cell :main)
                         :proc process)
              agent-river--vc-cache)))
 
-(defun agent-river--vc-store (root table)
+(defun agent-river--vc-store (root table &optional ahead main)
   "Record TABLE as ROOT's diffstat and ask the map to draw it.
+
+AHEAD is the paths still outside the main branch and MAIN the revision it
+resolved to; both are remembered across a read that does not mention them,
+so the cheap half of a refresh can store what it has without throwing away
+the expensive half.
 
 The map is marked dirty rather than redrawn, and its timer started if it
 had retired: the answer arrives while nothing else is happening, and a
 column that landed in the cache but never on screen would be the same as
 not having read it."
-  (puthash root (list :at (current-time) :table table :proc nil)
-           agent-river--vc-cache)
+  (let ((cell (gethash root agent-river--vc-cache)))
+    (puthash root (list :at (current-time)
+                        :table table
+                        :ahead (or ahead (plist-get cell :ahead))
+                        :main (or main (plist-get cell :main))
+                        :proc nil)
+             agent-river--vc-cache))
   (when (get-buffer agent-river-map-buffer-name)
     (setq agent-river--map-dirty t)
     (agent-river--ensure-map-timer)))
 
-(defun agent-river--vc-run (root args callback)
+(defun agent-river--vc-run (root args callback &optional on-fail)
   "Run git with ARGS in ROOT and pass its output to CALLBACK.
 
 Asynchronous, and that is the whole point.  The map redraws every few
@@ -4280,7 +4361,11 @@ it already make.
 
 A non-zero exit is not an error to report but an answer to record: a
 directory that is not a repository is an ordinary thing for the map to be
-pointed at, and it must cost a line its column and nothing else."
+pointed at, and it must cost a line its column and nothing else.  ON-FAIL
+says what recording it means for this command; without it the root is
+stored as no repository, which is right for the read that decides that and
+wrong for every read chained after it -- one of those failing must not
+take the answers already in hand down with it."
   (let* ((buffer (generate-new-buffer " *agent-river-vc*" t))
          (process
           (make-process
@@ -4302,8 +4387,11 @@ pointed at, and it must cost a line its column and nothing else."
                  (condition-case nil
                      (if ok
                          (funcall callback output)
-                       (agent-river--vc-store root nil))
-                   (error (agent-river--vc-store root nil)))))))))
+                       (funcall (or on-fail
+                                    (lambda () (agent-river--vc-store root nil)))))
+                   (error (funcall (or on-fail
+                                       (lambda ()
+                                         (agent-river--vc-store root nil))))))))))))
     (agent-river--vc-claim root process)))
 
 (defun agent-river--vc-parse (output root table)
@@ -4331,17 +4419,46 @@ differing from HEAD even though there are no lines to say by how much."
                        table))))))
     table))
 
+(defconst agent-river--vc-main-candidates
+  '(("refs/remotes/origin/HEAD" . "origin/HEAD")
+    ("refs/heads/main" . "main")
+    ("refs/heads/master" . "master")
+    ("refs/remotes/origin/main" . "origin/main"))
+  "Refs tried as the main branch, best first, as (REFNAME . REVISION).
+`origin/HEAD' leads because it is what the remote says its main branch is,
+where the rest are guesses from a list of popular names.")
+
+(defun agent-river--vc-main-rev (refnames)
+  "Return the best main-branch revision among the REFNAMES that exist.
+Ordered by `agent-river--vc-main-candidates' rather than by the order git
+listed them in: `for-each-ref' sorts by refname, which would make the
+answer alphabetical and put `master' ahead of `origin/HEAD'."
+  (or agent-river-map-main-branch
+      (cdr (seq-find (lambda (pair) (member (car pair) refnames))
+                     agent-river--vc-main-candidates))))
+
 (defun agent-river--vc-refresh (root)
   "Start reading ROOT's diffstat in the background.
 
-Two commands, chained rather than raced, so the second cannot land in a
-table the first has not filled yet.  `diff' reports the tracked files that
+Chained rather than raced, so a later read cannot land in a table an
+earlier one has not filled yet.  `diff' reports the tracked files that
 differ from HEAD; `ls-files --others' the ones git has never seen, which
-is what a file an agent has just written is.
+is what a file an agent has just written is.  Those two are the column,
+and they are stored as soon as they are in -- what follows is a separate
+question that must not hold them up or take them down with it.
 
-Both are read with ROOT as the working directory and scoped to it --
-`--relative' for the diff, which is also what makes its paths relative to
-ROOT rather than to the top of the checkout.  A session started in a
+What follows is which paths this branch has changed against the main
+branch: `for-each-ref' to find out what that branch is called here, then
+`diff --name-only MAIN...HEAD' for the paths still outside it.  Three dots,
+not two: the question is what *this branch* did since it diverged, so a
+main branch that has moved on since does not read as this branch's work.
+Everything it does not name has nothing of ours left outside main, which
+is half of what the landed marker needs -- the other half is that an agent
+wrote the file at all, which only the fold can say.
+
+All of it is read with ROOT as the working directory and scoped to it --
+`--relative' for the diffs, which is also what makes their paths relative
+to ROOT rather than to the top of the checkout.  A session started in a
 subdirectory of a repository is therefore annotated with its own subtree,
 not with every change in a tree it has nothing to do with."
   (let ((table (make-hash-table :test 'equal)))
@@ -4355,10 +4472,43 @@ not with every change in a tree it has nothing to do with."
             (lambda (others)
               (dolist (name (split-string others "\0" t))
                 (puthash (expand-file-name name root) 'new table))
-              (agent-river--vc-store root table)))))
+              (agent-river--vc-store root table)
+              (agent-river--vc-ahead root table)))))
       ;; No git on PATH at all.  Stored like any other answer, so the map
       ;; loses its column rather than throwing once every redraw.
       (error (agent-river--vc-store root nil)))))
+
+(defun agent-river--vc-ahead (root table)
+  "Read which of ROOT's paths this branch still has outside the main branch.
+
+Stored beside TABLE, which is already in the cache: everything here is an
+extra reading and a failure at any step leaves the column exactly as the
+diffstat left it, with `:ahead' unset, which the marker reads as \"do not
+know\" rather than as \"landed\".  Claiming a landing we could not check
+would be the one mistake worth avoiding here -- it says work is safely in
+the main branch."
+  (let ((patterns (mapcar #'car agent-river--vc-main-candidates)))
+    (condition-case nil
+        (agent-river--vc-run
+         root (append '("for-each-ref" "--format=%(refname)") patterns)
+         (lambda (refs)
+           (let ((rev (agent-river--vc-main-rev (split-string refs "\n" t))))
+             (if (not rev)
+                 (agent-river--vc-store root table nil 'none)
+               (agent-river--vc-run
+                root (list "diff" "--name-only" "--relative" "-z"
+                           (concat rev "...HEAD") "--")
+                (lambda (output)
+                  (let ((ahead (make-hash-table :test 'equal)))
+                    (dolist (name (split-string output "\0" t))
+                      (puthash (expand-file-name name root) t ahead))
+                    (agent-river--vc-store root table ahead rev)))
+                ;; A revision that resolves but cannot be diffed against --
+                ;; an empty repository, a shallow clone with no merge base.
+                ;; The column stays; only the marker goes unanswered.
+                (lambda () (agent-river--vc-store root table nil 'none))))))
+         (lambda () (agent-river--vc-store root table nil 'none)))
+      (error (agent-river--vc-store root table nil 'none)))))
 
 (defun agent-river--vc-stats (root)
   "Return ROOT's diffstat table, starting a fresh read when this one is old.
@@ -4418,15 +4568,52 @@ nothing at all to say, which the caller turns into an empty column."
                                    agent-river-map-new-marker 'agent-river-added))))))
       (and parts (mapconcat #'identity parts " ")))))
 
-(defun agent-river--vc-reading (table path column)
+(defun agent-river--vc-landed-p (root path)
+  "Return non-nil when nothing under PATH is still outside ROOT's main branch.
+
+Nil when nobody could ask -- no main branch here, or the read has not come
+back yet -- because `:ahead' unset means \"do not know\", and the one thing
+this marker must never do is say work is safely in the main branch on a
+guess.  An empty `:ahead' is the opposite: every path this branch changed
+is in there now."
+  (let ((ahead (plist-get (gethash root agent-river--vc-cache) :ahead)))
+    (and (hash-table-p ahead)
+         (let ((prefix (file-name-as-directory path))
+               (outside nil))
+           (maphash (lambda (key _value)
+                      (when (or (equal key path) (string-prefix-p prefix key))
+                        (setq outside t)))
+                    ahead)
+           (not outside)))))
+
+(defun agent-river--vc-reading (root table path column &optional writes)
   "Return PATH's diffstat for `agent-river--map-line', given TABLE.
 
 COLUMN says whether the buffer is showing the column at all -- nil when
 no root under the map is a repository, in which case no line reserves the
 width.  With it on, a path with nothing to report still returns the empty
 string rather than nil, so the column is held open and the brackets after
-it stay where they were on the line above."
-  (and column (or (agent-river--vc-column (agent-river--vc-under table path)) "")))
+it stay where they were on the line above.
+
+WRITES is how many of the touches under PATH changed it
+\(`agent-river--map-writes'), and it is what makes the landed marker mean
+anything.  Git can say a file is identical to the main branch; it cannot
+say whether that is because the work landed there or because nobody ever
+changed it, and most of what an agent touches it only read.  Marked on
+git's answer alone, the column would carry a tick down nearly every line,
+which is a view where everything is marked.
+
+The three answers are one question -- what state is the work on this line
+in -- so they are mutually exclusive and in this order: a file with
+uncommitted changes has those to show, and its earlier landings are not
+the news."
+  (and column
+       (or (agent-river--vc-column (agent-river--vc-under table path))
+           (and (> (or writes 0) 0)
+                (agent-river--vc-landed-p root path)
+                (agent-river--map-mark agent-river-map-landed-marker
+                                       'agent-river-landed))
+           "")))
 
 (defun agent-river--map-annotation (parties)
   "Return PARTIES as the bracketed reading a map line ends with, or nil.
@@ -4658,7 +4845,14 @@ nothing."
                                              (list :parties (plist-get entry :parties)))
                                            entries))
                                   nil
-                                  (agent-river--vc-reading stats root column))
+                                  (agent-river--vc-reading
+                                   root stats root column
+                                   (agent-river--map-writes
+                                    (agent-river--map-merge-parties
+                                     (mapcar (lambda (entry)
+                                               (list :parties
+                                                     (plist-get entry :parties)))
+                                             entries)))))
                                  "\n")
                          ;; A root is a place like any other line's, so RET
                          ;; zooms into it and the motions stop on it.
@@ -4676,7 +4870,10 @@ nothing."
                                     level (concat name (if dir "/" ""))
                                     (plist-get entry :parties)
                                     (plist-get entry :missing)
-                                    (agent-river--vc-reading stats path column))
+                                    (agent-river--vc-reading
+                                     root stats path column
+                                     (agent-river--map-writes
+                                      (plist-get entry :parties))))
                                    "\n")
                            'agent-river-map-name name
                            'agent-river-map-path path
@@ -4696,10 +4893,12 @@ nothing."
                                           (plist-get file :parties)
                                           nil
                                           (agent-river--vc-reading
-                                           stats
+                                           root stats
                                            (expand-file-name
                                             (plist-get file :rel) path)
-                                           column))
+                                           column
+                                           (agent-river--map-writes
+                                            (plist-get file :parties))))
                                          "\n")
                                  'agent-river-map-name name
                                  'agent-river-map-rel (plist-get file :rel)
