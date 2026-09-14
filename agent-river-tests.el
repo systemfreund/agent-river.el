@@ -686,6 +686,20 @@
                     :kind)
                    "think"))))
 
+(ert-deftest agent-river-test-a-response-of-another-shape-does-not-throw ()
+  ;; An MCP tool answers with an array of content parts, and the hook parses
+  ;; arrays as vectors.  `alist-get' threw on one, and since that happened
+  ;; while the event was still being built it cost the whole event: every
+  ;; MCP call went unfolded and was logged as `hook failed' instead.
+  (let ((payload (json-parse-string
+                  "{\"tool_name\":\"mcp__emacs__eval-elisp\",
+                    \"tool_response\":[{\"type\":\"text\",\"text\":\"ok\"}]}"
+                  :object-type 'alist :null-object nil :false-object nil)))
+    (should (equal (agent-river--detail "think" payload)
+                   "mcp__emacs__eval-elisp ✓"))
+    (should (equal (agent-river--outcome "think" payload) "✓"))
+    (should-not (agent-river--interrupted-p payload))))
+
 (ert-deftest agent-river-test-an-argument-of-another-shape-does-not-throw ()
   ;; Codex passes `command' as a vector of words.  Handing that to a
   ;; string function threw inside the hook, which cost the whole event to
@@ -710,7 +724,14 @@
           (let ((answer (with-temp-buffer (insert-file-contents out)
                                           (buffer-string))))
             (should (string-match-p "additionalContext" answer))
-            (should (string-match-p "consecutive tool failures" answer))))
+            (should (string-match-p "consecutive tool failures" answer))
+            ;; The hook event's *name*.  This used to serialize the whole
+            ;; event plist into the field, which handed Claude Code the
+            ;; package's internals where it expected one string -- and once
+            ;; the event carried a ✓ it also stopped the write to ask which
+            ;; coding system to use, in a context where nobody can answer.
+            (should (string-match-p "\"hookEventName\":\"PostToolUseFailure\""
+                                    answer))))
       (ignore-errors (delete-file in))
       (ignore-errors (delete-file out)))))
 
@@ -2243,6 +2264,133 @@ first line from a survey."
                          (buffer-substring-no-properties (line-beginning-position)
                                                          (line-end-position)))
                        line))))))
+
+(defun agent-river-test--log-lines ()
+  "Return the log lines of the HUD, newest first, without the state block."
+  (with-current-buffer (agent-river--buffer)
+    (save-excursion
+      (goto-char (or (and (markerp agent-river--block-end)
+                          (marker-position agent-river--block-end))
+                     (point-min)))
+      (let (lines)
+        (while (not (eobp))
+          (when (get-text-property (point) 'agent-river-line)
+            (push (buffer-substring-no-properties (line-beginning-position)
+                                                  (line-end-position))
+                  lines))
+          (forward-line 1))
+        (nreverse lines)))))
+
+(defmacro agent-river-test--with-calls (&rest body)
+  "Run BODY against a cleared HUD and an isolated registry."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-auto-display nil)
+         (agent-river-max-entries 100))
+     (agent-river-clear)
+     ,@body))
+
+(ert-deftest agent-river-test-a-call-ends-on-the-line-that-opened-it ()
+  (agent-river-test--with-calls
+    ;; Two lines per tool call halves how much history fits in
+    ;; `agent-river-max-entries', and the second says nothing the first did
+    ;; not except how it went.
+    (agent-river-observe '(:kind "act" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash  Run tests"
+                           :call "s1\0t1"))
+    (agent-river-observe '(:kind "think" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash ✓  250ms"
+                           :call "s1\0t1" :outcome "✓  250ms"))
+    (let ((lines (agent-river-test--log-lines)))
+      (should (= (length lines) 1))
+      ;; The timestamp is the one the call started at, not the one it ended
+      ;; at: the line answers "when did this begin", and the duration beside
+      ;; it already says how long it then took.
+      (should (string-match-p "Bash  Run tests (✓  250ms)\\'" (car lines))))))
+
+(ert-deftest agent-river-test-a-failure-still-ends-its-own-line ()
+  (agent-river-test--with-calls
+    (agent-river-observe '(:kind "act" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash  Run tests"
+                           :call "s1\0t1"))
+    (agent-river-observe '(:kind "fail" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash  13ms"
+                           :call "s1\0t1" :outcome "✗  13ms"))
+    (let ((lines (agent-river-test--log-lines)))
+      (should (= (length lines) 1))
+      (should (string-match-p "(✗  13ms)\\'" (car lines))))))
+
+(ert-deftest agent-river-test-an-outcome-with-no-line-left-takes-one ()
+  (agent-river-test--with-calls
+    ;; The line may be gone -- trimmed away, or never written because this
+    ;; Emacs started mid-run.  Folding it onto nothing would drop the
+    ;; outcome entirely, which is worse than the extra line it costs.
+    (agent-river-observe '(:kind "think" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash ✓  250ms"
+                           :call "s1\0gone" :outcome "✓  250ms"))
+    (let ((lines (agent-river-test--log-lines)))
+      (should (= (length lines) 1))
+      (should (string-match-p "Bash ✓  250ms\\'" (car lines))))))
+
+(ert-deftest agent-river-test-a-host-naming-no-call-still-logs-both ()
+  (agent-river-test--with-calls
+    ;; Codex and Gemini CLI may name no call at all.  Without an id there is
+    ;; nothing to pair on, and guessing by tool name would fold two parallel
+    ;; calls of one tool into each other.
+    (agent-river-observe '(:kind "act" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash  Run tests"))
+    (agent-river-observe '(:kind "think" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash ✓  250ms"
+                           :outcome "✓  250ms"))
+    (should (= (length (agent-river-test--log-lines)) 2))))
+
+(ert-deftest agent-river-test-parallel-calls-end-on-their-own-lines ()
+  (agent-river-test--with-calls
+    ;; The case the id exists for: two calls of one tool in flight at once,
+    ;; where nearness in the buffer says nothing about which is which.
+    (agent-river-observe '(:kind "act" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash  first"
+                           :call "s1\0t1"))
+    (agent-river-observe '(:kind "act" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash  second"
+                           :call "s1\0t2"))
+    (agent-river-observe '(:kind "think" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash ✓  9ms"
+                           :call "s1\0t1" :outcome "✓  9ms"))
+    (let ((lines (agent-river-test--log-lines)))
+      (should (= (length lines) 2))
+      ;; Newest first, so the still-open second call is above the first.
+      (should (string-match-p "Bash  second\\'" (nth 0 lines)))
+      (should (string-match-p "Bash  first (✓  9ms)\\'" (nth 1 lines))))))
+
+(ert-deftest agent-river-test-one-call-is-answered-once ()
+  (agent-river-test--with-calls
+    ;; A repeated terminal status would otherwise write a second verdict
+    ;; onto a line that already carries its own.
+    (agent-river-observe '(:kind "act" :session "s1" :label "alpha"
+                           :tool "Bash" :detail "Bash  Run tests"
+                           :call "s1\0t1"))
+    (dotimes (_ 2)
+      (agent-river-observe '(:kind "think" :session "s1" :label "alpha"
+                             :tool "Bash" :detail "Bash ✓  250ms"
+                             :call "s1\0t1" :outcome "✓  250ms")))
+    (let ((lines (agent-river-test--log-lines)))
+      (should (= (length lines) 2))
+      (should (string-match-p "Run tests (✓  250ms)\\'" (nth 1 lines))))))
+
+(ert-deftest agent-river-test-the-call-id-carries-its-session ()
+  ;; `tool_use_id' is unique everywhere on Claude Code and only within its
+  ;; session on ACP, so the session is what makes the pairing safe on both.
+  (let ((event (agent-river--event
+                "act" (agent-river-test--payload
+                       "{\"session_id\":\"s1\",\"tool_name\":\"Bash\",
+                         \"tool_use_id\":\"toolu_1\"}"))))
+    (should (equal (plist-get event :call) "s1\0toolu_1")))
+  ;; A host that names none pairs on nothing rather than on a guess.
+  (should-not (plist-get (agent-river--event
+                          "act" (agent-river-test--payload
+                                 "{\"session_id\":\"s1\",\"tool_name\":\"Bash\"}"))
+                         :call)))
 
 
 ;;; Handing the state out as Markdown

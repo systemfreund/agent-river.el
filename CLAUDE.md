@@ -507,6 +507,21 @@ together:
   (`agent-river--block-end`), so nothing has to be tailed and trimming takes from
   the bottom. The block is deliberately *not* `header-line-format` (single-line,
   can't show two sessions); the mode sets that to nil explicitly.
+- **One tool call is one line.** The `act` line carries the call's id as
+  `agent-river-call`, and its outcome is written onto that line rather than
+  taking one of its own (`agent-river--log-outcome`) — so the timestamp stays
+  the one the call *began* at, and `agent-river-max-entries` holds twice the
+  history. The id is `SESSION\0CALL-ID` (`agent-river--event`), paired with the
+  session because Claude Code's `tool_use_id` is unique everywhere and ACP's
+  only within its session. Three things this owes: it **falls back to a line of
+  its own** whenever the opening line is gone (trimmed, or never written because
+  Emacs started mid-run) or the host names no call at all, since a tidier log
+  that silently drops outcomes is the wrong trade; it **clears the id** after
+  answering, so a repeated terminal status cannot append a second verdict; and
+  the **face comes from the closing kind**, so a `✗` still reads as a failure
+  against the `act` colouring it lands on. Pairing by nearness or tool name
+  instead would fold two parallel calls of one tool into each other — which is
+  exactly the case the id exists for.
 - **The refresh timer** (`agent-river--ensure-timer`) redraws only the block, runs
   only while someone is mid-task, retires itself on the first tick that finds no
   one working, and cancels itself if a redraw throws.

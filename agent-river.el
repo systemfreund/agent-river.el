@@ -936,6 +936,19 @@ is taken at its word."
                (and (integerp code) (/= code 0))))
          t)))
 
+(defun agent-river--interrupted-p (payload)
+  "Non-nil when PAYLOAD's tool response says the user stopped the call.
+
+Guarded with `consp' like `agent-river--failed-p', and for a reason that
+had already bitten: a tool response is not always an alist.  An MCP tool
+answers with an *array* of content parts, and the hook parses arrays as
+vectors, so `alist-get' threw on every one of them -- which cost the
+whole event, leaving each MCP call unfolded and logged as `hook failed'
+instead of counted."
+  (let ((response (alist-get 'tool_response payload)))
+    (and (consp response)
+         (eq t (alist-get 'interrupted response)))))
+
 (defun agent-river--detail (kind payload)
   "Return the line KIND should show for PAYLOAD."
   (let* ((tool (or (alist-get 'tool_name payload) "tool"))
@@ -953,12 +966,22 @@ is taken at its word."
      ;; error face.
      ((equal kind "fail") (concat tool took))
      ((equal kind "think")
-      (concat tool
-              (if (eq t (alist-get 'interrupted (alist-get 'tool_response payload)))
-                  " ✗" " ✓")
-              took))
+      (concat tool (if (agent-river--interrupted-p payload) " ✗" " ✓") took))
      (t (let ((arg (agent-river--salient input (alist-get 'cwd payload))))
           (concat tool (if (string-empty-p arg) "" (concat "  " arg))))))))
+
+(defun agent-river--outcome (kind payload)
+  "Return how a call of KIND ended, for appending to the line that began it.
+Nil for a kind that does not end one.
+
+Only the verdict and the duration, without the tool name `agent-river--detail'
+repeats: this is written onto the `act' line, which already names the tool."
+  (let* ((ms (alist-get 'duration_ms payload))
+         (took (if ms (concat "  " (agent-river--dur ms)) "")))
+    (cond
+     ((equal kind "fail") (concat "✗" took))
+     ((equal kind "think")
+      (concat (if (agent-river--interrupted-p payload) "✗" "✓") took)))))
 
 (defun agent-river--event (kind payload)
   "Turn hook PAYLOAD into an event plist of KIND.
@@ -996,6 +1019,16 @@ what keeps that from folding as a success."
           ;; again.  Its directory alone is folded, and only for the keys the
           ;; cwd cannot place -- see `agent-river--anchor'.
           :path file
+          ;; Which tool call this is, so the line a call opened can be
+          ;; completed in place rather than answered by a second line.  Paired
+          ;; with the session because the hosts do not agree on how wide a
+          ;; call id is unique: Claude Code's `tool_use_id' is unique
+          ;; everywhere, ACP's is unique only within its session.
+          :call (let ((id (alist-get 'tool_use_id payload)))
+                  (when (and id (not (string-empty-p (format "%s" id))))
+                    (format "%s\0%s"
+                            (or (alist-get 'session_id payload) "unknown") id)))
+          :outcome (agent-river--outcome kind payload)
           :ms (alist-get 'duration_ms payload)
           :text (when (equal kind "prompt")
                   (agent-river--clip
@@ -1213,9 +1246,12 @@ Deliberately not a slot on `agent-river-state', for the same reason
 `agent-river--thought-runs' is not one: nothing folds it, and a reload
 would otherwise demand `agent-river-reset'.")
 
-(defun agent-river--shell-payload (call session cwd &optional ms)
+(defun agent-river--shell-payload (call session cwd &optional ms id)
   "Return tool CALL of SESSION in the shape the hooks report, given CWD.
-MS is how long the call took, where that is known.
+MS is how long the call took, where that is known.  ID is the call's own
+identifier, reported as `tool_use_id' because that is what the hooks name
+it -- the point of this shape is that `agent-river--event' need not know
+which side it came from.
 
 Same shape on purpose.  `agent-river--event' is the one place that
 resolves a host's dialect, and a second event builder here would be a
@@ -1233,7 +1269,8 @@ description when the call carries no arguments worth showing."
               (cwd . ,cwd)
               (tool_name . ,(or (alist-get :kind call) "tool"))
               (tool_input . ,input))
-            (when ms `((duration_ms . ,ms))))))
+            (when ms `((duration_ms . ,ms)))
+            (when id `((tool_use_id . ,id))))))
 
 (defun agent-river--shell-events (event session cwd)
   "Return the events agent-shell's EVENT amounts to for SESSION, given CWD.
@@ -1256,7 +1293,8 @@ over -- which is exactly what `PreToolUse' and `PostToolUse' do."
               "idle" `((session_id . ,session) (cwd . ,cwd)))))
       ('tool-call-update
        (let* ((call (alist-get :tool-call data))
-              (key (format "%s\0%s" session (alist-get :tool-call-id data)))
+              (id (alist-get :tool-call-id data))
+              (key (format "%s\0%s" session id))
               (started (gethash key agent-river--tool-calls))
               (ended (pcase (alist-get :status call)
                        ("completed" "think")
@@ -1266,7 +1304,7 @@ over -- which is exactly what `PreToolUse' and `PostToolUse' do."
            (setq started (current-time))
            (puthash key started agent-river--tool-calls)
            (push (agent-river--event
-                  "act" (agent-river--shell-payload call session cwd))
+                  "act" (agent-river--shell-payload call session cwd nil id))
                  events))
          (when ended
            (remhash key agent-river--tool-calls)
@@ -1275,7 +1313,8 @@ over -- which is exactly what `PreToolUse' and `PostToolUse' do."
                          call session cwd
                          (round (* 1000 (float-time
                                          (time-subtract (current-time)
-                                                        started))))))
+                                                        started))))
+                         id))
                  events))
          (nreverse events))))))
 
@@ -1462,9 +1501,17 @@ often the agent had to be told something is itself part of the state."
        (agent-river-log "fail" (format "fold failed (%s) -- try M-x agent-river-reset"
                                        (error-message-string err)))))
     (agent-river--run-observers state event)
-    (let ((label (agent-river-state-label state)))
-      (unless (string-empty-p detail)
-        (agent-river-log kind detail label))
+    (let ((label (agent-river-state-label state))
+          (call (plist-get event :call)))
+      ;; A call that ends is written onto the line that began it, so one tool
+      ;; call reads as one line and the log holds twice as much history at the
+      ;; same `agent-river-max-entries'.  Where that line is gone -- trimmed,
+      ;; or never written because this Emacs started mid-run -- the outcome
+      ;; falls back to a line of its own rather than vanishing.
+      (cond
+       ((agent-river--log-outcome call (plist-get event :outcome) kind))
+       ((not (string-empty-p detail))
+        (agent-river-log kind detail label call)))
       (agent-river--ensure-timer)
       ;; Only ask for an observation on an event that can actually deliver
       ;; one.  Computing it regardless meant a fail streak still standing when
@@ -1518,9 +1565,15 @@ IN-FILE is deleted afterwards, whatever happens."
                    (name (alist-get 'hook_event_name payload)))
               (when (and signal name)
                 (with-temp-file out-file
+                  ;; Explicit, because the answer is JSON for another process
+                  ;; and the locale this runs under is not ours to assume.  A
+                  ;; signal naming a file with a non-ASCII character used to
+                  ;; stop here asking which coding system to use, which in a
+                  ;; hook is an answer nobody is there to give.
+                  (set-buffer-file-coding-system 'utf-8-unix)
                   (insert (json-serialize
                            `((hookSpecificOutput
-                              . ((hookEventName . ,event)
+                              . ((hookEventName . ,name)
                                  (additionalContext . ,signal)))))))))
             t)
         ;; Never fail a tool call over the HUD -- but say so, rather than
@@ -2230,8 +2283,10 @@ agent it would be a constant, and a constant column is noise."
        ;; supersonic.el and supersonic.el<2> both cut down to "superson".
        (t (concat (substring base 0 (max 0 (- w (length suffix)))) suffix))))))
 
-(defun agent-river--render (kind detail &optional label)
-  "Return the display line for DETAIL under event KIND, tagged with LABEL."
+(defun agent-river--render (kind detail &optional label call)
+  "Return the display line for DETAIL under event KIND, tagged with LABEL.
+CALL is the tool call the line opens, which `agent-river--log-outcome'
+later finds it by."
   (let* ((spec (or (assoc kind agent-river-kinds)
                    (assoc "act" agent-river-kinds)))
          (face (nth 2 spec))
@@ -2254,7 +2309,8 @@ agent it would be a constant, and a constant column is noise."
                 ;; matched by a regexp over the rendered text, so changing
                 ;; how a line looks cannot quietly change what `n' stops on.
                 'agent-river-line 'event
-                'agent-river-kind kind)))
+                'agent-river-kind kind
+                'agent-river-call call)))
 
 (defvar-local agent-river--block-end nil
   "Marker just past the state block, or nil while none is drawn.")
@@ -2318,9 +2374,55 @@ latest event are both at the top, and stay put as the log grows."
       (set-window-point window (with-current-buffer buffer (point-min)))
       (set-window-start window (with-current-buffer buffer (point-min))))))
 
+(defun agent-river--log-outcome (call outcome kind)
+  "Write OUTCOME onto the logged line that opened tool CALL, if it is still here.
+Return non-nil when one was found and amended.
+
+Nil when there is none -- the line may have been trimmed away, the host
+may name no call, or the run may have started before this Emacs did --
+and the caller then logs an ordinary line, so an outcome is never
+silently dropped on the way to being tidier.
+
+KIND picks the face, so a failure still reads as one against the `act'
+colouring of the line it is written onto.  The call is cleared from the
+line afterwards: a second outcome for one call would otherwise append a
+second verdict to a line that already carries its own."
+  (let ((buffer (and call outcome (not (string-empty-p outcome))
+                     (get-buffer agent-river-buffer-name))))
+    (when buffer
+      (with-current-buffer buffer
+        (save-excursion
+          ;; From the end of the block: everything above it is the state, and
+          ;; only log lines ever carry a call.
+          (goto-char (or (and (markerp agent-river--block-end)
+                              (marker-position agent-river--block-end))
+                         (point-min)))
+          (let (found)
+            (while (and (not found) (not (eobp)))
+              (if (equal call (get-text-property (point) 'agent-river-call))
+                  (setq found t)
+                (forward-line 1)))
+            (when found
+              (let* ((inhibit-read-only t)
+                     (face (nth 2 (or (assoc kind agent-river-kinds)
+                                      (assoc "think" agent-river-kinds))))
+                     ;; The line's own properties, so the appended text wraps
+                     ;; and is walked over exactly as the rest of it is.
+                     (props (plist-put (copy-sequence (text-properties-at (point)))
+                                       'face face))
+                     (start (line-beginning-position))
+                     (end (line-end-position)))
+                (goto-char end)
+                (insert (apply #'propertize (concat " (" outcome ")") props))
+                (put-text-property start (line-end-position)
+                                   'agent-river-call nil)
+                t))))))))
+
 ;;;###autoload
-(defun agent-river-log (kind detail &optional label)
+(defun agent-river-log (kind detail &optional label call)
   "Append DETAIL to the HUD as an event of KIND, tagged with session LABEL.
+CALL names the tool call this line opens, so its outcome can later be
+written onto this line instead of taking one of its own.
 This is the view half, usable on its own; `agent-river-observe' is the
 half that also folds."
   (let* ((buffer (agent-river--buffer))
@@ -2343,7 +2445,7 @@ half that also folds."
         (save-excursion
           (agent-river--erase-block)
           (goto-char (point-min))
-          (insert (agent-river--render kind detail label) "\n")
+          (insert (agent-river--render kind detail label call) "\n")
           (agent-river--trim)
           (agent-river--insert-block))))
     (when (and agent-river-auto-display (not shown))
