@@ -2900,6 +2900,23 @@ half of what it shows is what is on disk and untouched."
     ;; heading's and the column stopped being one.
     (should (= (string-match-p "\\[" heading) (string-match-p "\\[" item)))))
 
+(ert-deftest agent-river-test-the-brackets-name-parties-not-weights ()
+  ;; One fact, one encoding.  The weight is the shading on the name, and
+  ;; printing it in the brackets too gave a reader two readings of it to
+  ;; reconcile while the digits crowded out the names.
+  (let ((line (agent-river--map-line 3 "c.el" '((:party "alpha" :weight 9)))))
+    (should (string-match-p "\\[alpha\\]" line))
+    (should-not (string-match-p "[0-9]" line)))
+  ;; The position marker stays: it belongs to a party, not to the weight.
+  (should (string-match-p
+           "\\[alpha▸\\]"
+           (agent-river--map-line 3 "c.el" '((:party "alpha" :weight 9 :current t)))))
+  ;; And several parties still read as several.
+  (should (string-match-p
+           "\\[alpha beta\\]"
+           (agent-river--map-line 3 "c.el" '((:party "alpha" :weight 9)
+                                             (:party "beta" :weight 2))))))
+
 (ert-deftest agent-river-test-the-map-degrades-without-tree-sitter ()
   ;; The mode ships with Emacs 31, the grammars do not.  Without them the
   ;; same Markdown is shown unfontified rather than the map failing at the

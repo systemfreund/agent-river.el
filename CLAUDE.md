@@ -424,9 +424,13 @@ Three things about the map are load-bearing:
 Encoding discipline, since there are three facts on a line: weight is shading
 (the same `agent-river-heat-levels` faces), party is text, contention is a
 marker. A fourth colour would leave a reader unable to say which fact any
-given colour meant. The position marker is repeated *inside* the brackets
-against the party it belongs to — in the left-hand column it is scannable but
-anonymous, and "where is this agent now" is a question about a party.
+given colour meant, and one fact must not take two encodings either — the
+brackets used to read `[alpha:4]`, which gave the weight a second rendering
+nobody could reconcile against the first and pushed the names, which is what
+the brackets are for, into the margin. The position marker is repeated
+*inside* the brackets against the party it belongs to — in the left-hand
+column it is scannable but anonymous, and "where is this agent now" is a
+question about a party.
 
 The buffer is Markdown, rendered by `markdown-ts-view-mode` — the read-only
 variant, which already has `special-mode` among its parents, and a view of a

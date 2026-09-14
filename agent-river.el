@@ -3499,6 +3499,12 @@ the underscores eaten, which is a filename the view would be lying about."
 (defun agent-river--map-annotation (parties)
   "Return PARTIES as the bracketed reading a map line ends with, or nil.
 
+Who, not how much.  The weight is already the shading on the name
+\(`agent-river--map-line'), and printing it here as well made the one fact
+on the line that has two encodings -- a reader comparing the number
+against the colour learns nothing the colour did not already say, and the
+digits crowded out the names, which are what the brackets are for.
+
 The marker is repeated inside the brackets, against the party it belongs
 to.  In the left-hand column it is scannable but anonymous -- on a line
 three agents share it says only that one of them is here -- and \"where is
@@ -3509,10 +3515,6 @@ this agent now\" is a question about a party rather than about a line."
      (mapconcat (lambda (party)
                   (concat (agent-river--map-mark (plist-get party :party)
                                                  'agent-river-session)
-                          ;; Never zero: a weight below one still earned a
-                          ;; line, and `[alpha:0]' would read as a party
-                          ;; that is listed for having done nothing.
-                          (format ":%d" (max 1 (round (plist-get party :weight))))
                           (if (plist-get party :current)
                               agent-river-map-here-marker "")))
                 parties " ")
