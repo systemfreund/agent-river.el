@@ -55,9 +55,11 @@
   "Name of the buffer the agent's attention is logged to."
   :type 'string)
 
-(defcustom agent-river-max-entries 200
-  "How many lines to keep.  Older lines are dropped from the top.
-Zero or less keeps everything, which will grow without bound."
+(defcustom agent-river-max-entries 100
+  "How many log lines to keep.
+The buffer is newest-first, so the oldest lines sit at the bottom and are
+dropped from there.  Zero or less keeps everything, which will grow
+without bound."
   :type 'integer)
 
 (defcustom agent-river-window-width 56
