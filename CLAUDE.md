@@ -470,6 +470,18 @@ Four things about the map are load-bearing:
   sends no further events, so `agent-river--shell-died` marks the map dirty
   (`agent-river--map-invalidate`) and lets the timer redraw past the dying
   buffer; without that the map goes on naming it until someone presses `g`.
+- **The header is a name and a count, not a legend**
+  (`agent-river--map-header`). It carried the frame the numbers were read
+  from and, once the diffstat arrived, that the diffstat was read from HEAD
+  instead — two facts that are true, do not change, and were being redrawn
+  every few seconds onto a line that is read once. A legend belongs where the
+  thing is decided (`agent-river-map-scope`, `agent-river--map-stats`), not
+  in the view. What stays is what *moves*: which tree is being shown, and how
+  many agents are in it. That count is of agents that **still exist**
+  (`agent-river--gone-parties`), not of names on the map — a name outlives
+  its session on purpose, fading through `agent-river-map-party-floor`
+  because the file was still touched, so counting names would report an
+  audience that has left as though it were still there.
 - **A file that is gone is struck through, not dropped**
   (`agent-river-gone`, set on `:missing`). Removing them was tried first, in
   two shapes, and both lost something. Dropping a deletion outright throws
@@ -556,10 +568,11 @@ Four things about the map are load-bearing:
   them (`agent-river-map-new-marker`), since a file an agent has just written
   is exactly the line the column would otherwise be silent about, and it is
   read `--relative` so a session started inside a subdirectory is annotated
-  with its own subtree rather than the whole checkout. And it **says in the
-  header that it has no frame** — every other number on a line comes from the
-  task or session frame, this one comes from HEAD, and after several prompts
-  `+10 -6` would otherwise be taken for this task's work.
+  with its own subtree rather than the whole checkout. It **has no frame** —
+  every other number on a line comes from the task or session frame, this one
+  comes from HEAD, so after several prompts `+10 -6` is not this task's work.
+  The header used to say so and no longer does; see the header below for why
+  a caption is the wrong place to keep that.
 
 Encoding discipline, since there are five facts on a line: weight is shading
 (the same `agent-river-heat-levels` faces), party is text, contention is a

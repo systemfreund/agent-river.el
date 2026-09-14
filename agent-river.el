@@ -4531,37 +4531,40 @@ entry is annotated at all -- and a toggle by hand wins from then on."
                      agent-river--map-folds)))
     (if cell (cdr cell) (and (plist-get entry :files) t))))
 
-(defun agent-river--map-header (root entries &optional roots vc)
+(defun agent-river--map-header (root entries &optional roots)
   "Return the map's own heading for ROOT, given its ENTRIES.
 
-Says which frame the numbers below come from.  The map defaults to the
-session frame and the dired heat to the task frame, so a reading lifted
-from one and compared against the other is a mistake waiting to be made
-unless the line says which is which.
+The name of what is being shown, and how many agents are in it.  It used
+to caption the view as well -- which frame the numbers came from, and
+that the diffstat came from HEAD instead of a frame -- and that was a
+legend for a listing, carried on every redraw by a line that is read once.
+Both facts still hold and are documented where they are decided
+\(`agent-river-map-scope', `agent-river--map-stats'); the heading is not
+where a reader goes to look them up.
 
-VC says the diffstat column is being shown, and it is named here for the
-same reason -- with the opposite answer.  Every other number on a line is
-read from a frame; the diffstat is read from HEAD and has no frame at
-all, so on a session that has run through several prompts `+10 -6' would
-otherwise be taken for this task's work.
+The count is of agents that still exist, not of names on the map.  A name
+outlives its session on purpose -- it fades through
+`agent-river-map-party-floor' rather than vanishing, because the file was
+still touched -- so counting names would report an audience that has left
+as though it were still there, which is the one thing this number is for.
 
 ROOT is nil in the overview, which spans ROOTS trees and has no one path
 to be named after.  Titling it with any of them -- the most recent, say --
 is what this replaced: the heading then read as though that tree were the
 project and the others were somewhere inside it."
-  (let ((parties (agent-river--map-merge-parties
-                  (mapcar (lambda (entry)
-                            (list :parties (plist-get entry :parties)))
-                          entries))))
+  (let* ((gone (agent-river--gone-parties))
+         (parties (seq-remove
+                   (lambda (party) (gethash (plist-get party :party) gone))
+                   (agent-river--map-merge-parties
+                    (mapcar (lambda (entry)
+                              (list :parties (plist-get entry :parties)))
+                            entries)))))
     (concat (agent-river--map-marker 1)
             (agent-river--map-mark (if root
                                        (agent-river--map-name
                                         (abbreviate-file-name root))
                                      (format "%d roots" (or roots 0)))
                                    'agent-river-prompt)
-            (format "  ·  %s frame" (if (eq agent-river-map-scope 'session)
-                                        "session" "task"))
-            (if vc "  ·  diff vs HEAD" "")
             (if parties
                 (format "  ·  %d agent%s" (length parties)
                         (if (= (length parties) 1) "" "s"))
@@ -4638,9 +4641,9 @@ nothing."
           (insert (if split
                       (agent-river--map-header
                        nil (apply #'append (mapcar #'cadr sections))
-                       (length sections) column)
+                       (length sections))
                     (agent-river--map-header (car (car sections))
-                                             (nth 1 (car sections)) nil column))
+                                             (nth 1 (car sections))))
                   "\n")
           (dolist (section sections)
             (let ((root (car section))

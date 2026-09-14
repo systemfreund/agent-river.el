@@ -3696,12 +3696,32 @@ is how a test asks what the view looks like once the work has moved on."
     (should (gethash "/tmp" agent-river--vc-cache))
     (should-not (plist-get (gethash "/tmp" agent-river--vc-cache) :proc))))
 
-(ert-deftest agent-river-test-the-map-header-says-the-diffstat-has-no-frame ()
-  ;; Every other number on a line is read from a frame and the header says
-  ;; which; the diffstat is read from HEAD and has none, so a long session
-  ;; would otherwise have `+10 -6' taken for this task's work.
-  (should (string-match-p "vs HEAD" (agent-river--map-header "/repo" nil nil t)))
-  (should-not (string-match-p "HEAD" (agent-river--map-header "/repo" nil nil nil))))
+(ert-deftest agent-river-test-the-map-header-is-a-name-and-a-count ()
+  ;; It used to caption the view as well -- which frame the numbers came
+  ;; from, and that the diffstat came from HEAD rather than a frame.  Both
+  ;; are still true and are documented where they are decided; a legend
+  ;; redrawn every few seconds on a line that is read once is not where a
+  ;; reader looks them up.
+  (let ((header (agent-river--map-header "/repo" nil)))
+    (should (string-match-p "/repo" header))
+    (should-not (string-match-p "frame" header))
+    (should-not (string-match-p "HEAD" header))))
+
+(ert-deftest agent-river-test-the-map-header-counts-the-agents-that-are-left ()
+  ;; A name outlives its session on purpose: it fades through the floor
+  ;; rather than vanishing, because the file was still touched.  Counting
+  ;; names would then report an audience that has left as though it were
+  ;; still there, which is the one thing this number is for.
+  (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
+    (agent-river-test--with-session state
+      (agent-river--ensure-shell-teardown "s1")
+      (let ((entries (list (list :parties
+                                 (list (list :party (agent-river--party-label state)
+                                             :weight 4))))))
+        (should (string-match-p "1 agent\\'" (agent-river--map-header "/repo" entries)))
+        (kill-buffer (agent-river--shell-buffer "s1"))
+        (cancel-function-timers #'agent-river--redraw-block)
+        (should (string-match-p "quiet\\'" (agent-river--map-header "/repo" entries)))))))
 
 ;;; Moving about the map
 ;;
@@ -3858,7 +3878,7 @@ first."
       ;; used to be -- read as though that one were the project and the rest
       ;; were somewhere inside it.  There is no reference project: the state
       ;; spans whatever directories the sessions were started in.
-      (should (string-match-p "\\`# 2 roots  ·  session frame" text))
+      (should (string-match-p "\\`# 2 roots  ·  " text))
       ;; Each tree heads its own section, one level under the header.
       (dolist (root (list root1 root2))
         (should (string-match-p (concat "^## `" (regexp-quote (abbreviate-file-name root)))
