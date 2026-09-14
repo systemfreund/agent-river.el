@@ -979,33 +979,64 @@ stubbed here so the tests do not depend on agent-shell being installed."
     (let ((line (agent-river--panel (gethash "s1" agent-river-registry))))
       (should-not (get-text-property 1 'agent-river-session line)))))
 
+(defun agent-river-test--ago (seconds)
+  "Return the time SECONDS ago, which is a marker\='s phase input."
+  (time-subtract (current-time) seconds))
+
 (ert-deftest agent-river-test-the-marker-cycles-through-its-frames ()
-  (let ((agent-river-spinner-frames '("a" "b" "c")))
-    (let ((agent-river--spinner-frame 0))
-      (should (equal (agent-river--spinner-glyph) "a")))
-    (let ((agent-river--spinner-frame 1))
-      (should (equal (agent-river--spinner-glyph) "b")))
-    ;; The counter climbs without bound -- it is never reset, so that every
-    ;; session line is on the same frame -- and so it has to wrap.
-    (let ((agent-river--spinner-frame 3))
-      (should (equal (agent-river--spinner-glyph) "a")))
-    (let ((agent-river--spinner-frame 1000))
-      (should (equal (agent-river--spinner-glyph) "b")))))
+  (let ((agent-river-spinner-frames '("a" "b" "c"))
+        (agent-river-spinner-interval 0.1))
+    ;; Ages taken mid-frame rather than on a boundary: the age is measured
+    ;; when the glyph is asked for, so an age of exactly one frame lands on
+    ;; whichever side of the edge the clock happens to be.
+    (should (equal (agent-river--spinner-glyph (agent-river-test--ago 0.05)) "a"))
+    (should (equal (agent-river--spinner-glyph (agent-river-test--ago 0.15)) "b"))
+    ;; The phase is an age rather than a counter, so it climbs without bound
+    ;; and has to wrap.
+    (should (equal (agent-river--spinner-glyph (agent-river-test--ago 0.35)) "a"))
+    (should (equal (agent-river--spinner-glyph (agent-river-test--ago 100.05)) "b"))
+    ;; An interval that could not divide anything leaves the bare star rather
+    ;; than dividing by it.
+    (let ((agent-river-spinner-interval 0))
+      (should-not (agent-river--spinner-glyph (agent-river-test--ago 1))))))
+
+(ert-deftest agent-river-test-two-turns-spin-out-of-phase ()
+  ;; The markers used to share one counter, so every session showed the same
+  ;; frame whatever it was doing -- a row of them moving as one, which reads
+  ;; as a single animation about the block.  Two agents prompted a moment
+  ;; apart are a moment apart, and the marker is the only thing that can say
+  ;; so.
+  (let ((agent-river-spinner-frames '("a" "b" "c" "d"))
+        (agent-river-spinner-interval 0.1))
+    (should-not (equal (agent-river--spinner-glyph (agent-river-test--ago 0.05))
+                       (agent-river--spinner-glyph (agent-river-test--ago 0.25))))))
+
+(ert-deftest agent-river-test-the-phase-is-the-turn-not-the-session ()
+  ;; The turn is what the marker is about: it appears when a prompt arrives
+  ;; and stops when the turn ends, so its phase starts where the work did.
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "prompt" :text "do the thing"))
+    (should (equal (agent-river--spinning-since state)
+                   (agent-river-state-task-started state)))
+    ;; A session folded without a prompt -- a hook stream joined mid-turn --
+    ;; still has to spin, so it falls back to its own clock.
+    (agent-river-test--with-session fresh
+      (should (equal (agent-river--spinning-since fresh)
+                     (agent-river-state-started fresh))))))
 
 (ert-deftest agent-river-test-no-frames-means-no-animation ()
   ;; The off switch, and the answer for a font without the glyphs: the bare
   ;; star, not a star with an empty display property over it.
   (agent-river-test--with-session state
     (let ((agent-river-spinner-frames nil))
-      (should-not (agent-river--spinner-glyph))
+      (should-not (agent-river--spinner-glyph (agent-river-test--ago 0)))
       (should (equal (agent-river--star state) "* "))
       (should-not (get-text-property 0 'agent-river-spinner
                                      (agent-river--star state))))))
 
 (ert-deftest agent-river-test-only-a-running-turn-spins ()
   (agent-river-test--with-session state
-    (let ((agent-river-spinner-frames '("✳"))
-          (agent-river--spinner-frame 0))
+    (let ((agent-river-spinner-frames '("✳")))
       (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"))
       (let ((star (agent-river--star state)))
         (should (get-text-property 0 'agent-river-spinner star))
@@ -1025,8 +1056,7 @@ stubbed here so the tests do not depend on agent-shell being installed."
   ;; heading while it spins.  Animating the character itself would make the
   ;; block stop being a document exactly when an agent started working.
   (agent-river-test--with-session state
-    (let ((agent-river-spinner-frames '("✽"))
-          (agent-river--spinner-frame 0))
+    (let ((agent-river-spinner-frames '("✽")))
       (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"))
       (let ((line (substring-no-properties (agent-river--panel state))))
         (should (string-prefix-p "* " line))
@@ -1036,15 +1066,38 @@ stubbed here so the tests do not depend on agent-shell being installed."
   ;; Clearing is part of stopping.  The last frame is a display property, so
   ;; a timer that only cancelled itself would leave every finished session
   ;; showing whichever glyph it stopped on.
+  (let ((agent-river-spinner-frames '("✳"))
+        (agent-river-spinner-interval 0.1))
+    (with-temp-buffer
+      (insert (propertize "*" 'agent-river-spinner (agent-river-test--ago 0)
+                          'display "✽")
+              " alpha\n")
+      (setq agent-river--block-end (copy-marker (point) nil))
+      ;; The mark carries the phase, so the painter needs nothing else to
+      ;; know what this star should be showing.
+      (agent-river--spinner-paint (current-buffer))
+      (should (equal (get-text-property (point-min) 'display) "✳"))
+      (agent-river--spinner-paint (current-buffer) t)
+      (should-not (get-text-property (point-min) 'display))
+      ;; And the text underneath was never what changed.
+      (should (equal (char-after (point-min)) ?*)))))
+
+(ert-deftest agent-river-test-the-animation-stops-when-the-marks-do ()
+  ;; The gate the animation runs on.  It used to ask the registry on every
+  ;; tick, six times a second, which for an agent-shell session means
+  ;; walking every buffer in Emacs -- and the panel had already answered the
+  ;; same question when it decided which stars to mark.
   (with-temp-buffer
-    (insert (propertize "*" 'agent-river-spinner t 'display "✽") " alpha\n")
+    (insert "* alpha\n")
     (setq agent-river--block-end (copy-marker (point) nil))
-    (agent-river--spinner-paint (current-buffer) "✳")
-    (should (equal (get-text-property (point-min) 'display) "✳"))
-    (agent-river--spinner-paint (current-buffer) nil)
-    (should-not (get-text-property (point-min) 'display))
-    ;; And the text underneath was never what changed.
-    (should (equal (char-after (point-min)) ?*))))
+    (should-not (agent-river--spinning-p (current-buffer)))
+    (goto-char (point-min))
+    (put-text-property (point-min) (1+ (point-min))
+                       'agent-river-spinner (agent-river-test--ago 0))
+    (should (agent-river--spinning-p (current-buffer)))
+    ;; A buffer that is gone is not spinning either, which is what stops the
+    ;; timer when the HUD is killed mid-turn.
+    (should-not (agent-river--spinning-p nil))))
 
 (ert-deftest agent-river-test-a-dying-shell-drops-its-line-from-the-block ()
   (let ((agent-river-registry (make-hash-table :test 'equal))

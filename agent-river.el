@@ -129,7 +129,11 @@ it spins."
 Separate from `agent-river-refresh-interval' because the two do different
 amounts of work: a frame moves one text property, a refresh rebuilds the
 whole block, and a block rebuilt eight times a second would fight whoever
-is reading it."
+is reading it.
+
+It is also the phase's unit: a marker's frame is how long its own turn has
+been running divided by this, so changing it re-times the animation
+without anything having to be restarted."
   :type 'number)
 
 (defcustom agent-river-phase-window 8
@@ -2151,18 +2155,32 @@ simply the head of this list.  Empty while nothing has been touched."
                                  shown " · ")
                       (if (> (length files) limit) " …" "")))))))
 
-(defvar agent-river--spinner-frame 0
-  "Which of `agent-river-spinner-frames' is showing.
-Counts up without bound and is taken modulo the frame list, so every
-session line spins in step -- several markers out of phase would read as
-though they meant different things.")
+(defun agent-river--spinning-since (state)
+  "Return when STATE's turn began, which is the phase its marker spins on.
+The task's own clock, falling back to the session's where no prompt has
+been seen -- never a clock of the animation's, so nothing has to be kept
+in step with anything and a redraw cannot jog the marker."
+  (or (agent-river-state-task-started state)
+      (agent-river-state-started state)))
 
-(defun agent-river--spinner-glyph ()
-  "Return the glyph the session marker is showing, or nil for none.
+(defun agent-river--spinner-glyph (since)
+  "Return the frame a marker whose turn began at SINCE is showing.
+
+The phase is that session's own, so two agents given their prompts at
+different moments spin out of step -- which is what they are.  A single
+counter for the whole block put every marker on the same frame whatever
+each session was doing, and a row of markers moving as one reads as one
+animation about the block rather than as one apiece.
+
+Derived from the clock rather than advanced by the timer, so the timer
+below has no state to keep and a redraw mid-turn cannot reset the phase.
+
 Nil when the animation is off, which is what leaves the bare star."
-  (let ((frames agent-river-spinner-frames))
-    (when (consp frames)
-      (nth (mod agent-river--spinner-frame (length frames)) frames))))
+  (let ((frames agent-river-spinner-frames)
+        (interval agent-river-spinner-interval))
+    (when (and (consp frames) since (numberp interval) (> interval 0))
+      (nth (mod (floor (float-time (time-since since)) interval) (length frames))
+           frames))))
 
 (defun agent-river--star (state)
   "Return the outline marker opening STATE's block line.
@@ -2170,13 +2188,15 @@ Nil when the animation is off, which is what leaves the bare star."
 Always the literal `* ' -- `outline-regexp' is matched against the buffer
 text, so the animation is a `display' property over the star rather than
 a different character in its place.  The star is marked with
-`agent-river-spinner' where it is built, so the frame timer can find the
-lines that are spinning without re-deriving which sessions are working or
-matching a regexp over the rendered text."
-  (let ((glyph (and (agent-river--state-working-p state)
-                    (agent-river--spinner-glyph))))
+`agent-river-spinner' where it is built, and the mark is that session's
+phase: the frame timer finds the lines that are spinning and reads what
+each should be showing off the mark itself, without re-deriving which
+sessions are working or matching a regexp over the rendered text."
+  (let* ((since (and (agent-river--state-working-p state)
+                     (agent-river--spinning-since state)))
+         (glyph (and since (agent-river--spinner-glyph since))))
     (if glyph
-        (concat (propertize "*" 'agent-river-spinner t 'display glyph) " ")
+        (concat (propertize "*" 'agent-river-spinner since 'display glyph) " ")
       "* ")))
 
 (defun agent-river--panel (state)
@@ -2960,11 +2980,19 @@ for opening or closing the thing under the heading."
   (setq agent-river--timer nil))
 
 (defun agent-river--tick ()
-  "Redraw the block, or stop the timer once no agent is working."
+  "Redraw the block, and stop the timer once no agent is working.
+
+The redraw comes first even on the tick that retires the timer, and that
+last one is load-bearing: it is what unmarks the stars of a session that
+stopped working without an event to say so -- a killed agent-shell buffer
+reports nothing -- and the animation reads those marks to know when to
+stop.  It also leaves the elapsed times at what they finally were rather
+than at whatever the previous tick drew."
   (condition-case err
-      (if (agent-river--working-p)
-          (agent-river--redraw-block)
-        (agent-river--stop-timer))
+      (progn
+        (agent-river--redraw-block)
+        (unless (agent-river--working-p)
+          (agent-river--stop-timer)))
     ;; A timer that throws every second would bury Emacs in messages, so a
     ;; broken redraw retires itself rather than repeating.
     (error (agent-river--stop-timer)
@@ -2986,17 +3014,52 @@ for opening or closing the thing under the heading."
 ;; writes a `display' property onto the stars the panel already marked and
 ;; touches nothing else; it derives nothing, which is what makes it safe to
 ;; run eight times a second.
+;;
+;; Nothing includes the question of whether to keep running.  Asking the
+;; registry looks cheap and is not: for a session agent-shell hosts,
+;; `agent-river--active-p' finds its buffer by walking every buffer in
+;; Emacs, and in a long-lived one that is thousands of them -- measured at
+;; ~3 ms a tick, six times a second, most of it consing a buffer list for
+;; the garbage collector.  The panel has already decided the same question
+;; when it marked the stars, so the marks are the gate, and the refresh
+;; timer's last redraw is what takes them away when a turn ends with no
+;; event to announce it.
 
 (defvar agent-river--spinner-timer nil
   "Repeating timer animating the session markers, or nil while none runs.")
 
-(defun agent-river--spinner-paint (buffer glyph)
-  "Show GLYPH on every spinning star in BUFFER, or the bare star when nil.
+(defun agent-river--block-limit ()
+  "Return where the state block ends in the current buffer."
+  (or (and (markerp agent-river--block-end)
+           (marker-position agent-river--block-end))
+      (point-min)))
 
+(defun agent-river--spinning-p (buffer)
+  "Return non-nil while BUFFER's state block has a marker to animate.
+
+The gate the animation runs on, and deliberately read off the rendering
+rather than off the registry.  `agent-river--star' marks a star exactly
+when `agent-river--state-working-p' holds for that session, so this is the
+same question one step later and cannot answer differently -- but asking
+the registry meant asking `agent-river--active-p' of every session, which
+for an agent-shell session walks every buffer in Emacs.  Six times a
+second, that was most of what the animation cost."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (and (text-property-not-all (point-min) (agent-river--block-limit)
+                                     'agent-river-spinner nil)
+              t))))
+
+(defun agent-river--spinner-paint (buffer &optional stop)
+  "Show every spinning star in BUFFER the frame its own session is on.
+With STOP, take the frames off and leave the bare stars instead.
+
+Each star carries its session's phase as the value of its
+`agent-river-spinner' property, so what to draw is read off the mark.
 Scoped to the state block, which is the only place the marks are, and
-found by the `agent-river-spinner' property rather than by looking for a
-star in the text -- the log below carries the agent's own words and a
-line of it may well begin with one.
+found by the property rather than by looking for a star in the text --
+the log below carries the agent's own words and a line of it may well
+begin with one.
 
 `with-silent-modifications' because this is not an edit anyone should be
 able to undo, and at this rate an undo list of frame changes would grow
@@ -3004,14 +3067,15 @@ without bound."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (with-silent-modifications
-        (let ((end (or (and (markerp agent-river--block-end)
-                            (marker-position agent-river--block-end))
-                       (point-min)))
+        (let ((end (agent-river--block-limit))
               (pos (point-min)))
-          (while (setq pos (text-property-any pos end 'agent-river-spinner t))
-            (if glyph
-                (put-text-property pos (1+ pos) 'display glyph)
-              (remove-text-properties pos (1+ pos) '(display nil)))
+          (while (setq pos (text-property-not-all pos end 'agent-river-spinner nil))
+            (let ((glyph (and (not stop)
+                              (agent-river--spinner-glyph
+                               (get-text-property pos 'agent-river-spinner)))))
+              (if glyph
+                  (put-text-property pos (1+ pos) 'display glyph)
+                (remove-text-properties pos (1+ pos) '(display nil))))
             (setq pos (1+ pos))))))))
 
 (defun agent-river--stop-spinner ()
@@ -3024,19 +3088,24 @@ though it were still working."
   (when (timerp agent-river--spinner-timer)
     (cancel-timer agent-river--spinner-timer))
   (setq agent-river--spinner-timer nil)
-  (agent-river--spinner-paint (get-buffer agent-river-buffer-name) nil))
+  (agent-river--spinner-paint (get-buffer agent-river-buffer-name) t))
 
 (defun agent-river--spin ()
-  "Advance the session markers one frame, or stop once no agent is working."
+  "Draw each session marker at its own phase, or stop once none is left.
+
+Derives nothing: every frame it needs is written on the mark it is
+painting, and whether to carry on is `agent-river--spinning-p'.  This runs
+six times a second, and a tick that asked the registry instead spent
+almost all of that walking every buffer in Emacs to decide whether
+anything was still working -- an answer the panel had already reached
+when it drew the block."
   (condition-case err
-      (let ((buffer (get-buffer agent-river-buffer-name))
-            (glyph (agent-river--spinner-glyph)))
+      (let ((buffer (get-buffer agent-river-buffer-name)))
         ;; get-buffer, not agent-river--buffer: a tick must never resurrect
         ;; a buffer the user has killed.
-        (if (not (and glyph (buffer-live-p buffer) (agent-river--working-p)))
-            (agent-river--stop-spinner)
-          (setq agent-river--spinner-frame (1+ agent-river--spinner-frame))
-          (agent-river--spinner-paint buffer (agent-river--spinner-glyph))))
+        (if (agent-river--spinning-p buffer)
+            (agent-river--spinner-paint buffer)
+          (agent-river--stop-spinner)))
     ;; Same bargain as the refresh timer: a tick that throws this often
     ;; would bury Emacs in messages, so it retires instead of repeating.
     (error (agent-river--stop-spinner)
@@ -3044,10 +3113,11 @@ though it were still working."
                     (error-message-string err)))))
 
 (defun agent-river--ensure-spinner ()
-  "Start the marker animation if work is in progress and none runs."
+  "Start the marker animation if the block has a marker and none runs.
+Asked of the block rather than of the registry, and it can be: the panel
+is drawn before this is called, so the marks are already the answer."
   (when (and (null agent-river--spinner-timer)
-             (agent-river--spinner-glyph)
-             (agent-river--working-p))
+             (agent-river--spinning-p (get-buffer agent-river-buffer-name)))
     (setq agent-river--spinner-timer
           (run-at-time agent-river-spinner-interval
                        agent-river-spinner-interval

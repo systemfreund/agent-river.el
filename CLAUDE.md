@@ -689,23 +689,45 @@ together:
   only while someone is mid-task, retires itself on the first tick that finds no
   one working, and cancels itself if a redraw throws.
 - **The session marker spins while the turn runs**, and is a *second* timer
-  (`agent-river--ensure-spinner`) on the same gate
-  (`agent-river--state-working-p`, which the refresh timer now shares so the
-  two cannot disagree about when a turn is over). Frames have to land often
-  enough to read as motion, and rebuilding the whole block eight times a
-  second would both cost far more than the animation is worth and drag the
+  (`agent-river--ensure-spinner`) on the same gate as the refresh timer, so
+  the two cannot disagree about when a turn is over. Frames have to land
+  often enough to read as motion, and rebuilding the whole block eight times
+  a second would both cost far more than the animation is worth and drag the
   block out from under a reader — so this timer only writes a `display`
   property onto stars the panel already marked with `agent-river-spinner`,
-  and derives nothing. Three things it owes: the buffer text stays a literal
+  and derives nothing. Five things it owes: the buffer text stays a literal
   `*`, because `outline-regexp` is matched against the text and animating the
   character would stop the block being a document the moment an agent started
   working; the spinning stars are found by that property rather than by
   looking for a star in the text, since the log below carries the agent's own
-  words and a line may well begin with one; and **clearing is part of
-  stopping** (`agent-river--stop-spinner`) — the last frame is a `display`
-  property, so a timer that merely cancelled itself would leave every finished
-  session showing whichever glyph it stopped on. `agent-river-spinner-frames`
-  nil is the off switch, and the answer for a font that has no such glyphs.
+  words and a line may well begin with one; **clearing is part of stopping**
+  (`agent-river--stop-spinner`) — the last frame is a `display` property, so
+  a timer that merely cancelled itself would leave every finished session
+  showing whichever glyph it stopped on; **the phase belongs to the session,
+  not to the block**; and **the gate is read off the marks, not re-derived**.
+  `agent-river-spinner-frames` nil is the off switch, and the answer for a
+  font that has no such glyphs.
+- **The phase is each session's own** (`agent-river--spinning-since`,
+  `agent-river--spinner-glyph`). One counter for the whole block put every
+  marker on the same frame whatever each agent was doing, and a row of
+  markers moving as one reads as a single animation about the block rather
+  than as one apiece — two agents prompted a moment apart *are* a moment
+  apart. So the frame is `(age of this turn) / agent-river-spinner-interval`,
+  the mark on the star carries that turn's start, and the timer advances
+  nothing: with no counter to keep, a redraw mid-turn cannot jog the marker
+  and the phase survives a reload.
+- **What keeps the animation running is the marks, not the registry**
+  (`agent-river--spinning-p`). The gate is the same one — `agent-river--star`
+  marks a star exactly when `agent-river--state-working-p` holds — but read
+  off the rendering the panel has already done. Asking the registry per tick
+  meant `agent-river--active-p` per session, which for an agent-shell session
+  walks every buffer in Emacs: measured at ~3 ms a tick in a long-lived one
+  (10k buffers), six times a second, most of it consing a buffer list for the
+  collector. Reading the marks is ~3 µs, and the whole tick 61 µs. The price
+  is that something has to take the marks away when a turn ends with no event
+  to announce it — a killed agent-shell buffer reports nothing — so
+  `agent-river--tick` redraws *before* it retires the refresh timer, which it
+  did not use to do.
 
 ## Conventions
 
