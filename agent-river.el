@@ -2926,6 +2926,29 @@ overlay fold would spring open on each one.")
 (defvar agent-river--map-dirty nil
   "Non-nil when an event has landed that the map has not yet drawn.")
 
+;; The buffer is Markdown, and tree-sitter owns the `face' property in it: it
+;; refontifies on redisplay and appends or removes faces as the structure
+;; changes, so a shading written as a text property is drawn once and then
+;; quietly gone.  Every face this view wants is therefore marked with a
+;; property of its own and turned into an overlay after the text is in
+;; (`agent-river--map-shade') -- an overlay sits above the fontification, the
+;; same way the dired heat sits above dired's.
+
+(defun agent-river--map-mark (text face)
+  "Return TEXT marked to be shaded with FACE once it is in the buffer.
+Unmarked when FACE is nil, which is what a weight below every threshold
+earns -- and what keeps the quiet entries quiet."
+  (if face (propertize text 'agent-river-map-face face) text))
+
+(defun agent-river--map-name (name)
+  "Return NAME as a Markdown code span.
+
+Backticks rather than bare text, for two reasons that happen to agree: a
+path is what a code span is for, and inline markup does not apply inside
+one -- without it `foo_bar_baz.el' renders with `bar' in italics and half
+the underscores eaten, which is a filename the view would be lying about."
+  (concat "`" name "`"))
+
 (defun agent-river--map-annotation (parties)
   "Return PARTIES as the bracketed reading a map line ends with, or nil.
 
@@ -2937,8 +2960,8 @@ this agent now\" is a question about a party rather than about a line."
     (concat
      "["
      (mapconcat (lambda (party)
-                  (concat (propertize (plist-get party :party)
-                                      'face 'agent-river-session)
+                  (concat (agent-river--map-mark (plist-get party :party)
+                                                 'agent-river-session)
                           ;; Never zero: a weight below one still earned a
                           ;; line, and `[alpha:0]' would read as a party
                           ;; that is listed for having done nothing.
@@ -2948,26 +2971,57 @@ this agent now\" is a question about a party rather than about a line."
                 parties " ")
      "]")))
 
+(defun agent-river--map-marker (level)
+  "Return the Markdown that opens a map line at LEVEL.
+
+Directories are headings and files are list items, which is what each of
+them is: a heading has something under it and folds, a leaf does not.
+Making every file a level-3 heading instead would set the whole listing in
+the heading face and leave the structure saying that a file contains the
+lines after it.
+
+The markup is left visible.  Hiding it is `markdown-ts-view-mode's own
+default and it looks better on prose, but here the marker is the
+indentation -- hidden, a directory and the files under it start in the
+same column and the tree stops being one."
+  (pcase level (1 "# ") (2 "## ") (_ "- ")))
+
 (defun agent-river--map-line (level name parties &optional missing)
-  "Return one map line: NAME at outline LEVEL, annotated with PARTIES.
+  "Return one map line: NAME at LEVEL, annotated with PARTIES.
 MISSING marks a name only the state knows about, which is greyed rather
 than shaded -- there is no file on disk for the shading to be about."
-  (let* ((stars (concat (make-string level ?*) " "))
+  (let* ((marker (agent-river--map-marker level))
          (face (if missing
                    'agent-river-stale
                  (agent-river--heat-face (agent-river--map-weight parties))))
+         (shown (agent-river--map-name name))
          (pad (max 1 (- agent-river-map-name-width
-                        (length stars) (string-width name))))
+                        (length marker) (string-width shown))))
          (markers
           (concat (if (> (length parties) 1) agent-river-map-contended-marker " ")
                   (if (seq-some (lambda (party) (plist-get party :current)) parties)
                       agent-river-map-here-marker " "))))
     (string-trim-right
-     (concat stars
-             (propertize name 'face face)
+     (concat marker
+             (agent-river--map-mark shown face)
              (make-string pad ?\s)
              markers " "
              (or (agent-river--map-annotation parties) "")))))
+
+(defun agent-river--map-shade ()
+  "Turn this buffer's face marks into overlays, replacing the last set."
+  (remove-overlays (point-min) (point-max) 'agent-river-map-shade t)
+  (let ((pos (point-min)))
+    (while (< pos (point-max))
+      (let ((face (get-text-property pos 'agent-river-map-face))
+            (next (next-single-property-change pos 'agent-river-map-face
+                                               nil (point-max))))
+        (when face
+          (let ((overlay (make-overlay pos next)))
+            (overlay-put overlay 'agent-river-map-shade t)
+            (overlay-put overlay 'face face)
+            (overlay-put overlay 'evaporate t)))
+        (setq pos next)))))
 
 (defun agent-river--map-open-p (entry)
   "Return non-nil when ENTRY's reached files are shown beneath it.
@@ -2987,8 +3041,10 @@ unless the line says which is which."
                   (mapcar (lambda (entry)
                             (list :parties (plist-get entry :parties)))
                           entries))))
-    (concat "* "
-            (propertize (abbreviate-file-name root) 'face 'agent-river-prompt)
+    (concat (agent-river--map-marker 1)
+            (agent-river--map-mark (agent-river--map-name
+                                    (abbreviate-file-name root))
+                                   'agent-river-prompt)
             (format "  ·  %s frame" (if (eq agent-river-map-scope 'session)
                                         "session" "task"))
             (if parties
@@ -3063,11 +3119,10 @@ start of the buffer."
                              (expand-file-name (plist-get file :rel) path))))
                   (when (> (length files) (length shown))
                     (insert (propertize
-                             (format "*** %s…\n"
-                                     (make-string
-                                      (max 1 (- agent-river-map-name-width 4)) ?\s))
-                             'face 'agent-river-stale
+                             (concat (agent-river--map-marker 3) "…\n")
+                             'agent-river-map-face 'agent-river-stale
                              'agent-river-map-name name)))))))
+          (agent-river--map-shade)
           (agent-river--map-goto here)
           (setq agent-river--map-dirty nil))))))
 
@@ -3148,26 +3203,82 @@ would fold entries in the new one that happen to share a name."
         (user-error "Already at the root")
       (agent-river-map-descend up))))
 
-(defvar agent-river-map-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "TAB") #'agent-river-map-toggle)
-    (define-key map (kbd "RET") #'agent-river-map-visit)
-    (define-key map (kbd "^") #'agent-river-map-up)
-    (define-key map (kbd "g") #'agent-river-map-refresh)
-    map)
-  "Keymap for `agent-river-map-mode'.")
+(declare-function markdown-ts-view-mode "markdown-ts-mode" ())
+;; Declared so the byte-compiler sees a special variable rather than a free
+;; one: the map binds it whether or not markdown-ts-mode has been loaded.
+(defvar markdown-ts-hide-markup)
 
-(define-derived-mode agent-river-map-mode special-mode "Agent-Map"
-  "Major mode for the project map.
+(defun agent-river--markdown-ts-p ()
+  "Return non-nil when this Emacs can render the map as Markdown.
+
+Both halves have to be there: the mode ships with Emacs 31, the grammars
+do not, and `markdown-ts-view-mode' in a buffer with no grammar installed
+fails at the point the map is opened rather than at the point it is
+configured.  Checked rather than assumed, so the map degrades to plain
+text instead of erroring.
+
+Loads the library to find out, because only `markdown-ts-mode' is
+autoloaded: asking `fboundp' about the view mode before anything has
+pulled the file in answers no on an Emacs that has it, and the map would
+then quietly stay in the fallback for the whole session."
+  (and (or (fboundp 'markdown-ts-view-mode)
+           (require 'markdown-ts-mode nil t))
+       (fboundp 'markdown-ts-view-mode)
+       (fboundp 'treesit-language-available-p)
+       (treesit-language-available-p 'markdown)
+       (treesit-language-available-p 'markdown-inline)))
+
+(defun agent-river--map-setup ()
+  "Set the buffer-local state both map modes need."
+  ;; A path is what the line is for, so it is never wrapped into a second
+  ;; line the annotation column cannot survive.
+  (setq-local truncate-lines t)
+  (setq-local header-line-format nil)
+  ;; Hiding the markup collapses the indentation the tree is drawn with --
+  ;; see `agent-river--map-marker' -- and this must not depend on what the
+  ;; user set the Markdown default to.
+  (setq-local markdown-ts-hide-markup nil)
+  ;; Outline's own cycling has to go, and not only because it puts a `keymap'
+  ;; text property on every heading that wins over the mode map and swallows
+  ;; TAB.  Its fold lives in overlays, and this buffer is erased and rebuilt
+  ;; every few seconds -- so a heading folded that way springs open on the
+  ;; next redraw.  `agent-river-map-toggle' folds the same headings by
+  ;; deciding what gets drawn, which is the only kind of fold that survives
+  ;; here.
+  (setq-local outline-minor-mode-cycle nil)
+  (buffer-disable-undo))
+
+;; `markdown-ts-view-mode' rather than `markdown-ts-mode': it is the
+;; read-only variant, it already has `special-mode' among its parents, and
+;; the map is a view of a state that is written elsewhere -- an editable
+;; buffer would offer edits that the next redraw silently throws away.
+(define-derived-mode agent-river-map-mode markdown-ts-view-mode "Agent-Map"
+  "Major mode for the project map, rendered as Markdown.
 
 Dired-like on purpose: RET descends, `^' goes up, TAB opens what is under
 a line.  The gestures are the ones the view is an answer to -- it exists
 because a dired buffer can only ever show one directory at a time."
-  (setq-local truncate-lines t)
-  (setq-local outline-regexp "^\\*+ ")
+  (agent-river--map-setup))
+
+(define-derived-mode agent-river-map-plain-mode special-mode "Agent-Map"
+  "Major mode for the project map where Markdown cannot be rendered.
+
+The same buffer, read as an outline instead.  The text is the same
+Markdown either way; only the fontification is missing, which is what
+makes this a degradation rather than a second view to keep in step."
+  (setq-local outline-regexp "^\\(#+ \\|- \\)")
   (outline-minor-mode 1)
-  (setq-local header-line-format nil)
-  (buffer-disable-undo))
+  (agent-river--map-setup))
+
+(dolist (map (list agent-river-map-mode-map agent-river-map-plain-mode-map))
+  ;; Set on both maps from one list rather than inherited, because the two
+  ;; modes have different parents and neither can be the other's.
+  (define-key map (kbd "TAB") #'agent-river-map-toggle)
+  (define-key map (kbd "RET") #'agent-river-map-visit)
+  (define-key map (kbd "^") #'agent-river-map-up)
+  ;; `markdown-ts-view-mode' binds this to `ignore' to keep `revert-buffer'
+  ;; off it; here there is something to revert to.
+  (define-key map (kbd "g") #'agent-river-map-refresh))
 
 (defun agent-river--map-observe (_state _event)
   "Mark the map as needing a redraw, and make sure something will do it.
@@ -3246,8 +3357,12 @@ takes the map off the event stream."
                 (agent-river--map-default-root)))
         (buffer (get-buffer-create agent-river-map-buffer-name)))
     (with-current-buffer buffer
-      (unless (derived-mode-p 'agent-river-map-mode)
-        (agent-river-map-mode))
+      ;; Set unconditionally rather than only on a fresh buffer: the answer
+      ;; can change between two calls -- a grammar installed, or this file
+      ;; reloaded -- and the mode is what decides how the buffer is read.
+      (if (agent-river--markdown-ts-p)
+          (agent-river-map-mode)
+        (agent-river-map-plain-mode))
       (setq agent-river--map-root (directory-file-name (expand-file-name root))
             agent-river--map-folds nil)
       (add-hook 'kill-buffer-hook #'agent-river--map-teardown nil t))

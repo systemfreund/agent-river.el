@@ -2423,6 +2423,68 @@ half of what it shows is what is on disk and untouched."
     (let ((agent-river--map-folds '(("dialog" . nil))))
       (should-not (agent-river--map-open-p '(:name "dialog" :files ((:rel "a.el"))))))))
 
+;;; The map, rendered as Markdown
+;;
+;; The text is the derivation here, so it is tested like one.  What can go
+;; wrong silently is the part tree-sitter has an opinion about: which
+;; property carries a face, and whether a filename survives inline markup.
+
+(ert-deftest agent-river-test-a-map-line-is-markdown ()
+  (let ((agent-river-map-name-width 24))
+    ;; A directory has something under it and folds, so it is a heading; a
+    ;; file does not, so it is a list item.  Making every file a level-3
+    ;; heading would set the whole listing in the heading face and say that
+    ;; a file contains the lines after it.
+    (should (string-prefix-p "## `common/`"
+                             (agent-river--map-line 2 "common/" nil)))
+    (should (string-prefix-p "- `c.el`"
+                             (agent-river--map-line 3 "c.el" nil)))))
+
+(ert-deftest agent-river-test-a-filename-is-not-eaten-by-markup ()
+  ;; Bare in Markdown, `foo_bar_baz.el' renders with `bar' in italics and
+  ;; the underscores gone -- a filename the view would be lying about.  A
+  ;; code span is both what a path is for and where inline markup stops.
+  (should (string-match-p "`foo_bar_baz\\.el`"
+                          (agent-river--map-line 3 "foo_bar_baz.el" nil))))
+
+(ert-deftest agent-river-test-map-shading-rides-on-its-own-property ()
+  (let* ((parties '((:party "alpha" :weight 9 :current t)))
+         (line (agent-river--map-line 2 "common/" parties)))
+    ;; tree-sitter owns `face' in this buffer: it refontifies on redisplay
+    ;; and appends or removes faces as the structure changes, so a shading
+    ;; written there is drawn once and then quietly gone.  The mark is what
+    ;; `agent-river--map-shade' turns into an overlay, which sits above all
+    ;; of it.
+    (should-not (text-property-not-all 0 (length line) 'face nil line))
+    (should (text-property-any 0 (length line) 'agent-river-map-face
+                               'agent-river-heat-3 line))
+    (should (text-property-any 0 (length line) 'agent-river-map-face
+                               'agent-river-session line))))
+
+(ert-deftest agent-river-test-map-annotations-line-up-across-levels ()
+  (let* ((agent-river-map-name-width 24)
+         (parties '((:party "alpha" :weight 9)))
+         (heading (agent-river--map-line 2 "common/" parties))
+         (item (agent-river--map-line 3 "c.el" parties)))
+    ;; The markers are different widths -- `## ' against `- ' -- so the
+    ;; padding has to be measured from the whole prefix.  Measured from the
+    ;; name alone, every list item's reading sat one column left of every
+    ;; heading's and the column stopped being one.
+    (should (= (string-match-p "\\[" heading) (string-match-p "\\[" item)))))
+
+(ert-deftest agent-river-test-the-map-degrades-without-tree-sitter ()
+  ;; The mode ships with Emacs 31, the grammars do not.  Without them the
+  ;; same Markdown is shown unfontified rather than the map failing at the
+  ;; moment it is opened.
+  (should (fboundp 'agent-river-map-plain-mode))
+  (should (eq (get 'agent-river-map-plain-mode 'derived-mode-parent) 'special-mode))
+  (should (eq (get 'agent-river-map-mode 'derived-mode-parent) 'markdown-ts-view-mode))
+  ;; Both ways in carry the same keys, or the fallback would be a second
+  ;; view to keep in step rather than the same one drawn plainer.
+  (dolist (key '("TAB" "RET" "^" "g"))
+    (should (eq (lookup-key agent-river-map-mode-map (kbd key))
+                (lookup-key agent-river-map-plain-mode-map (kbd key))))))
+
 (ert-deftest agent-river-test-the-map-is-not-on-the-stream-until-opened ()
   ;; No mode to switch on, because the map draws only into its own buffer:
   ;; opening it is the consent, and killing it is the retirement.

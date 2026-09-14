@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (177 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (182 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -343,6 +343,40 @@ marker. A fourth colour would leave a reader unable to say which fact any
 given colour meant. The position marker is repeated *inside* the brackets
 against the party it belongs to — in the left-hand column it is scannable but
 anonymous, and "where is this agent now" is a question about a party.
+
+The buffer is Markdown, rendered by `markdown-ts-view-mode` — the read-only
+variant, which already has `special-mode` among its parents, and a view of a
+state written elsewhere must not offer edits the next redraw throws away.
+`agent-river-map-plain-mode` is the fallback: the mode ships with Emacs 31,
+the grammars do not, and `agent-river--markdown-ts-p` checks both (loading
+the library, because only `markdown-ts-mode` is autoloaded — `fboundp` on the
+view mode answers no on an Emacs that has it). Same text either way; only the
+fontification is missing, so the fallback is not a second view to keep in
+step. Four things the Markdown base forces:
+
+- **Faces go on `agent-river-map-face`, never on `face`.** tree-sitter owns
+  `face` here: it refontifies on redisplay and appends or removes faces as
+  the structure changes, so a shading written as a text property is drawn
+  once and then quietly gone. `agent-river--map-shade` turns the marks into
+  overlays after the text is in, which is how the dired heat survives dired's
+  fontification too.
+- **Markup stays visible** (`markdown-ts-hide-markup` nil). Hiding it is the
+  view mode's default and reads better on prose, but here the marker *is* the
+  indentation — hidden, a directory and the files under it start in the same
+  column and the tree stops being one.
+- **Names are code spans.** A path is what a code span is for, and inline
+  markup does not apply inside one; bare, `foo_bar_baz.el` renders with `bar`
+  in italics and the underscores eaten.
+- **`outline-minor-mode-cycle` is off.** It puts a `keymap` text property on
+  every heading that wins over the mode map and swallows TAB — but the real
+  reason is that its fold lives in overlays, and this buffer is rebuilt every
+  few seconds, so a heading folded that way springs open on the next redraw.
+  `agent-river-map-toggle` folds by deciding what gets drawn, which is the
+  only kind of fold that survives here.
+
+Padding is measured from the whole prefix, not from the name: `## ` and `- `
+are different widths, and measured from the name alone every list item's
+reading sits one column left of every heading's.
 
 ### Pieces that span files or need context
 
