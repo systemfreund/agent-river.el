@@ -495,6 +495,53 @@ Four things about the map are load-bearing:
   through, the line says the agent's last move was into a file that has since
   gone, which is true and worth knowing. Everything else about them is
   ordinary: they fade at the floor like any other name.
+- **A node's rows are contributed; the line is their summary**
+  (`agent-river-map-contributors`, `agent-river--map-rows`). The line carries
+  what can be read *down* the listing — shading, the two markers, one
+  fixed-width column — and everything else lives in rows under the node. The
+  party names used to be on the line and were the one ragged thing on it,
+  which is why nothing scannable could ever follow them; moving them into
+  rows is what freed the column that `:summary` now competes for. **The line
+  is a projection of the rows, never a second account of them** — the same
+  rule the listing follows one grain up, where a directory's reading is the
+  aggregate of what lies beneath it so the two cannot disagree. Rows are
+  **enrichment and detail at once**: drawn by default wherever there are any,
+  hidden by the same TAB that hides a directory's files, so there is one
+  mechanism rather than two and no disclosure twisty to invent.
+- **A contributor answers twice, and the split is forced by the timer.**
+  `:read` is synchronous and instant, from whatever it already has; `:refresh`
+  is where waiting is allowed and hands the answer back through
+  `agent-river-map-contribute`, which marks the map dirty rather than drawing
+  — an answer landing after the redraw timer retired would otherwise reach a
+  cache and never the screen. The map throttles how often it *asks*
+  (`:ttl`, `agent-river--map-refreshed`); whether a read is already in flight
+  is the contributor's business, since only it knows what it started. Batch
+  per root: thirty lines with a subprocess each, every TTL, is a fork bomb
+  with a view attached. A contributor that throws is **retired on the spot**,
+  like an observer — this runs on every draw.
+- **The diffstat is a contributor like any other** (`agent-river--rows-vc`),
+  and that is load-bearing rather than tidy. It is the asynchronous case, the
+  batched case and the aggregating case at once, so if the protocol needed an
+  exception for it the protocol would be wrong. Its row spells out what its
+  `:summary` abbreviates, in the one place where letting the two drift would
+  have been most tempting.
+- **Three things a row owes, each preventing something specific.** Its text is
+  **escaped** (`agent-river--map-row-line`): the map is Markdown only because
+  every token in it is ours, and a row is the first text here that is not — a
+  row beginning with `#` restructures the view showing it, which is exactly
+  why the HUD is not Markdown at all. It is **one line, control characters
+  stripped** (`agent-river--map-one-line`), because the buffer is line-based
+  and a newline makes one broken row rather than two. And it carries a
+  **`:key`**: the redraw finds a line again by what it names
+  (`agent-river--map-here`), and a row that named only its node would inherit
+  its node's identity and land point a line or two off after every draw. Its
+  `:face` is **named, never set** — tree-sitter owns `face` here.
+- **Rows ride the fine grain only.** `n`/`p` stop on them; `M-n`/`M-p` skip
+  them (`agent-river--map-row-line-p`, since a row inherits its node's path
+  and cannot be told apart by the path alone); `>`/`<` pass over them because
+  they carry no `agent-river-map-active` — that motion is for finding the
+  agents, and a contributor able to put itself on it would be competing for
+  the one gesture that is about them.
 - **Fading is not finishing** (`agent-river-forget-artifacts`). The floor
   handles the everyday case on its own, but work that has just landed — a
   merge, a release — is history rather than cold, and only the user knows

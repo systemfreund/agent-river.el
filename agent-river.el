@@ -4537,16 +4537,20 @@ nothing there differs from HEAD, which is a different answer from a nil
 TABLE -- that one says nobody asked git."
   (when table
     (let ((prefix (file-name-as-directory path))
-          (added 0) (removed 0) new found)
+          (added 0) (removed 0) (files 0) new found)
       (maphash (lambda (key value)
                  (when (or (equal key path) (string-prefix-p prefix key))
-                   (setq found t)
+                   (setq found t files (1+ files))
                    (if (eq value 'new)
                        (setq new t)
                      (setq added (+ added (car value))
                            removed (+ removed (cdr value))))))
                table)
-      (and found (list added removed new)))))
+      ;; The count is the fourth element and not the column's business: a
+      ;; column of fixed width has no room for it, and it is the one thing
+      ;; a directory's row can say that its own summary cannot -- `+40 -12'
+      ;; over four files and over one are different pieces of news.
+      (and found (list added removed new files)))))
 
 (defun agent-river--vc-column (stat)
   "Return STAT as the reading a map line's diffstat column shows, or nil.
@@ -4586,34 +4590,78 @@ is in there now."
                     ahead)
            (not outside)))))
 
-(defun agent-river--vc-reading (root table path column &optional writes)
-  "Return PATH's diffstat for `agent-river--map-line', given TABLE.
+(defun agent-river--refresh-vc (root _nodes)
+  "Ask git about ROOT, if the last answer is old enough.
+The throttle is `agent-river--vc-stats\=' own -- the map offers a refresh on
+the contributor\='s `:ttl\=', and this one keeps the TTL it always had, so a
+map redraw and a dired shading cannot start two reads of the same tree."
+  (agent-river--vc-stats root))
 
-COLUMN says whether the buffer is showing the column at all -- nil when
-no root under the map is a repository, in which case no line reserves the
-width.  With it on, a path with nothing to report still returns the empty
-string rather than nil, so the column is held open and the brackets after
-it stay where they were on the line above.
+(defun agent-river--rows-vc (root nodes)
+  "Return what git has to say about each of NODES under ROOT.
 
-WRITES is how many of the touches under PATH changed it
-\(`agent-river--map-writes'), and it is what makes the landed marker mean
-anything.  Git can say a file is identical to the main branch; it cannot
-say whether that is because the work landed there or because nobody ever
-changed it, and most of what an agent touches it only read.  Marked on
-git's answer alone, the column would carry a tick down nearly every line,
-which is a view where everything is marked.
+The diffstat as an ordinary contributor, which is the test of whether the
+contributor protocol is one: it is the asynchronous case, the batched
+case and the aggregating case at once, and it fits without an exception.
+It reads its own cache, starts nothing here -- `:refresh\=' does that -- and
+answers for a directory by summing the subtree beneath it, because it is
+the contributor that knows whether its readings aggregate.
 
-The three answers are one question -- what state is the work on this line
-in -- so they are mutually exclusive and in this order: a file with
-uncommitted changes has those to show, and its earlier landings are not
-the news."
-  (and column
-       (or (agent-river--vc-column (agent-river--vc-under table path))
-           (and (> (or writes 0) 0)
-                (agent-river--vc-landed-p root path)
-                (agent-river--map-mark agent-river-map-landed-marker
-                                       'agent-river-landed))
-           "")))
+The row spells out what the column abbreviates.  That is the relation the
+whole design rests on: the line is a projection of the rows, so the two
+cannot disagree about what git said."
+  (let ((table (agent-river--vc-stats root))
+        (out (make-hash-table :test 'equal)))
+    (dolist (node nodes)
+      (let* ((path (plist-get node :path))
+             (stat (agent-river--vc-under table path))
+             (writes (agent-river--map-writes (plist-get node :parties)))
+             (landed (and (> writes 0) (agent-river--vc-landed-p root path))))
+        (cond
+         (stat
+          (puthash path
+                   (list (list :key "vc"
+                               :column (agent-river--vc-column stat)
+                               :text (concat
+                                      (or (agent-river--vc-column-plain stat)
+                                          "changed")
+                                      " vs HEAD"
+                                      (if (and (plist-get node :dir)
+                                               (> (nth 3 stat) 1))
+                                          (format " in %d files" (nth 3 stat))
+                                        "")
+                                      (if (nth 2 stat)
+                                          ", untracked by git" ""))))
+                   out))
+         (landed
+          (puthash path
+                   (list (list :key "vc"
+                               :face 'agent-river-landed
+                               :column (agent-river--map-mark
+                                        agent-river-map-landed-marker
+                                        'agent-river-landed)
+                               :text "in the main branch"))
+                   out)))))
+    out))
+
+(defun agent-river--vc-summary (rows)
+  "Return the column reading for the vc ROWS of one node.
+
+Carried on the row rather than computed again from the tables, so the
+column and the row it summarises cannot come to different conclusions --
+which is the whole claim the line makes about the rows beneath it.  A
+contributor may keep its own keys on a row; the map reads the ones it
+knows and leaves the rest alone."
+  (plist-get (car rows) :column))
+
+(defun agent-river--vc-column-plain (stat)
+  "Return STAT as unmarked text, for a row rather than for the column.
+The column carries its own faces; a row is escaped where it is inserted,
+and escaping marked-up text would leave the marks pointing at the wrong
+characters."
+  (let ((parts (delq nil (list (and (> (nth 0 stat) 0) (format "+%d" (nth 0 stat)))
+                               (and (> (nth 1 stat) 0) (format "-%d" (nth 1 stat)))))))
+    (and parts (mapconcat #'identity parts " "))))
 
 (defcustom agent-river-map-detail-rows 6
   "How many contributed rows a node shows before the rest are elided.
@@ -4644,7 +4692,11 @@ this says the rest somewhere else."
 ;; cannot disagree.
 
 (defvar agent-river-map-contributors
-  (list (list :name 'parties :read #'agent-river--rows-parties)
+  (list (list :name 'vc
+              :read #'agent-river--rows-vc
+              :refresh #'agent-river--refresh-vc
+              :summary #'agent-river--vc-summary)
+        (list :name 'parties :read #'agent-river--rows-parties)
         (list :name 'step :read #'agent-river--rows-step))
   "What may add rows under the map's nodes, in the order they are drawn.
 
@@ -4654,6 +4706,14 @@ Each entry is a plist:
   :read     (ROOT NODES) -> hash of absolute path to a list of rows
   :refresh  (ROOT NODES) -> nil, optional, may take as long as it likes
   :ttl      seconds before `:refresh\=' is offered that root again
+  :summary  (ROWS) -> a short string for the line, or nil
+
+`:summary\=' is how a contributor gets onto the line itself, and it is
+rationed rather than offered: the line is a column of fixed width, so a
+summary must be short and shaped the same on every line, and it must be a
+reading *of the rows* -- the same data smaller, never a second account of
+it.  A contributor with nothing that shape says nil and lives under the
+node, which is where most of them belong.
 
 A row is a plist of `:text\=' (one line, which the map escapes), `:face\='
 \(a symbol, never a face on the text -- tree-sitter owns `face\=' in this
@@ -4752,6 +4812,34 @@ and a view that dies with it is the worse outcome.  The same bargain
 (defun agent-river--map-row-list (contributed)
   "Return the rows of CONTRIBUTED, flattened in contributor order."
   (apply #'append (mapcar #'cdr contributed)))
+
+(defun agent-river--map-summarised-p (rows)
+  "Return non-nil when anything in ROWS would put a reading on a line."
+  (let (found)
+    (maphash (lambda (_path contributed)
+               (dolist (pair contributed)
+                 (when (and (plist-get (car pair) :summary)
+                            (funcall (plist-get (car pair) :summary) (cdr pair)))
+                   (setq found t))))
+             rows)
+    found))
+
+(defun agent-river--map-summary (contributed column)
+  "Return the line reading CONTRIBUTED earns, given COLUMN is being shown.
+
+COLUMN says whether the buffer reserves the width at all -- nil when no
+contributor under this map has anything to summarise, in which case no
+line holds it open and the markers move left.  With it on, a node with
+nothing to say still returns the empty string, so the column stays where
+it was on the line above and can be read downward, which is the only
+reason it is a column."
+  (and column
+       (mapconcat #'identity
+                  (delq nil (mapcar (lambda (pair)
+                                      (let ((summary (plist-get (car pair) :summary)))
+                                        (and summary (funcall summary (cdr pair)))))
+                                    contributed))
+                  " ")))
 
 (defun agent-river--rows-parties (_root nodes)
   "Return one row per party on each of NODES: the names that left the line.
@@ -4859,10 +4947,10 @@ be put after them -- moving them down is what freed the tail of the line,
 and a row says what a bracket never could: how long ago, and how much of
 it was writing rather than reading.
 
-STAT is the diffstat reading (`agent-river--vc-reading'), padded here to
-`agent-river-map-vc-width'.  Nil leaves the column out for every line in
-the buffer, which is what happens when there is no repository under the
-map."
+STAT is the reading a contributor earned on this line, from
+`agent-river--map-summary', padded here to `agent-river-map-vc-width'.
+Nil leaves the column out for every line in the buffer, which is what
+happens when no contributor under this map has anything to put in it."
   (let* ((marker (agent-river--map-marker level))
          (face (if missing
                    'agent-river-gone
@@ -5087,16 +5175,24 @@ nothing."
                           ;; into it.
                           (list (agent-river--map-default-root))))
                (sections (mapcar (lambda (root)
-                                   (list root
-                                         (agent-river--map-entries
-                                          root agent-river-map-scope)
-                                         (agent-river--vc-stats root)))
+                                   (let ((entries (agent-river--map-entries
+                                                   root agent-river-map-scope)))
+                                     (list root
+                                           entries
+                                           (agent-river--map-rows
+                                            root (agent-river--map-nodes
+                                                  root entries)))))
                                  roots))
                ;; One decision for the whole buffer: a column reserved on
-               ;; some lines and not others would put the brackets in a
-               ;; different place per section, which is the column's whole
-               ;; purpose spent on nothing.
-               (column (and (seq-some (lambda (section) (nth 2 section)) sections) t))
+               ;; some lines and not others would sit in a different place
+               ;; per section, which is the column's whole purpose spent on
+               ;; nothing.  Decided from what the contributors have rather
+               ;; than from git in particular -- the column belongs to
+               ;; whoever can summarise, and today that is only the diffstat.
+               (column (and (seq-some (lambda (section)
+                                        (agent-river--map-summarised-p (nth 2 section)))
+                                      sections)
+                            t))
                (split (> (length sections) 1))
                (level (if split 3 2)))
           (erase-buffer)
@@ -5110,7 +5206,7 @@ nothing."
           (dolist (section sections)
             (let ((root (car section))
                   (entries (nth 1 section))
-                  (stats (nth 2 section)))
+                  (rows (nth 2 section)))
               (when split
                 (insert (propertize
                          (concat (agent-river--map-line
@@ -5120,14 +5216,7 @@ nothing."
                                              (list :parties (plist-get entry :parties)))
                                            entries))
                                   nil
-                                  (agent-river--vc-reading
-                                   root stats root column
-                                   (agent-river--map-writes
-                                    (agent-river--map-merge-parties
-                                     (mapcar (lambda (entry)
-                                               (list :parties
-                                                     (plist-get entry :parties)))
-                                             entries)))))
+                                  (agent-river--map-summary (gethash root rows) column))
                                  "\n")
                          ;; A root is a place like any other line's, so RET
                          ;; zooms into it and the motions stop on it.
@@ -5136,8 +5225,7 @@ nothing."
                          'agent-river-map-dir t
                          'agent-river-map-section t
                          'agent-river-map-active (and entries t))))
-              (let ((rows (agent-river--map-rows
-                           root (agent-river--map-nodes root entries))))
+              (progn
                (dolist (entry entries)
                 (let* ((name (plist-get entry :name))
                        (dir (plist-get entry :dir))
@@ -5149,10 +5237,7 @@ nothing."
                                     level (concat name (if dir "/" ""))
                                     (plist-get entry :parties)
                                     (plist-get entry :missing)
-                                    (agent-river--vc-reading
-                                     root stats path column
-                                     (agent-river--map-writes
-                                      (plist-get entry :parties))))
+                                    (agent-river--map-summary mine column))
                                    "\n")
                            'agent-river-map-name name
                            'agent-river-map-path path
@@ -5179,10 +5264,7 @@ nothing."
                                           'file (plist-get file :rel)
                                           (plist-get file :parties)
                                           nil
-                                          (agent-river--vc-reading
-                                           root stats fpath column
-                                           (agent-river--map-writes
-                                            (plist-get file :parties))))
+                                          (agent-river--map-summary frows column))
                                          "\n")
                                  'agent-river-map-name name
                                  'agent-river-map-rel (plist-get file :rel)

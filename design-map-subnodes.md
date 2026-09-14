@@ -1,7 +1,9 @@
 # Sub-nodes on the map, and who may contribute them
 
-A design note, not documentation: nothing here is built yet. It exists to be
-argued with, and to be deleted or folded into `CLAUDE.md` once it is.
+A design note. It is **built** — `agent-river-map-contributors`, the rows
+under each node, and the diffstat moved over to it — so what is left here is
+the argument, which `CLAUDE.md` now carries in shorter form. Delete this file
+once nothing in it is news.
 
 The idea: a node in `*agent-river-map*` should be able to carry a handful of
 child rows of *different kinds*, and those rows should be able to come from
@@ -196,27 +198,41 @@ Three costs that are not about the mechanism and will bite regardless:
   it off the event stream. A contributor that starts its own timer breaks that
   and must not.
 
-## What is not in this first version
+## What was built, and what the first draft got wrong
 
-- **No line channels.** `:summary` is designed above and deliberately not
-  built: the line is full, and a summary with nowhere to go is a feature with
-  no answer to "which channel?".
-- **The diffstat is not retrofitted.** It stays as it is. But it is the test of
-  whether this protocol is right: when it *is* moved over, it must fit without
-  special-casing — per-root batching, a TTL, an in-flight guard, "do not know"
-  as absence. If it would need an exception, the protocol is wrong and this
-  document is where that should have been caught.
-- **Two built-in sorts to start**, so that "different kinds" is real rather
-  than asserted: the **parties** on a node, one row each with what the brackets
-  cannot fit (touches, writes, how long ago, whose), and the **step in flight**
-  on that file, which is at most one row and is present tense. Both are read
-  straight from the state — no async at all, which keeps the first version's
-  failure modes small.
+Two things changed between this note and the code, both on the same point.
+
+**The line had room after all — because the party names left it.** The draft
+said enrichment was full and therefore closed. It was full *of the names*, and
+the names were the one ragged thing on it, which is why nothing scannable could
+ever follow them. Moving them into rows freed the tail and made `:summary` a
+real channel rather than a designed-but-unbuilt one. So it is built.
+
+**The diffstat is retrofitted, and that is what makes the protocol real.** The
+draft deferred it and offered it as a later test. Deferring a test that decides
+whether a design is right keeps the special case alive for the next person to
+copy. Moved over, it fits without an exception: `:read` from its own cache,
+`:refresh` on its TTL, its own aggregation over a subtree, `:summary` for the
+column, and "do not know" as absence. The row spells out what the column
+abbreviates, which is the projection rule holding in the one place it would
+have been most tempting to break.
+
+Three sorts ship, so that "different kinds" is demonstrated rather than
+asserted: **vc** (asynchronous, batched per root, summarised onto the line),
+**parties** (from the state, one row each, what the brackets could not fit),
+and the **step in flight** (at most one row, and the only present-tense one).
+
+Still not built, deliberately: nothing competes for a second column, because
+nothing has earned one. The next contributor that wants the line will find out
+whether "the map decides which channel, not the contributor" survives contact.
 
 ## Open
 
-- Does RET on a row without `:visit` open the parent's file, or refuse? Refusing
-  is the map's rule for a motion with nowhere to go; opening the file is what
-  the eye chose one line up. This note assumes the latter, weakly.
-- Is a per-contributor off switch needed beyond editing the list, given that
-  editing the list *is* the gesture everywhere else in this package?
+- RET on a row without `:visit` opens the node the row is about. The stricter
+  reading of "a motion with nowhere to go refuses" is about landing *near*
+  something the eye did not choose; the file a row sits under is what it chose.
+- No per-contributor off switch beyond editing the list, which is the gesture
+  everywhere else in this package.
+- **A folded node gives no hint that it has rows.** Directories have always had
+  the same silence, so this is consistent rather than new — but it is the one
+  place a sixth channel (a disclosure marker) could still earn its keep.

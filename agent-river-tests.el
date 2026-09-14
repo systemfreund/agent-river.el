@@ -3630,9 +3630,11 @@ is how a test asks what the view looks like once the work has moved on."
                         "3\t0\tdoc.md\0" "5\t5\tsrcaux/c.el\0"))))
     ;; The same grain as the parties: a directory line reports the whole
     ;; subtree, because that is what the listing gives it a line for.
-    (should (equal (agent-river--vc-under table "/repo/src") '(11 7 nil)))
-    (should (equal (agent-river--vc-under table "/repo/src/a.el") '(10 6 nil)))
-    (should (equal (agent-river--vc-under table "/repo") '(19 12 nil)))
+    ;; The fourth element is how many files that was, which only a
+    ;; directory's row has room to say.
+    (should (equal (agent-river--vc-under table "/repo/src") '(11 7 nil 2)))
+    (should (equal (agent-river--vc-under table "/repo/src/a.el") '(10 6 nil 1)))
+    (should (equal (agent-river--vc-under table "/repo") '(19 12 nil 4)))
     ;; Matched as a directory, so a sibling whose name merely starts the
     ;; same way does not get counted into it.
     (should-not (member 5 (agent-river--vc-under table "/repo/src")))
@@ -3648,7 +3650,7 @@ is how a test asks what the view looks like once the work has moved on."
   (let ((table (make-hash-table :test 'equal)))
     (puthash "/repo/src/new.el" 'new table)
     (puthash "/repo/src/a.el" '(4 . 0) table)
-    (should (equal (agent-river--vc-under table "/repo/src") '(4 0 t)))
+    (should (equal (agent-river--vc-under table "/repo/src") '(4 0 t 2)))
     (should (equal (agent-river--vc-column (agent-river--vc-under table "/repo/src"))
                    "+4 ?"))
     (should (equal (agent-river--vc-column
@@ -3695,9 +3697,23 @@ is how a test asks what the view looks like once the work has moved on."
   (let ((table (agent-river-test--numstat "2\t0\ta.el\0")))
     ;; `agent-river--map-draw' decides once for the whole buffer, so the
     ;; reading is empty rather than absent where there is nothing to report.
-    (should (equal (agent-river--vc-reading "/repo" table "/repo/a.el" t) "+2"))
-    (should (equal (agent-river--vc-reading "/repo" table "/repo/b.el" t) ""))
-    (should-not (agent-river--vc-reading "/repo" table "/repo/a.el" nil))))
+    (puthash "/repo" (list :at (current-time) :table table :proc nil)
+             agent-river--vc-cache)
+    (let ((rows (agent-river--rows-vc "/repo" '((:path "/repo/a.el")
+                                                (:path "/repo/b.el")))))
+      ;; `agent-river--map-draw' decides once for the whole buffer, so the
+      ;; reading is empty rather than absent where there is nothing to say.
+      (should (equal (agent-river--map-summary
+                      (list (cons (list :summary #'agent-river--vc-summary)
+                                  (gethash "/repo/a.el" rows)))
+                      t)
+                     "+2"))
+      (should (equal (agent-river--map-summary
+                      (list (cons (list :summary #'agent-river--vc-summary)
+                                  (gethash "/repo/b.el" rows)))
+                      t)
+                     ""))
+      (should-not (agent-river--map-summary nil nil)))))
 
 (defun agent-river-test--ahead (root paths)
   "Record PATHS as the ones ROOT's branch still has outside the main branch."
@@ -3714,12 +3730,18 @@ is how a test asks what the view looks like once the work has moved on."
   (let ((agent-river--vc-cache (make-hash-table :test 'equal))
         (agent-river-map-landed-marker "✓")
         (table (make-hash-table :test 'equal)))
+    (ignore table)
     (agent-river-test--ahead "/repo" '("/repo/pending.el"))
-    (should (equal (agent-river--vc-reading "/repo" table "/repo/landed.el" t 3)
-                   "✓"))
-    ;; Still outside the main branch: nothing to say yet.
-    (should (equal (agent-river--vc-reading "/repo" table "/repo/pending.el" t 3)
-                   ""))))
+    (let ((rows (agent-river--rows-vc
+                 "/repo" '((:path "/repo/landed.el" :parties ((:party "a" :writes 3)))
+                           (:path "/repo/pending.el" :parties ((:party "a" :writes 3)))))))
+      (should (equal (agent-river--vc-summary (gethash "/repo/landed.el" rows)) "✓"))
+      ;; And the row spells out what the column abbreviates -- the line is a
+      ;; projection of the rows, so the two cannot disagree.
+      (should (equal (plist-get (car (gethash "/repo/landed.el" rows)) :text)
+                     "in the main branch"))
+      ;; Still outside the main branch: nothing to say yet.
+      (should-not (gethash "/repo/pending.el" rows)))))
 
 (ert-deftest agent-river-test-a-file-only-read-has-not-landed ()
   ;; Git can say a file is identical to the main branch; it cannot say
@@ -3729,9 +3751,15 @@ is how a test asks what the view looks like once the work has moved on."
   ;; where everything is marked marks nothing.
   (let ((agent-river--vc-cache (make-hash-table :test 'equal))
         (table (make-hash-table :test 'equal)))
+    (ignore table)
     (agent-river-test--ahead "/repo" nil)
-    (should (equal (agent-river--vc-reading "/repo" table "/repo/read.el" t 0) ""))
-    (should (equal (agent-river--vc-reading "/repo" table "/repo/read.el" t nil) ""))))
+    (should-not (gethash "/repo/read.el"
+                         (agent-river--rows-vc
+                          "/repo" '((:path "/repo/read.el"
+                                     :parties ((:party "a" :writes 0)))))))
+    (should-not (gethash "/repo/read.el"
+                         (agent-river--rows-vc
+                          "/repo" '((:path "/repo/read.el" :parties nil)))))))
 
 (ert-deftest agent-river-test-an-unanswered-branch-lands-nothing ()
   ;; `:ahead' unset means nobody could ask -- no main branch here, or the
@@ -3739,8 +3767,12 @@ is how a test asks what the view looks like once the work has moved on."
   ;; which is the last thing to say on a guess.
   (let ((agent-river--vc-cache (make-hash-table :test 'equal))
         (table (make-hash-table :test 'equal)))
+    (ignore table)
     (should-not (agent-river--vc-landed-p "/repo" "/repo/a.el"))
-    (should (equal (agent-river--vc-reading "/repo" table "/repo/a.el" t 3) ""))
+    (should-not (gethash "/repo/a.el"
+                         (agent-river--rows-vc
+                          "/repo" '((:path "/repo/a.el"
+                                     :parties ((:party "a" :writes 3)))))))
     ;; And an *empty* answer is the opposite of an absent one: everything
     ;; this branch changed is in the main branch now.
     (agent-river-test--ahead "/repo" nil)
@@ -3753,8 +3785,16 @@ is how a test asks what the view looks like once the work has moved on."
   (let ((agent-river--vc-cache (make-hash-table :test 'equal))
         (table (agent-river-test--numstat "2\t1\ta.el\0")))
     (agent-river-test--ahead "/repo" nil)
-    (should (equal (agent-river--vc-reading "/repo" table "/repo/a.el" t 3)
-                   "+2 -1"))))
+    (puthash "/repo" (list :at (current-time) :table table
+                           :ahead (make-hash-table :test 'equal) :proc nil)
+             agent-river--vc-cache)
+    (let ((rows (agent-river--rows-vc
+                 "/repo" '((:path "/repo/a.el"
+                            :parties ((:party "a" :writes 3)))))))
+      (should (equal (agent-river--vc-summary (gethash "/repo/a.el" rows))
+                     "+2 -1"))
+      (should (string-match-p "vs HEAD"
+                              (plist-get (car (gethash "/repo/a.el" rows)) :text))))))
 
 (ert-deftest agent-river-test-a-directory-lands-when-everything-under-it-has ()
   ;; The same grain as the parties: a directory line reports the subtree,
