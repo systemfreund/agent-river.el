@@ -277,6 +277,34 @@
         ;; Oldest now sits at the bottom, so trimming works from the tail.
         (should-not (string-match-p "one" text))))))
 
+(ert-deftest agent-river-test-a-blank-line-closes-the-block ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :detail "Edit a.el"))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :detail "Edit b.el"))
+    (with-current-buffer (agent-river--buffer)
+      (save-excursion
+        (goto-char (point-min))
+        ;; One session line, then the separator, then the newest event.
+        (should (looking-at-p "\\*+ "))
+        (forward-line 1)
+        (should (looking-at-p "$"))
+        (forward-line 1)
+        (should (looking-at-p "[0-9][0-9]:"))
+        ;; And the separator belongs to the block, so the marker everything
+        ;; downstream reads still points at the newest log line rather than
+        ;; at the blank one.
+        (should (= (point) (marker-position agent-river--block-end))))
+      ;; Redrawn, not accumulated: a block that grew a blank line per event
+      ;; would push the log down the buffer one line at a time.
+      (agent-river--redraw-block)
+      (agent-river--redraw-block)
+      (should-not (string-match-p "\n\n\n"
+                                  (buffer-substring-no-properties
+                                   (point-min) (point-max)))))))
+
 (ert-deftest agent-river-test-block-is-rewritten-not-appended ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))

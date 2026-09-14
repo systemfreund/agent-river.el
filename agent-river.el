@@ -2403,11 +2403,24 @@ later finds it by."
     (set-marker agent-river--block-end nil)))
 
 (defun agent-river--insert-block ()
-  "Draw the state block at the head of the current buffer."
+  "Draw the state block at the head of the current buffer.
+
+The blank line closing it belongs to the block, not to the log: it is
+erased and redrawn with it, so it cannot be left behind by a session
+ending, and `agent-river--block-end' goes on meaning what everything
+downstream reads it as -- the start of the newest log line, which is
+where `agent-river--head-end' measures the head to and where
+`agent-river--log-outcome' starts looking.
+
+The separator is what a heading over the log used to be, at a line's
+cost rather than a line plus a label.  Without it the block's last
+session runs straight into the newest event, and the two halves of the
+buffer -- the state, and the stream it was folded from -- read as one
+list."
   (let ((block (agent-river--panel-block)))
     (when block
       (goto-char (point-min))
-      (insert block "\n")
+      (insert block "\n\n")
       (setq agent-river--block-end (copy-marker (point) nil)))))
 
 (defun agent-river--trim ()

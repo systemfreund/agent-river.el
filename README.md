@@ -146,6 +146,7 @@ first**:
 ```
 * supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
 * supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
+
 19:07:03 super<2> ▸ Edit  supersonic-mpv.el
 19:06:58 superson ▸ Read  Cask (✓  2ms)
 19:06:55 superson ◆ fix the mpv bridge
@@ -161,10 +162,14 @@ reads the text, not the picture. `agent-river-spinner-frames` set to nil
 turns it off, which is also the answer for a font that does not have the
 glyphs.
 
-Each block line is an outline heading. There is no heading over the log —
-one was tried and removed: a divider that exists only to be a fold handle
-earns its line from nobody who is reading. `TAB` instead unfolds the session
-under point, into the same touch counts the block condenses into its one
+The blank line is the only thing dividing the two halves. There was a
+`* -- eventlog` heading there once; it was removed, because a divider that
+exists to be a fold handle earns its line from nobody who is reading, and a
+blank one separates just as well at no cost in labels. It belongs to the
+block and is redrawn with it, so a session ending cannot leave it behind.
+
+Each block line is an outline heading. `TAB` unfolds the session under
+point, into the same touch counts the block condenses into its one
 parenthetical, at a grain that says what the step count is made of:
 
 ```
