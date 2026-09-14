@@ -3861,15 +3861,19 @@ part of this package, a view that cannot be drawn must not take anything
 else down with it."
   :type 'string)
 
-(defcustom agent-river-map-vc-ttl 10
+(defcustom agent-river-map-vc-ttl 3
   "Seconds a root's diffstat is reused before it is read again.
 
-The map redraws every `agent-river-map-refresh-interval' seconds while an
-agent works, and a diffstat costs two subprocesses per root.  Reading it
-on every redraw would spend most of that budget re-answering a question
-the disk rarely changes the answer to between one redraw and the next.
-The read is asynchronous either way, so this sets how stale the column
-may be, never how long a redraw waits: nothing waits.  \\[agent-river-map-refresh]
+This is the map's staleness, and it used to be most of it: at ten seconds
+a file could be changed, drawn twice and still annotated with what it had
+looked like before.  It was set that high against a guess at what a read
+costs -- \"two subprocesses per root\" sounds expensive.  Measured, a read
+is about 8 ms of which the commands are 2, so once per redraw is a third
+of a percent of the interval between redraws, and the guess was simply
+wrong.
+
+The read is asynchronous either way, so this sets how stale the column may
+be, never how long a redraw waits: nothing waits.  \\[agent-river-map-refresh]
 drops the cache, so the reading someone asked for by hand is fresh."
   :type 'number)
 
@@ -4236,6 +4240,11 @@ another.  Being absolute, the keys also survive descending, where a
 name-keyed fold had to be thrown away on the way in or it would have
 folded whatever entry in the new listing happened to share a name.")
 
+(defvar agent-river--map-drawn nil
+  "When the map was last drawn, or nil before the first time.
+Read by `agent-river-map-contribute', which draws on an answer landing
+unless one has just been drawn anyway.")
+
 (defvar agent-river--map-dirty nil
   "Non-nil when an event has landed that the map has not yet drawn.")
 
@@ -4362,9 +4371,7 @@ not having read it."
                         :main (or main (plist-get cell :main))
                         :out (or (plist-get cell :out) 0))
              agent-river--vc-cache))
-  (when (get-buffer agent-river-map-buffer-name)
-    (setq agent-river--map-dirty t)
-    (agent-river--ensure-map-timer)))
+  (agent-river-map-contribute))
 
 (defun agent-river--vc-run (root args callback &optional on-fail)
   "Run git with ARGS in ROOT and pass its output to CALLBACK.
@@ -4654,7 +4661,8 @@ the contributor that knows whether its readings aggregate.
 The row spells out what the column abbreviates.  That is the relation the
 whole design rests on: the line is a projection of the rows, so the two
 cannot disagree about what git said."
-  (let ((table (agent-river--vc-stats root))
+  (let ((table (and agent-river-map-vc
+                    (plist-get (gethash root agent-river--vc-cache) :table)))
         (out (make-hash-table :test 'equal)))
     (dolist (node nodes)
       (let* ((path (plist-get node :path))
@@ -4789,16 +4797,53 @@ The map throttles how often it *asks*; whether a read is already in
 flight is the contributor\='s own business, since only it knows what it
 started.")
 
+(defconst agent-river--map-contribution-delay 0.05
+  "Seconds a contributor's answer waits for its siblings before being drawn.
+
+Short enough to read as immediate and long enough to collect the answers
+that arrive together -- a diffstat read stores twice, a few milliseconds
+apart, and two draws for one read would be two chances to move the text
+under whoever is reading it.
+
+A floor on how *recently* the map was drawn was tried first and was
+exactly backwards: a read is started by a draw and answers about ten
+milliseconds later, so every answer there has ever been arrives inside the
+floor and none of them drew.")
+
+(defvar agent-river--map-soon nil
+  "One-shot timer for a draw a contributor's answer asked for.")
+
 (defun agent-river-map-contribute ()
   "Say that a contributor has something new for the map to draw.
 
-Marks the map out of date rather than drawing it: the answer arrives
-while nothing else is happening, possibly after the redraw timer has
-retired, and a row that reached a cache but never the screen is the same
-as not having read it.  Deliberately takes no arguments -- the next draw
-asks every contributor what it has, so there is one path in and no way
-for an answer to arrive around the side of it."
-  (agent-river--map-invalidate))
+Draws it, shortly.  Leaving it to the redraw timer was the larger half of
+how long the diffstat appeared to take: the read itself is about 8 ms and
+then the answer sat in the cache for up to
+`agent-river-map-refresh-interval' seconds before anybody drew it -- ten
+seconds, end to end, once the TTL had had its say.  An answer that has
+just landed is the moment the view is known to be out of date, which is
+the one moment redrawing it is certainly worth doing.
+
+Deliberately takes no arguments -- the draw asks every contributor what it
+has, so there is one path in and no way for an answer to arrive around the
+side of it."
+  (when (get-buffer agent-river-map-buffer-name)
+    (setq agent-river--map-dirty t)
+    (agent-river--ensure-map-timer)
+    (unless (timerp agent-river--map-soon)
+      (setq agent-river--map-soon
+            (run-at-time
+             agent-river--map-contribution-delay nil
+             (lambda ()
+               (setq agent-river--map-soon nil)
+               (condition-case err
+                   (when (get-buffer agent-river-map-buffer-name)
+                     (agent-river--map-draw))
+                 ;; The periodic tick retires itself on an error; this one
+                 ;; is over already, so it only has to say so rather than
+                 ;; go quiet about a draw that did not happen.
+                 (error (message "agent-river: map draw failed (%s)"
+                                 (error-message-string err))))))))))
 
 (defun agent-river--map-one-line (text)
   "Return TEXT as something that can be one line of the map.
@@ -5348,6 +5393,7 @@ nothing."
                                    "*nothing reached here — `a` lists everything*")
                                  "\n")
                          'agent-river-map-face 'agent-river-stale)))))
+          (setq agent-river--map-drawn (current-time))
           (agent-river--map-shade)
           (agent-river--map-goto here)
           (agent-river--map-settle-point)

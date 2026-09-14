@@ -37,6 +37,15 @@ Trying a change in a live session: `agent-river-hook.sh` self-arms (it loads the
 `M-x load-file agent-river.el`. If that follows a `cl-defstruct` slot change,
 existing registry states are short the slot and the fold errors — `M-x agent-river-reset`.
 
+**A reload does not bring new defaults with it**, and this has cost real time
+more than once: `defvar` and `defcustom` both leave an already-bound variable
+alone, so after reloading, a changed default is still the old value and a
+changed list (`agent-river-map-contributors`) is still the old list — including
+one that an error retired. Re-apply by hand: `custom-reevaluate-setting` for a
+defcustom (it honours a real customisation), `setq` for a defvar. A timer
+already running also keeps the period it was started at, so a changed interval
+needs its timer restarted.
+
 Note that `agent-river-reset` clears the *whole* registry, including the session
 you are working in — which is usually folding itself while you edit. To drop one
 stale entry instead, `(remhash "<key>" agent-river-registry)` then
@@ -528,11 +537,19 @@ Four things about the map are load-bearing:
   does not hold the last process, or the first to finish would clear the
   flag while its sibling was still running), and the main branch is
   remembered in the cache rather than resolved again every time. Cold ~11 ms
-  to the landed marker, warm ~8 ms. What a reader actually waits for is
-  neither: the answer only marks the map dirty, so it lands on the next tick
-  of `agent-river-map-refresh-interval`, and the read does not start until
-  the cache is `agent-river-map-vc-ttl` old. Those two knobs are the
-  perceived latency; the subprocesses are noise beside them.
+  to the landed marker, warm ~8 ms — and **what a reader waits for was never
+  that**. The answer used to sit in the cache until the next tick of
+  `agent-river-map-refresh-interval`, behind a read that did not start until
+  the cache was `agent-river-map-vc-ttl` (then ten seconds) old: about
+  thirteen seconds end to end for eight milliseconds of work. An answer
+  landing now draws the map (`agent-river-map-contribute`), debounced by
+  `agent-river--map-contribution-delay` so answers arriving together make one
+  draw, and the TTL is three seconds because the measurement says a read
+  costs a third of a percent of the interval it sits in. Draw-to-shown is
+  ~60 ms. A **floor on how recently the map was drawn** was tried first and
+  was exactly backwards: a read is started *by* a draw and answers ten
+  milliseconds later, so every answer there has ever been arrives inside the
+  floor and none of them drew.
 - **The diffstat is a contributor like any other** (`agent-river--rows-vc`),
   and that is load-bearing rather than tidy. It is the asynchronous case, the
   batched case and the aggregating case at once, so if the protocol needed an
