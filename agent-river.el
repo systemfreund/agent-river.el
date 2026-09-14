@@ -1986,14 +1986,121 @@ question an onlooker actually has."
     ;; Only the header is made visitable: the detail headings below it are a
     ;; finer reading of the same state, and RET on one of them jumping to the
     ;; session would be a link nobody asked for.
-    (let ((header (agent-river--make-visitable
-                   (concat "* " (mapconcat #'identity parts " · "))
-                   (agent-river-state-id state)))
+    ;; `agent-river-line' is marked on both kinds regardless of whether the
+    ;; session turned out to be visitable: a line the motion can stop on and
+    ;; a line RET can act on are different questions, and tying them together
+    ;; made `n' skip every session agent-shell does not host.
+    (let ((header (propertize
+                   (agent-river--make-visitable
+                    (concat "* " (mapconcat #'identity parts " · "))
+                    (agent-river-state-id state))
+                   'agent-river-line 'session))
           (details (and agent-river--panel-expanded
-                        (agent-river--panel-details state))))
+                        (mapcar (lambda (line)
+                                  (propertize line 'agent-river-line 'detail))
+                                (agent-river--panel-details state)))))
       (if details
           (concat header "\n" (mapconcat #'identity details "\n"))
         header))))
+
+;;; Moving about the HUD
+;;
+;; The same three grains as the map, on the same keys, because they are the
+;; same question asked of different content: every line worth stopping on,
+;; the coarse structure alone, and the lines that want attention.  A session
+;; line here is a map entry; a detail heading is a map file line; a log line
+;; is what neither view has an analogue for and so takes the fine grain with
+;; the entries.
+;;
+;; Which lines those are is read off `agent-river-line', marked where the
+;; line is built.  Matching a regexp over the rendered text instead would
+;; mean that changing how a line looks quietly changes what `n' stops on --
+;; and the rendering here is customisable, so it would change under people.
+
+(defcustom agent-river-notable-kinds '("fail" "signal" "note")
+  "Event kinds `agent-river-next-notable' stops on.
+
+The lines someone scanning a long log is looking for: what broke, what the
+agent was told, and what was seen outside the hook stream.  Reasoning and
+tool calls are the log's bulk rather than its landmarks, which is the whole
+distinction this motion exists to make."
+  :type '(repeat string))
+
+(defun agent-river--entry-line-p ()
+  "Return non-nil on a line any motion may stop on."
+  (and (get-text-property (line-beginning-position) 'agent-river-line) t))
+
+(defun agent-river--session-line-p ()
+  "Return non-nil on a session line of the state block."
+  (eq (get-text-property (line-beginning-position) 'agent-river-line) 'session))
+
+(defun agent-river--notable-line-p ()
+  "Return non-nil on a log line worth finding in a long log."
+  (member (get-text-property (line-beginning-position) 'agent-river-kind)
+          agent-river-notable-kinds))
+
+(defun agent-river--beginning-of-entry ()
+  "Put point past the outline stars on this line, if it has any.
+A log line starts with its timestamp and is left alone; a heading's stars
+are structure, and a cursor parked on one says nothing about the line."
+  (goto-char (line-beginning-position))
+  (when (looking-at "\\*+ ")
+    (goto-char (match-end 0))))
+
+(defun agent-river--scan (count test)
+  "Move to the COUNTth line satisfying TEST, forward when COUNT is positive.
+Returns nil and leaves point alone when there is none -- the same bargain
+`agent-river--map-scan' makes, for the same reason: a motion that lands
+somewhere near is one the next RET acts on by mistake."
+  (let ((found nil)
+        (step (if (> count 0) 1 -1))
+        (left (abs count)))
+    (save-excursion
+      (catch 'done
+        (while t
+          (unless (zerop (forward-line step)) (throw 'done nil))
+          (when (funcall test)
+            (setq left (1- left))
+            (when (zerop left)
+              (setq found (point))
+              (throw 'done nil))))))
+    (when found
+      (goto-char found)
+      (agent-river--beginning-of-entry)
+      t)))
+
+(defun agent-river-next-line (&optional n)
+  "Move to the Nth next session, detail or event line."
+  (interactive "p")
+  (or (agent-river--scan (or n 1) #'agent-river--entry-line-p)
+      (user-error "No further line")))
+
+(defun agent-river-previous-line (&optional n)
+  "Move to the Nth previous session, detail or event line."
+  (interactive "p")
+  (agent-river-next-line (- (or n 1))))
+
+(defun agent-river-next-session (&optional n)
+  "Move to the Nth next session line, past its details and the log."
+  (interactive "p")
+  (or (agent-river--scan (or n 1) #'agent-river--session-line-p)
+      (user-error "No further session")))
+
+(defun agent-river-previous-session (&optional n)
+  "Move to the Nth previous session line."
+  (interactive "p")
+  (agent-river-next-session (- (or n 1))))
+
+(defun agent-river-next-notable (&optional n)
+  "Move to the Nth next line of a kind in `agent-river-notable-kinds'."
+  (interactive "p")
+  (or (agent-river--scan (or n 1) #'agent-river--notable-line-p)
+      (user-error "No further failure, signal or note")))
+
+(defun agent-river-previous-notable (&optional n)
+  "Move to the Nth previous line of a kind in `agent-river-notable-kinds'."
+  (interactive "p")
+  (agent-river-next-notable (- (or n 1))))
 
 (defvar agent-river-session-line-map
   (let ((map (make-sparse-keymap)))
@@ -2111,7 +2218,12 @@ agent it would be a constant, and a constant column is noise."
     ;; depends on whether this line carries a session column, so it has to
     ;; be decided per line, not once for the buffer.
     (propertize line 'wrap-prefix
-                (make-string (+ 11 (if column (1+ (length column)) 0)) ?\s))))
+                (make-string (+ 11 (if column (1+ (length column)) 0)) ?\s)
+                ;; What the motion commands read.  Marked here rather than
+                ;; matched by a regexp over the rendered text, so changing
+                ;; how a line looks cannot quietly change what `n' stops on.
+                'agent-river-line 'event
+                'agent-river-kind kind)))
 
 (defvar-local agent-river--block-end nil
   "Marker just past the state block, or nil while none is drawn.")
@@ -2141,34 +2253,74 @@ Oldest is now at the bottom, so this trims the tail."
       (forward-line agent-river-max-entries)
       (delete-region (point) (point-max)))))
 
-(defun agent-river--follow (buffer)
-  "Keep every window showing BUFFER pinned to the head.
+(defun agent-river--head-end ()
+  "Return the end of the HUD's head: the state block and the newest event.
+`agent-river--block-end' sits at the start of the newest log line, so the
+head runs to the end of it -- somebody reading the top of the buffer is
+reading the state and what just happened, and both should keep following."
+  (save-excursion
+    (goto-char (or (and (markerp agent-river--block-end)
+                        (marker-position agent-river--block-end))
+                   (point-min)))
+    (line-end-position)))
+
+(defun agent-river--following-windows (buffer)
+  "Return the windows on BUFFER that are still showing its head.
+
+Read before the buffer is touched, because the head is about to move.
+Only these get pinned back afterwards: a window someone has scrolled or
+navigated away from is one they moved on purpose, and snapping it to the
+top on the next tool call makes the buffer unreadable by hand.  That is
+what it used to do, which is why the motion commands had to arrive with
+this."
+  (with-current-buffer buffer
+    (let ((head (agent-river--head-end)))
+      (seq-filter (lambda (window) (<= (window-point window) head))
+                  (get-buffer-window-list buffer nil t)))))
+
+(defun agent-river--follow (buffer windows)
+  "Pin WINDOWS on BUFFER back to the head.
 Newest first means there is nothing to tail: the state block and the
 latest event are both at the top, and stay put as the log grows."
-  (dolist (window (get-buffer-window-list buffer nil t))
-    (set-window-point window (with-current-buffer buffer (point-min)))
-    (set-window-start window (with-current-buffer buffer (point-min)))))
+  (dolist (window windows)
+    (when (window-live-p window)
+      (set-window-point window (with-current-buffer buffer (point-min)))
+      (set-window-start window (with-current-buffer buffer (point-min))))))
 
 ;;;###autoload
 (defun agent-river-log (kind detail &optional label)
   "Append DETAIL to the HUD as an event of KIND, tagged with session LABEL.
 This is the view half, usable on its own; `agent-river-observe' is the
 half that also folds."
-  (let ((buffer (agent-river--buffer)))
+  (let* ((buffer (agent-river--buffer))
+         (shown (get-buffer-window buffer t))
+         ;; Asked before the edit, because the edit moves the head.
+         (following (agent-river--following-windows buffer)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         ;; Newest first, block on top.  Tear the block down, put the new
         ;; line at the head of the log, trim the tail, rebuild the block --
         ;; so the two things worth seeing never move and never scroll away.
-        (agent-river--erase-block)
-        (goto-char (point-min))
-        (insert (agent-river--render kind detail label) "\n")
-        (agent-river--trim)
-        (agent-river--insert-block)))
-    (when (and agent-river-auto-display
-               (not (get-buffer-window buffer t)))
-      (agent-river-show))
-    (agent-river--follow buffer)
+        ;;
+        ;; `save-excursion' is what lets a reader keep their place.  Every
+        ;; edit here is above them, so the marker it restores rides the text
+        ;; they were on rather than the offset they were at.  Without it the
+        ;; `goto-char' below moved buffer point, and in the selected window
+        ;; buffer point *is* window point -- so the one window most likely
+        ;; to be the one being read was dragged back to the top by every
+        ;; tool call, whatever `agent-river--following-windows' had decided.
+        (save-excursion
+          (agent-river--erase-block)
+          (goto-char (point-min))
+          (insert (agent-river--render kind detail label) "\n")
+          (agent-river--trim)
+          (agent-river--insert-block))))
+    (when (and agent-river-auto-display (not shown))
+      (agent-river-show)
+      ;; A window that has only just appeared has never been navigated, so
+      ;; it follows whatever the windows before it were doing.
+      (setq following (get-buffer-window-list buffer nil t)))
+    (agent-river--follow buffer following)
     kind))
 
 ;;;###autoload
@@ -2295,6 +2447,14 @@ long as Emacs does."
              agent-river-registry)
     working))
 
+;;;###autoload
+(defun agent-river-refresh ()
+  "Redraw the state block now.
+The block redraws itself while an agent is working; this is for looking at
+it after everything has gone quiet and the timer has retired."
+  (interactive)
+  (agent-river--redraw-block))
+
 (defun agent-river--redraw-block ()
   "Redraw the state block in place, leaving the log untouched."
   (let ((buffer (get-buffer agent-river-buffer-name)))
@@ -2341,6 +2501,26 @@ the heading -- applied to the two kinds of heading the block has."
 ;; `outline-minor-mode-cycle' binds TAB only when the user opted in, so the
 ;; heading navigation has to be on the mode's own map to be there at all.
 (define-key agent-river-mode-map (kbd "TAB") #'agent-river-toggle-at-point)
+
+;; The map's keys, on the same gestures, because the two buffers are two
+;; views of one state and learning each separately is a cost with nothing
+;; bought by it.  SPC and DEL give up `special-mode's scrolling for line
+;; motion, the way dired's do.
+(define-key agent-river-mode-map (kbd "n") #'agent-river-next-line)
+(define-key agent-river-mode-map (kbd "p") #'agent-river-previous-line)
+(define-key agent-river-mode-map (kbd "SPC") #'agent-river-next-line)
+(define-key agent-river-mode-map (kbd "DEL") #'agent-river-previous-line)
+(define-key agent-river-mode-map [remap next-line] #'agent-river-next-line)
+(define-key agent-river-mode-map [remap previous-line] #'agent-river-previous-line)
+(define-key agent-river-mode-map (kbd "M-n") #'agent-river-next-session)
+(define-key agent-river-mode-map (kbd "M-p") #'agent-river-previous-session)
+(define-key agent-river-mode-map (kbd ">") #'agent-river-next-notable)
+(define-key agent-river-mode-map (kbd "<") #'agent-river-previous-notable)
+;; RET works on a session line through a keymap text property, which leaves
+;; it doing nothing everywhere else.  Bound here it says why instead.
+(define-key agent-river-mode-map (kbd "RET") #'agent-river-visit-session)
+;; `special-mode' puts `revert-buffer' on g, which has nothing to revert to.
+(define-key agent-river-mode-map (kbd "g") #'agent-river-refresh)
 
 (defun agent-river--stop-timer ()
   "Stop the refresh timer."

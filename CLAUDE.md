@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (193 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (200 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -308,6 +308,48 @@ Reading notes back and deciding what to tell the agent is a separate step, and
 is deliberately not built: `agent-river--signal` still fires on fail streaks
 only. Notes are visible in the HUD (`◉`) and counted in the report (`:notes`)
 first, so the rate can be seen before anything is fed back.
+
+### One set of motions, both buffers
+
+The HUD and the map take the same keys for the same three grains, because
+they are two views of one state and learning each separately buys nothing:
+`n`/`p` (plus `SPC`/`DEL` and the remapped arrows) walk every line worth
+stopping on, `M-n`/`M-p` walk the coarse structure, `>`/`<` walk the lines
+that want attention. A session line is a map entry; a detail heading is a map
+file line; a log line has no analogue and rides the fine grain. `>` is
+`agent-river-notable-kinds` here and "some agent is under this" there.
+
+Three rules, shared by `agent-river--scan` and `agent-river--map-scan`:
+
+- **Which lines a motion may stop on is a text property, never a regexp over
+  the rendered text.** `agent-river-line` and `agent-river-kind` are marked
+  where the line is built. The rendering is customisable, so a regexp would
+  let a user's setting change what `n` does.
+- **Marked for motion is not the same as actionable.** Session lines carry
+  `agent-river-line` whether or not `agent-river--make-visitable` found an
+  agent-shell buffer — tying the two together made `n` skip exactly the
+  sessions RET cannot open, which is the case where looking is all there is.
+- **A motion with nowhere to go refuses and leaves point alone**, rather than
+  landing near. The next RET would otherwise act on something the eye never
+  chose.
+
+`agent-river--scan` deliberately starts *past* the current line — right for a
+command, and the reason `agent-river-test--hud-lines` has to test the current
+line before it starts scanning.
+
+**The HUD follows only the windows still at its head** (`agent-river--head-end`,
+`agent-river--following-windows`, read *before* the edit because the edit moves
+the head). It used to pin every window to `point-min` on every event, which
+makes the buffer unreadable by hand and would have made these motions
+pointless. Two halves to it: window points are filtered, and `agent-river-log`
+wraps its edit in `save-excursion` — in the selected window buffer point *is*
+window point, so without it the one window most likely to be the one being
+read was dragged back to the top regardless. Everything the log edits is above
+a reader's position, so their marker rides the text rather than the offset.
+
+`hl-line-mode` is on in the map and deliberately off in the HUD: the HUD pins
+its point to the head until someone navigates, so a permanent highlight there
+would mark nothing anyone chose.
 
 ### Markdown belongs where the state leaves, not where it is watched
 

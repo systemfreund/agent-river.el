@@ -2119,6 +2119,143 @@ CALL overrides fields of the tool call record."
         (should-not (memq #'agent-river--after-save after-save-hook))
         (should (string-match-p "save watch stopped" (agent-river-test--hud)))))))
 
+;;; Moving about the HUD
+;;
+;; The same three grains as the map, on the same keys, so these mirror the
+;; map's motion tests.  The one thing that is only a problem here is the
+;; following: a log that pins itself to the head makes every motion pointless
+;; unless it knows to stop.
+
+(defmacro agent-river-test--with-hud (&rest body)
+  "Fold two sessions and a handful of events into a fresh HUD, run BODY."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-auto-display nil))
+     (agent-river-clear)
+     (let ((alpha (agent-river-state "s1" "alpha"))
+           (beta (agent-river-state "s2" "beta")))
+       (agent-river-fold alpha '(:kind "act" :cwd "/repo" :tool "Edit" :file "a.el"))
+       (agent-river-fold beta '(:kind "act" :cwd "/other" :tool "Read" :file "b.el")))
+     (agent-river-log "act" "Edit a.el" "alpha")
+     (agent-river-log "fail" "Bash exit 1" "alpha")
+     (agent-river-log "think" "Read b.el" "beta")
+     (agent-river-log "signal" "three failures in a row" "alpha")
+     (with-current-buffer (agent-river--buffer)
+       ;; Unwound, because the HUD buffer outlives the test: the expansion
+       ;; is buffer-local and left behind it made a later test that asserts
+       ;; the details start folded fail, in suite order only.
+       (unwind-protect
+           (progn
+             (setq agent-river--panel-expanded t)
+             (agent-river--redraw-block)
+             (goto-char (point-min))
+             ,@body)
+         (setq agent-river--panel-expanded nil)))))
+
+(defun agent-river-test--hud-lines (test)
+  "Return the lines of the current buffer TEST stops on, top down.
+Tests the line point is on first: `agent-river--scan' is a motion and so
+starts past it, which is right for a command and would silently drop the
+first line from a survey."
+  (goto-char (point-min))
+  (let (seen)
+    (when (funcall test)
+      (push (buffer-substring-no-properties (line-beginning-position)
+                                            (line-end-position))
+            seen))
+    (while (agent-river--scan 1 test)
+      (push (buffer-substring-no-properties (line-beginning-position)
+                                            (line-end-position))
+            seen))
+    (nreverse seen)))
+
+(ert-deftest agent-river-test-hud-motion-walks-every-marked-line ()
+  (agent-river-test--with-hud
+    (let ((lines (agent-river-test--hud-lines #'agent-river--entry-line-p)))
+      ;; Sessions, their details and the log, in buffer order.
+      (should (seq-find (lambda (l) (string-prefix-p "* alpha" l)) lines))
+      (should (seq-find (lambda (l) (string-prefix-p "** files:" l)) lines))
+      (should (seq-find (lambda (l) (string-match-p "Edit a\\.el" l)) lines))
+      ;; The eventlog divider is structure rather than an entry, and a
+      ;; motion that stopped there would stop on a line with nothing to do
+      ;; and nothing to read.
+      (should-not (seq-find (lambda (l) (string-prefix-p "* -- eventlog" l))
+                            lines)))))
+
+(ert-deftest agent-river-test-hud-session-motion-is-the-selection ()
+  (agent-river-test--with-hud
+    (let ((lines (agent-river-test--hud-lines #'agent-river--session-line-p)))
+      ;; Only the session lines: this is the coarse grain, the one that
+      ;; changes which session RET would visit, and it has to reach across
+      ;; the whole log rather than stopping where the block does.
+      (should (= (length lines) 2))
+      (should (string-prefix-p "* alpha" (nth 0 lines)))
+      (should (string-prefix-p "* beta" (nth 1 lines))))))
+
+(ert-deftest agent-river-test-hud-notable-motion-finds-the-landmarks ()
+  (agent-river-test--with-hud
+    (let ((lines (agent-river-test--hud-lines #'agent-river--notable-line-p)))
+      ;; What broke and what the agent was told, without the bulk of the
+      ;; log in between -- the distinction the motion exists to make.
+      (should (= (length lines) 2))
+      (should (seq-find (lambda (l) (string-match-p "three failures" l)) lines))
+      (should (seq-find (lambda (l) (string-match-p "Bash exit 1" l)) lines))
+      (should-not (seq-find (lambda (l) (string-match-p "Read b\\.el" l)) lines)))))
+
+(ert-deftest agent-river-test-hud-motion-lands-past-the-stars ()
+  (agent-river-test--with-hud
+    ;; Point starts on alpha's line, and a motion moves off it.
+    (should (agent-river--scan 1 #'agent-river--session-line-p))
+    ;; A cursor parked on an outline star says nothing about the line.
+    (should (looking-at-p "beta"))
+    ;; A log line starts with its timestamp and is left alone.
+    (should (agent-river--scan 1 #'agent-river--notable-line-p))
+    (should (= (point) (line-beginning-position)))))
+
+(ert-deftest agent-river-test-hud-motion-refuses-rather-than-drifts ()
+  (agent-river-test--with-hud
+    (goto-char (point-max))
+    (let ((before (point)))
+      (should-not (agent-river--scan 1 #'agent-river--entry-line-p))
+      (should (= (point) before)))))
+
+(ert-deftest agent-river-test-a-session-line-is-reachable-unhosted ()
+  (agent-river-test--with-hud
+    ;; Nothing here is hosted by agent-shell, so no session line is
+    ;; visitable -- and the motion still has to stop on both.  Tying the two
+    ;; together made `n' skip exactly the sessions RET could not open, which
+    ;; is the case where looking is all there is.
+    (should (= (length (agent-river-test--hud-lines #'agent-river--session-line-p)) 2))
+    (goto-char (point-min))
+    (agent-river--scan 1 #'agent-river--session-line-p)
+    (should-not (get-text-property (line-beginning-position) 'agent-river-session))))
+
+(ert-deftest agent-river-test-the-hud-follows-only-what-is-at-the-head ()
+  (agent-river-test--with-hud
+    (let ((buffer (current-buffer))
+          (window (selected-window)))
+      (set-window-buffer window buffer)
+      (set-window-point window (point-min))
+      ;; At the head, an event keeps it there: there is nothing to tail, and
+      ;; the state and the newest event are both up here.
+      (should (memq window (agent-river--following-windows buffer)))
+      ;; Moved away on purpose, it is no longer following -- pinning it back
+      ;; on the next tool call is what made the motion commands pointless
+      ;; before they arrived.
+      (goto-char (point-max))
+      (set-window-point window (point))
+      (should-not (memq window (agent-river--following-windows buffer)))
+      ;; And the place survives the edit, because every edit is above it.
+      (let ((line (buffer-substring-no-properties (line-beginning-position)
+                                                  (line-end-position))))
+        (agent-river-log "act" "Edit later.el" "alpha")
+        (should (equal (save-excursion
+                         (goto-char (window-point window))
+                         (buffer-substring-no-properties (line-beginning-position)
+                                                         (line-end-position)))
+                       line))))))
+
+
 ;;; Handing the state out as Markdown
 ;;
 ;; The export is a third derivation of the state beside the panel and the
