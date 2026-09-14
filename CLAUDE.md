@@ -546,6 +546,24 @@ together:
 - **The refresh timer** (`agent-river--ensure-timer`) redraws only the block, runs
   only while someone is mid-task, retires itself on the first tick that finds no
   one working, and cancels itself if a redraw throws.
+- **The session marker spins while the turn runs**, and is a *second* timer
+  (`agent-river--ensure-spinner`) on the same gate
+  (`agent-river--state-working-p`, which the refresh timer now shares so the
+  two cannot disagree about when a turn is over). Frames have to land often
+  enough to read as motion, and rebuilding the whole block eight times a
+  second would both cost far more than the animation is worth and drag the
+  block out from under a reader — so this timer only writes a `display`
+  property onto stars the panel already marked with `agent-river-spinner`,
+  and derives nothing. Three things it owes: the buffer text stays a literal
+  `*`, because `outline-regexp` is matched against the text and animating the
+  character would stop the block being a document the moment an agent started
+  working; the spinning stars are found by that property rather than by
+  looking for a star in the text, since the log below carries the agent's own
+  words and a line may well begin with one; and **clearing is part of
+  stopping** (`agent-river--stop-spinner`) — the last frame is a `display`
+  property, so a timer that merely cancelled itself would leave every finished
+  session showing whichever glyph it stopped on. `agent-river-spinner-frames`
+  nil is the off switch, and the answer for a font that has no such glyphs.
 
 ## Conventions
 

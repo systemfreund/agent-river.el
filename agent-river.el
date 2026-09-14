@@ -108,6 +108,30 @@ Elapsed times are only recomputed when the block is drawn, so without a
 tick they jump by however long the gap between two events was."
   :type 'number)
 
+(defcustom agent-river-spinner-frames
+  '("✢" "✳" "✶" "✻" "✽" "✻" "✶" "✳")
+  "Star-like glyphs the session marker cycles through while a turn runs.
+
+Drawn over the `*' that makes a session line an outline heading, never in
+place of it: `outline-regexp' matches the buffer text, so animating the
+character itself would stop the block being a document the moment an
+agent started working.  A `display' property changes what is shown and
+leaves the text alone.
+
+Nil turns the animation off and leaves the bare star -- which is also the
+answer for a font without these glyphs, where the alternative is a row of
+boxes.  Each frame should be one column wide, or the line will shift as
+it spins."
+  :type '(repeat string))
+
+(defcustom agent-river-spinner-interval 0.15
+  "Seconds between frames of the session marker's animation.
+Separate from `agent-river-refresh-interval' because the two do different
+amounts of work: a frame moves one text property, a refresh rebuilds the
+whole block, and a block rebuilt eight times a second would fight whoever
+is reading it."
+  :type 'number)
+
 (defcustom agent-river-phase-window 8
   "How many recent steps the phase is read from.
 Short enough to turn when the work turns, long enough that one stray
@@ -446,6 +470,20 @@ something we could not see."
    (t (let ((seen (agent-river-state-last-seen state)))
         (and seen (< (float-time (time-subtract (current-time) seen))
                      agent-river-session-ttl))))))
+
+(defun agent-river--state-working-p (state)
+  "Return non-nil while STATE is mid-turn, as opposed to merely alive.
+
+Deliberately narrower than `agent-river--active-p': a session that has
+ended its turn is still live, but nothing is happening in it, and a clock
+ticking -- or a marker spinning -- over an idle agent claims work that is
+not being done.
+
+This is what both timers are gated on, so the animation and the elapsed
+times agree about when a turn is over rather than each deciding for
+itself."
+  (and (agent-river--active-p state)
+       (not (agent-river-state-idle state))))
 
 (defun agent-river--active-count ()
   "Return how many states are currently running.
@@ -1520,6 +1558,7 @@ often the agent had to be told something is itself part of the state."
        ((not (string-empty-p detail))
         (agent-river-log kind detail label call)))
       (agent-river--ensure-timer)
+      (agent-river--ensure-spinner)
       ;; Only ask for an observation on an event that can actually deliver
       ;; one.  Computing it regardless meant a fail streak still standing when
       ;; the turn ended produced a signal on `idle' -- whose hook is async, so
@@ -2020,6 +2059,34 @@ simply the head of this list.  Empty while nothing has been touched."
                                  shown " · ")
                       (if (> (length files) limit) " …" "")))))))
 
+(defvar agent-river--spinner-frame 0
+  "Which of `agent-river-spinner-frames' is showing.
+Counts up without bound and is taken modulo the frame list, so every
+session line spins in step -- several markers out of phase would read as
+though they meant different things.")
+
+(defun agent-river--spinner-glyph ()
+  "Return the glyph the session marker is showing, or nil for none.
+Nil when the animation is off, which is what leaves the bare star."
+  (let ((frames agent-river-spinner-frames))
+    (when (consp frames)
+      (nth (mod agent-river--spinner-frame (length frames)) frames))))
+
+(defun agent-river--star (state)
+  "Return the outline marker opening STATE's block line.
+
+Always the literal `* ' -- `outline-regexp' is matched against the buffer
+text, so the animation is a `display' property over the star rather than
+a different character in its place.  The star is marked with
+`agent-river-spinner' where it is built, so the frame timer can find the
+lines that are spinning without re-deriving which sessions are working or
+matching a regexp over the rendered text."
+  (let ((glyph (and (agent-river--state-working-p state)
+                    (agent-river--spinner-glyph))))
+    (if glyph
+        (concat (propertize "*" 'agent-river-spinner t 'display glyph) " ")
+      "* ")))
+
 (defun agent-river--panel (state)
   "Return the header-line summary of STATE.
 
@@ -2088,7 +2155,8 @@ question an onlooker actually has."
     ;; made `n' skip every session agent-shell does not host.
     (let ((header (propertize
                    (agent-river--make-visitable
-                    (concat "* " (mapconcat #'identity parts " · "))
+                    (concat (agent-river--star state)
+                            (mapconcat #'identity parts " · "))
                     (agent-river-state-id state))
                    'agent-river-line 'session))
           (details (and agent-river--panel-expanded
@@ -2496,7 +2564,8 @@ half that also folds."
   ;; belong to buffers, not to what was folded out of them.
   (clrhash agent-river--source)
   (clrhash agent-river--tool-calls)
-  (agent-river--stop-timer))
+  (agent-river--stop-timer)
+  (agent-river--stop-spinner))
 
 ;;;###autoload
 (defun agent-river-status ()
@@ -2574,15 +2643,12 @@ The contention check, made reachable without writing Lisp."
 (defun agent-river--working-p ()
   "Return non-nil while some agent is actually mid-task.
 
-Deliberately narrower than `agent-river--active-p': a session that has
-ended its turn is still live, but nothing is happening in it, and a clock
-ticking over an idle agent claims work that is not being done.  It also
-means the timer stops on its own between turns instead of running for as
-long as Emacs does."
+Per-session the question is `agent-river--state-working-p'; this asks it
+of the registry, which is what makes both timers stop on their own
+between turns instead of running for as long as Emacs does."
   (let (working)
     (maphash (lambda (_key state)
-               (when (and (agent-river--active-p state)
-                          (not (agent-river-state-idle state)))
+               (when (agent-river--state-working-p state)
                  (setq working t)))
              agent-river-registry)
     working))
@@ -2681,6 +2747,80 @@ for opening or closing the thing under the heading."
           (run-at-time agent-river-refresh-interval
                        agent-river-refresh-interval
                        #'agent-river--tick))))
+
+;; The marker animation is a second timer rather than a faster first one.
+;; A frame has to land often enough to read as motion, and rebuilding the
+;; whole block that often would both cost far more than the animation is
+;; worth and drag the block out from under anybody reading it.  So this one
+;; writes a `display' property onto the stars the panel already marked and
+;; touches nothing else; it derives nothing, which is what makes it safe to
+;; run eight times a second.
+
+(defvar agent-river--spinner-timer nil
+  "Repeating timer animating the session markers, or nil while none runs.")
+
+(defun agent-river--spinner-paint (buffer glyph)
+  "Show GLYPH on every spinning star in BUFFER, or the bare star when nil.
+
+Scoped to the state block, which is the only place the marks are, and
+found by the `agent-river-spinner' property rather than by looking for a
+star in the text -- the log below carries the agent's own words and a
+line of it may well begin with one.
+
+`with-silent-modifications' because this is not an edit anyone should be
+able to undo, and at this rate an undo list of frame changes would grow
+without bound."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (with-silent-modifications
+        (let ((end (or (and (markerp agent-river--block-end)
+                            (marker-position agent-river--block-end))
+                       (point-min)))
+              (pos (point-min)))
+          (while (setq pos (text-property-any pos end 'agent-river-spinner t))
+            (if glyph
+                (put-text-property pos (1+ pos) 'display glyph)
+              (remove-text-properties pos (1+ pos) '(display nil)))
+            (setq pos (1+ pos))))))))
+
+(defun agent-river--stop-spinner ()
+  "Stop the animation and put the bare stars back.
+
+Clearing is part of stopping: the last frame drawn is a `display'
+property, so a timer that merely cancelled itself would leave every
+finished session showing whichever glyph it happened to stop on, as
+though it were still working."
+  (when (timerp agent-river--spinner-timer)
+    (cancel-timer agent-river--spinner-timer))
+  (setq agent-river--spinner-timer nil)
+  (agent-river--spinner-paint (get-buffer agent-river-buffer-name) nil))
+
+(defun agent-river--spin ()
+  "Advance the session markers one frame, or stop once no agent is working."
+  (condition-case err
+      (let ((buffer (get-buffer agent-river-buffer-name))
+            (glyph (agent-river--spinner-glyph)))
+        ;; get-buffer, not agent-river--buffer: a tick must never resurrect
+        ;; a buffer the user has killed.
+        (if (not (and glyph (buffer-live-p buffer) (agent-river--working-p)))
+            (agent-river--stop-spinner)
+          (setq agent-river--spinner-frame (1+ agent-river--spinner-frame))
+          (agent-river--spinner-paint buffer (agent-river--spinner-glyph))))
+    ;; Same bargain as the refresh timer: a tick that throws this often
+    ;; would bury Emacs in messages, so it retires instead of repeating.
+    (error (agent-river--stop-spinner)
+           (message "agent-river: marker animation stopped (%s)"
+                    (error-message-string err)))))
+
+(defun agent-river--ensure-spinner ()
+  "Start the marker animation if work is in progress and none runs."
+  (when (and (null agent-river--spinner-timer)
+             (agent-river--spinner-glyph)
+             (agent-river--working-p))
+    (setq agent-river--spinner-timer
+          (run-at-time agent-river-spinner-interval
+                       agent-river-spinner-interval
+                       #'agent-river--spin))))
 
 ;;; Heat and pulse, rendered into dired
 ;;

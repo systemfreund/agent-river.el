@@ -141,6 +141,16 @@ first**:
 19:06:58 superson ▸ Read  Cask
 ```
 
+The `*` on a session line spins through a handful of star-like glyphs
+(`✢ ✳ ✶ ✻ ✽`) while that session's turn is running, and settles back to a
+plain star the moment the turn ends — the same question the elapsed clock
+answers, asked at a glance and from across the room. It is drawn as a
+`display` property over a star that stays a star in the buffer: the line
+has to go on being an outline heading while it spins, and `outline-regexp`
+reads the text, not the picture. `agent-river-spinner-frames` set to nil
+turns it off, which is also the answer for a font that does not have the
+glyphs.
+
 Each block line is an outline heading, and `* -- eventlog` is the heading
 whose subtree the log is, so `TAB` (`outline-cycle`) folds the log away and
 leaves just the state.  The fold is for looking, not state: it lives in

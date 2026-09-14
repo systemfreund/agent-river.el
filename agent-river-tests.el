@@ -904,6 +904,73 @@ stubbed here so the tests do not depend on agent-shell being installed."
     (let ((line (agent-river--panel (gethash "s1" agent-river-registry))))
       (should-not (get-text-property 1 'agent-river-session line)))))
 
+(ert-deftest agent-river-test-the-marker-cycles-through-its-frames ()
+  (let ((agent-river-spinner-frames '("a" "b" "c")))
+    (let ((agent-river--spinner-frame 0))
+      (should (equal (agent-river--spinner-glyph) "a")))
+    (let ((agent-river--spinner-frame 1))
+      (should (equal (agent-river--spinner-glyph) "b")))
+    ;; The counter climbs without bound -- it is never reset, so that every
+    ;; session line is on the same frame -- and so it has to wrap.
+    (let ((agent-river--spinner-frame 3))
+      (should (equal (agent-river--spinner-glyph) "a")))
+    (let ((agent-river--spinner-frame 1000))
+      (should (equal (agent-river--spinner-glyph) "b")))))
+
+(ert-deftest agent-river-test-no-frames-means-no-animation ()
+  ;; The off switch, and the answer for a font without the glyphs: the bare
+  ;; star, not a star with an empty display property over it.
+  (agent-river-test--with-session state
+    (let ((agent-river-spinner-frames nil))
+      (should-not (agent-river--spinner-glyph))
+      (should (equal (agent-river--star state) "* "))
+      (should-not (get-text-property 0 'agent-river-spinner
+                                     (agent-river--star state))))))
+
+(ert-deftest agent-river-test-only-a-running-turn-spins ()
+  (agent-river-test--with-session state
+    (let ((agent-river-spinner-frames '("✳"))
+          (agent-river--spinner-frame 0))
+      (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"))
+      (let ((star (agent-river--star state)))
+        (should (get-text-property 0 'agent-river-spinner star))
+        (should (equal (get-text-property 0 'display star) "✳")))
+      ;; The turn ends and the marker stops: a glyph still moving over an
+      ;; agent that has finished claims work nobody is doing, which is the
+      ;; same lie the refresh timer is gated against telling.
+      (agent-river-fold state '(:kind "idle"))
+      (should-not (agent-river--state-working-p state))
+      (let ((star (agent-river--star state)))
+        (should-not (get-text-property 0 'agent-river-spinner star))
+        (should-not (get-text-property 0 'display star))))))
+
+(ert-deftest agent-river-test-an-animated-marker-is-still-an-outline-heading ()
+  ;; The whole reason the animation is a display property: `outline-regexp'
+  ;; is matched against the buffer text, so a session line must read as a
+  ;; heading while it spins.  Animating the character itself would make the
+  ;; block stop being a document exactly when an agent started working.
+  (agent-river-test--with-session state
+    (let ((agent-river-spinner-frames '("✽"))
+          (agent-river--spinner-frame 0))
+      (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"))
+      (let ((line (substring-no-properties (agent-river--panel state))))
+        (should (string-prefix-p "* " line))
+        (should (string-match-p "^\\*+ " line))))))
+
+(ert-deftest agent-river-test-stopping-the-marker-puts-the-star-back ()
+  ;; Clearing is part of stopping.  The last frame is a display property, so
+  ;; a timer that only cancelled itself would leave every finished session
+  ;; showing whichever glyph it stopped on.
+  (with-temp-buffer
+    (insert (propertize "*" 'agent-river-spinner t 'display "✽") " alpha\n")
+    (setq agent-river--block-end (copy-marker (point) nil))
+    (agent-river--spinner-paint (current-buffer) "✳")
+    (should (equal (get-text-property (point-min) 'display) "✳"))
+    (agent-river--spinner-paint (current-buffer) nil)
+    (should-not (get-text-property (point-min) 'display))
+    ;; And the text underneath was never what changed.
+    (should (equal (char-after (point-min)) ?*))))
+
 (ert-deftest agent-river-test-a-dying-shell-drops-its-line-from-the-block ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
