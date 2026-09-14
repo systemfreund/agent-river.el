@@ -699,9 +699,21 @@ replaying a session's events from the start."
       ;; The anchors go with them.  They are keyed on artifact keys, so
       ;; without the artifacts they address nothing, and a later touch of
       ;; the same file re-folds the anchor from its `:path' anyway.
-      (clrhash (agent-river-state-artifacts state))
-      (clrhash (agent-river-state-task-artifacts state))
-      (clrhash (agent-river-state-anchors state)))
+      ;;
+      ;; `:files' narrows the same transition to the keys it names, which is
+      ;; what `agent-river-forget-gone-files' folds.  One branch rather than
+      ;; two: the state change is identical and only its subject differs, and
+      ;; a second kind would be a second place for "what forgetting means"
+      ;; to be decided.
+      (let ((files (plist-get event :files)))
+        (if files
+            (dolist (file files)
+              (remhash file (agent-river-state-artifacts state))
+              (remhash file (agent-river-state-task-artifacts state))
+              (remhash file (agent-river-state-anchors state)))
+          (clrhash (agent-river-state-artifacts state))
+          (clrhash (agent-river-state-task-artifacts state))
+          (clrhash (agent-river-state-anchors state)))))
 
      ((equal kind "intent")
       (setf (agent-river-state-intent state) (plist-get event :text)
@@ -2625,27 +2637,111 @@ Not the same as `agent-river-reset', which forgets the sessions
 themselves.  Here the steps, the failures and the task survive; only the
 record of where the work was is dropped.
 
-Deliberately left off the map's keymap.  It throws measurements away, and
-a single keystroke in a view buffer is the wrong gesture for that."
+Deliberately left off the map's keymap.  It throws measurements away with
+no way back, and a single keystroke in a view buffer is the wrong gesture
+for that.  `agent-river-forget-gone-files' is the one that is bound
+there, and the difference is its subject: it drops only what is about a
+file that no longer exists."
   (interactive)
   (let ((n 0))
     (maphash (lambda (_key state)
                (setq n (+ n (hash-table-count (agent-river-state-artifacts state))))
                (agent-river-fold state '(:kind "forget")))
              agent-river-registry)
-    ;; Logged only into a HUD that already exists.  `agent-river-log' would
-    ;; otherwise create the buffer and `agent-river-auto-display' pop a
-    ;; window for it, which is a lot of furniture to move in answer to a
-    ;; command run from the map.
-    (if (get-buffer agent-river-buffer-name)
-        (agent-river-log "note" (format "forgot %d artifact%s"
-                                        n (if (= n 1) "" "s")))
-      (agent-river--redraw-block))
-    ;; Drawn rather than marked dirty: the map's timer only runs while an
-    ;; agent is working, so a flag set between turns would sit there until
-    ;; the next one and the view would go on naming what was just forgotten.
-    (agent-river--map-draw)
-    (message "agent-river: forgot %d artifact%s" n (if (= n 1) "" "s"))))
+    (agent-river--forget-reported
+     (format "forgot %d artifact%s" n (if (= n 1) "" "s")))))
+
+(defun agent-river--forget-reported (text)
+  "Say TEXT happened, and redraw the views a forget has just changed.
+
+Logged only into a HUD that already exists.  `agent-river-log' would
+otherwise create the buffer and `agent-river-auto-display' pop a window
+for it, which is a lot of furniture to move in answer to a command run
+from the map.
+
+The map is drawn rather than marked dirty: its timer only runs while an
+agent is working, so a flag set between turns would sit there until the
+next one and the view would go on naming what was just forgotten."
+  (if (get-buffer agent-river-buffer-name)
+      (agent-river-log "note" text)
+    (agent-river--redraw-block))
+  (agent-river--map-draw)
+  (message "agent-river: %s" text))
+
+(defun agent-river--artifact-gone-p (state key)
+  "Return non-nil when STATE's artifact KEY names a file that is not there.
+
+Placed the way every other view places a key -- through
+`agent-river--heat-absolute', so the anchor wins over the cwd for a file
+that was reached from outside it, and so this cannot decide a file is
+gone by looking for it in a directory no agent ever opened.
+
+A key that cannot be placed at all is not gone but unplaceable, and is
+kept: a state folded without a cwd would otherwise have every artifact it
+ever recorded swept away by a command that never found any of them."
+  (let ((abs (agent-river--heat-absolute
+              (list :cwd (agent-river-state-cwd state)
+                    :anchor (let ((anchors (agent-river-state-anchors state)))
+                              (and anchors (gethash key anchors)))
+                    :file key))))
+    (and abs (not (file-exists-p abs)))))
+
+(defun agent-river--gone-artifacts (state)
+  "Return STATE's artifact keys whose files are no longer on disk.
+
+Read from the session frame, which is the wider of the two: a file
+deleted during an earlier task is just as gone, and sweeping only the
+task frame would leave the session frame naming it -- and the map, which
+reads the session frame by default, still drawing it."
+  (let (gone)
+    (maphash (lambda (key _entry)
+               (when (agent-river--artifact-gone-p state key)
+                 (push key gone)))
+             (agent-river-state-artifacts state))
+    gone))
+
+;;;###autoload
+(defun agent-river-forget-gone-files ()
+  "Forget the artifacts naming files that are no longer on disk.
+
+The map strikes those names through rather than dropping them, because a
+deletion is a thing the agent did and losing it would make the view
+flicker through every branch switch.  That is right while the deletion is
+news and wrong once it is history -- after a merge or a cleanup the
+struck-through lines are a list of what used to be there, and only you
+know when that moment has come.  So this is a command and not a rule.
+
+Measured against the disk, not against the strike-through.  An entry is
+also drawn as missing when it was reached through an anchor the root
+being listed has nothing to do with, and that file is not gone but
+elsewhere -- sweeping it would throw away a measurement about a file that
+still exists.  Such a line therefore stays struck through afterwards,
+which looks like the command missing one and is the command refusing one.
+
+Bound to \\<agent-river-map-mode-map>\\[agent-river-forget-gone-files] in the map, unlike
+`agent-river-forget-artifacts': the subject here is already gone, so what
+is lost is the record of an absence rather than the record of the work.
+It still asks, because a keystroke in a view buffer is easy to hit and
+nothing undoes this."
+  (interactive)
+  (let ((found nil) (n 0))
+    (maphash (lambda (_key state)
+               (let ((gone (agent-river--gone-artifacts state)))
+                 (when gone
+                   (push (cons state gone) found)
+                   (setq n (+ n (length gone))))))
+             agent-river-registry)
+    (cond
+     ((null found)
+      (message "agent-river: no artifact names a file that is gone"))
+     ((not (y-or-n-p (format "Forget %d artifact%s naming files that are gone? "
+                             n (if (= n 1) "" "s"))))
+      (message "agent-river: kept"))
+     (t
+      (dolist (cell found)
+        (agent-river-fold (car cell) (list :kind "forget" :files (cdr cell))))
+      (agent-river--forget-reported
+       (format "forgot %d gone file%s" n (if (= n 1) "" "s")))))))
 
 ;;;###autoload
 (defun agent-river-status ()
@@ -4717,6 +4813,11 @@ makes this a degradation rather than a second view to keep in step."
   (define-key map (kbd "RET") #'agent-river-map-visit)
   (define-key map (kbd "^") #'agent-river-map-up)
   (define-key map (kbd "a") #'agent-river-map-toggle-untouched)
+  ;; The one forgetting command that belongs on a key here: it drops only
+  ;; what is about a file that is already gone, where
+  ;; `agent-river-forget-artifacts' drops the record of the work itself and
+  ;; is deliberately left to `M-x'.
+  (define-key map (kbd "C") #'agent-river-forget-gone-files)
   ;; `markdown-ts-view-mode' binds this to `ignore' to keep `revert-buffer'
   ;; off it; here there is something to revert to.
   (define-key map (kbd "g") #'agent-river-map-refresh)

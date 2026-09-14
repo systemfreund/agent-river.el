@@ -472,6 +472,26 @@ Four things about the map are load-bearing:
   written, because the fold owns the state. Deliberately not on the map's
   keymap: it throws measurements away, and a single keystroke in a view
   buffer is the wrong gesture for that.
+- **A deletion is news, and then it is history**
+  (`agent-river-forget-gone-files`, `C` in the map). The strike-through keeps a
+  gone file on the map on purpose — the deletion is a thing the agent did — but
+  after a merge or a cleanup those lines are a list of what used to be there,
+  and only the user knows when that moment came. So it is a command, not a
+  rule. Three things hold it apart from the one above, which is what earns it a
+  key in a view buffer. Its **subject is already gone**, so what is lost is the
+  record of an absence rather than the record of the work. It is **measured
+  against the disk, never against the strike-through**: an entry is also drawn
+  as missing when it was reached through an anchor the listed root has nothing
+  to do with, and that file is elsewhere rather than gone — so such a line
+  stays struck through afterwards, which looks like the command missing one and
+  is the command refusing one. And a key **nothing can place is unplaceable,
+  not gone** (`agent-river--artifact-gone-p` goes through
+  `agent-river--heat-absolute`, so the anchor wins over the cwd), or a state
+  folded without a cwd would have every artifact it ever recorded swept away by
+  a command that found none of them. It narrows the same `forget` event with
+  `:files` rather than adding a kind of its own: the transition is identical
+  and only its subject differs, and a second kind would be a second place for
+  what forgetting means to be decided. It asks first, because nothing undoes it.
 - **Weight and position are different readings.** The numbers say where an
   agent has *been*; `:current` says where it *is*, and after a long task those
   are different places. `:current` is computed across everything a party

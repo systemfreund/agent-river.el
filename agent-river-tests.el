@@ -3008,6 +3008,78 @@ is how a test asks what the view looks like once the work has moved on."
     (should (= (agent-river-state-steps state) 1))
     (should (= (agent-river-state-fail-streak state) 2))))
 
+(ert-deftest agent-river-test-forget-can-name-which-files-to-drop ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"
+                                    :path "/w/elsewhere/a.el" :cwd "/w"))
+    (agent-river-fold state '(:kind "act" :tool "Edit" :file "b.el" :cwd "/w"))
+    ;; One branch, one transition, a smaller subject.  A second kind would be
+    ;; a second place for "what forgetting means" to be decided.
+    (agent-river-fold state '(:kind "forget" :files ("a.el")))
+    (should-not (gethash "a.el" (agent-river-state-artifacts state)))
+    (should (gethash "b.el" (agent-river-state-artifacts state)))
+    (should-not (gethash "a.el" (agent-river-state-task-artifacts state)))
+    ;; The anchor goes with the artifact it addressed, and only that one.
+    (should (= (hash-table-count (agent-river-state-anchors state)) 0))
+    ;; And the session is untouched, as with a whole forget.
+    (should (= (agent-river-state-steps state) 2))))
+
+(ert-deftest agent-river-test-a-gone-file-is-measured-against-the-disk ()
+  (agent-river-test--with-tree root
+    (agent-river-test--with-session state
+      (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+      (agent-river-fold state (list :kind "act" :cwd root :file "docs/old.md"))
+      ;; Only the one that is not there.  `common/c.el' exists, and a command
+      ;; that swept it would be throwing away a measurement about live work.
+      (should (equal (agent-river--gone-artifacts state) '("docs/old.md")))
+      (delete-file (expand-file-name "common/c.el" root))
+      (should (equal (sort (agent-river--gone-artifacts state) #'string<)
+                     '("common/c.el" "docs/old.md"))))))
+
+(ert-deftest agent-river-test-a-stray-is-looked-for-where-it-really-was ()
+  (agent-river-test--with-tree root
+    (agent-river-test--with-session state
+      ;; `agent-river--rel' degrades a file outside the cwd to a bare
+      ;; basename, so resolving it against the cwd looks for it in a
+      ;; directory no agent ever opened -- and would then call a file that
+      ;; exists gone.  The anchor is what stops that.
+      (agent-river-fold state (list :kind "act" :cwd root
+                                    :file (expand-file-name "common/c.el" root)
+                                    :path (expand-file-name "common/c.el" root)))
+      (should-not (agent-river--gone-artifacts state))
+      ;; A key nothing can place is unplaceable rather than gone: a state
+      ;; folded without a cwd must not have every artifact it ever recorded
+      ;; swept away by a command that never found any of them.
+      (should-not (agent-river--artifact-gone-p
+                   (agent-river--state-create :id "x" :artifacts nil
+                                              :anchors nil)
+                   "c.el")))))
+
+(ert-deftest agent-river-test-cleaning-up-gone-files-asks-first ()
+  (agent-river-test--with-tree root
+    (agent-river-test--with-session state
+      (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+      (agent-river-fold state (list :kind "act" :cwd root :file "docs/old.md"))
+      ;; A keystroke in a view buffer is easy to hit and nothing undoes this,
+      ;; so the question is part of the command rather than a nicety.
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+        (agent-river-forget-gone-files))
+      (should (gethash "docs/old.md" (agent-river-state-artifacts state)))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (agent-river-forget-gone-files))
+      (should-not (gethash "docs/old.md" (agent-river-state-artifacts state)))
+      ;; Where the work actually is survives it.
+      (should (gethash "common/c.el" (agent-river-state-artifacts state))))))
+
+(ert-deftest agent-river-test-cleaning-up-gone-files-is-on-the-map-s-keys ()
+  ;; The one forgetting command that belongs on a key there: its subject is
+  ;; already gone, so what is lost is the record of an absence.
+  (dolist (map (list agent-river-map-mode-map agent-river-map-plain-mode-map))
+    (should (eq (lookup-key map (kbd "C")) #'agent-river-forget-gone-files)))
+  ;; And the one that drops the record of the work itself stays off them.
+  (dolist (map (list agent-river-map-mode-map agent-river-map-plain-mode-map))
+    (should-not (eq (lookup-key map (kbd "C")) #'agent-river-forget-artifacts))))
+
 (ert-deftest agent-river-test-the-filter-never-hides-activity ()
   ;; The one thing the map exists not to do.  The filter is written as "has
   ;; no parties" rather than "is not on disk", so an entry the state knows
