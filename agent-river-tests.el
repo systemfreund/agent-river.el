@@ -2409,7 +2409,59 @@ first line from a survey."
   ;; A bare key resolves as a file sitting directly in the cwd, which is
   ;; what it almost always is.
   (should (equal (agent-river--heat-absolute '(:cwd "/repo" :file "a.el"))
-                 "/repo/a.el")))
+                 "/repo/a.el"))
+  ;; Except where the key came from outside the cwd, and an anchor says so:
+  ;; resolving that one against the cwd drew it inside a project it has
+  ;; nothing to do with.
+  (should (equal (agent-river--heat-absolute
+                  '(:cwd "/repo" :anchor "/home/u/notes" :file "a.el"))
+                 "/home/u/notes/a.el")))
+
+(ert-deftest agent-river-test-a-file-outside-the-cwd-keeps-its-directory ()
+  (agent-river-test--with-session state
+    ;; Under the cwd the cwd already places the key, and a second copy of
+    ;; that fact is only a way for the two to disagree.
+    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "src/a.el"
+                                  :path "/repo/src/a.el"))
+    (should-not (gethash "src/a.el" (agent-river-state-anchors state)))
+    ;; Outside it `agent-river--rel' has already thrown the path away, so
+    ;; without this the file lands wherever the cwd happens to point.
+    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "MEMORY.md"
+                                  :path "/home/u/notes/MEMORY.md"))
+    (should (equal (gethash "MEMORY.md" (agent-river-state-anchors state))
+                   "/home/u/notes"))))
+
+(ert-deftest agent-river-test-a-key-that-comes-back-inside-drops-its-anchor ()
+  (agent-river-test--with-session state
+    ;; The same basename is reachable both ways, so an anchor that is never
+    ;; cleared goes on claiming the outside directory after the file is
+    ;; being edited in the project itself.
+    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "MEMORY.md"
+                                  :path "/home/u/notes/MEMORY.md"))
+    (should (gethash "MEMORY.md" (agent-river-state-anchors state)))
+    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "MEMORY.md"
+                                  :path "/repo/MEMORY.md"))
+    (should-not (gethash "MEMORY.md" (agent-river-state-anchors state)))))
+
+(ert-deftest agent-river-test-a-stray-file-is-a-root-of-its-own ()
+  (agent-river-test--with-session state
+    ;; One session, one cwd -- but two trees, because the file it edited
+    ;; under ~/.claude is not in the project.  Grouping by cwd alone found
+    ;; a single root and drew the stray inside the project.
+    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "src/a.el"
+                                  :path "/repo/src/a.el"))
+    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "MEMORY.md"
+                                  :path "/home/u/notes/MEMORY.md"))
+    (let ((roots (mapcar #'car (agent-river--map-all-roots 'session))))
+      (should (member "/repo" roots))
+      (should (member "/home/u/notes" roots)))
+    ;; And the stray is reached under its own root, not under the project's.
+    (should (equal (mapcar (lambda (n) (plist-get n :rel))
+                           (agent-river--map-reach "/home/u/notes" 'session))
+                   '("MEMORY.md")))
+    (should (equal (mapcar (lambda (n) (plist-get n :rel))
+                           (agent-river--map-reach "/repo" 'session))
+                   '("src/a.el")))))
 
 (ert-deftest agent-river-test-a-subagent-is-named-under-its-root ()
   (agent-river-test--with-session state

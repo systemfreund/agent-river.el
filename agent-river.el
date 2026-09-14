@@ -226,6 +226,14 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
   ;; from the main checkout is still one artifact, and a view that needs to
   ;; place a key in a real directory tree combines the two deliberately.
   cwd
+  ;; hash: artifact key -> the absolute directory it really sits in, for the
+  ;; keys `cwd' cannot place.  `agent-river--rel' degrades a file outside the
+  ;; cwd to a bare basename, so resolving it against the cwd puts it in a
+  ;; directory no agent ever opened -- which is how a file edited under
+  ;; ~/.claude showed up inside the project tree.  Only the strays are
+  ;; recorded: a key that resolves under the cwd is anchored by the cwd
+  ;; already, and storing it twice gives the two a way to disagree.
+  anchors
   parent            ; key of the session that spawned this one, nil at a root
   agent-type        ; "Explore", "general-purpose", ... nil at a root
   started last-seen ; last-seen is the liveness clock a registry needs
@@ -396,6 +404,7 @@ AGENT-TYPE are set once, when the state is created."
                              :started (current-time)
                              :artifacts (make-hash-table :test 'equal)
                              :task-artifacts (make-hash-table :test 'equal)
+                             :anchors (make-hash-table :test 'equal)
                              :tools (make-hash-table :test 'equal)
                              :fail-streak 0
                              :fail-runs 0
@@ -481,6 +490,28 @@ starts misleading people."
     (agent-river--touch-1 (agent-river-state-artifacts state) path)
     (agent-river--touch-1 (agent-river-state-task-artifacts state) path)))
 
+(defun agent-river--anchor (state key path)
+  "Record where KEY really sits, given the absolute PATH it was folded from.
+
+Only for the keys the cwd cannot place.  `agent-river--rel' leaves a file
+outside the session's cwd as a bare basename, which a view then resolves
+against the cwd and draws inside a tree the file has nothing to do with.
+The directory is kept here instead of in the key so the key stays
+normalised -- one file reached from a worktree and from the main checkout
+is still one artifact, and only the question of *where* consults this.
+
+A key that has moved back under the cwd drops its anchor rather than
+keeping the old one: the same basename can be reached both ways, and a
+stale anchor would go on claiming the outside directory forever."
+  (let ((table (agent-river-state-anchors state))
+        (cwd (agent-river-state-cwd state)))
+    (when (and table key (not (string-empty-p key))
+               path (not (string-empty-p path)))
+      (if (and cwd (not (string-empty-p cwd))
+               (string-prefix-p (file-name-as-directory cwd) path))
+          (remhash key table)
+        (puthash key (directory-file-name (file-name-directory path)) table)))))
+
 (defun agent-river--record-tool (state tool ms failed)
   "Fold one completed call of TOOL taking MS into STATE.
 FAILED marks it as an error rather than a success."
@@ -502,6 +533,7 @@ replaying a session's events from the start."
   (let ((kind (plist-get event :kind))
         (tool (plist-get event :tool))
         (file (plist-get event :file))
+        (path (plist-get event :path))
         (ms   (plist-get event :ms)))
     ;; Folded rather than set where the state is addressed, so it keeps the
     ;; promise the docstring makes: replay the events and the anchor comes
@@ -550,7 +582,8 @@ replaying a session's events from the start."
       (let ((window (nthcdr (1- agent-river-phase-window)
                             (agent-river-state-recent state))))
         (when window (setcdr window nil)))
-      (agent-river--touch state file))
+      (agent-river--touch state file)
+      (agent-river--anchor state file path))
 
      ((equal kind "think")
       (agent-river--record-tool state tool ms nil)
@@ -955,9 +988,11 @@ what keeps that from folding as a success."
           :file (and file (agent-river--rel file cwd))
           ;; The absolute name, for the views that have to reach the file on
           ;; disk.  Carried beside `:file' rather than replacing it, and never
-          ;; folded: the artifact tables are keyed on the normalised form, and
-          ;; an absolute path in them would make one file reached from a
-          ;; worktree and from the main checkout count as two again.
+          ;; folded *into a key*: the artifact tables are keyed on the
+          ;; normalised form, and an absolute path in them would make one file
+          ;; reached from a worktree and from the main checkout count as two
+          ;; again.  Its directory alone is folded, and only for the keys the
+          ;; cwd cannot place -- see `agent-river--anchor'.
           :path file
           :ms (alist-get 'duration_ms payload)
           :text (when (equal kind "prompt")
@@ -2723,6 +2758,8 @@ with two `Explore' lines and no way to tell whose."
 
 Each carries `:party' (`agent-river--party-label'), `:cwd' (the anchor its
 `:file' is relative to), `:file', the age-weighted `:weight' and `:last'.
+`:anchor' is the real directory for a `:file' the cwd cannot place, and
+nil for everything under it -- see `agent-river--anchor'.
 SCOPE is `session' for the whole session, `task' or nil for the current
 task.
 
@@ -2734,10 +2771,12 @@ the same weighting, and a second walk is a second place for them to drift."
     (maphash
      (lambda (_id state)
        (let ((party (agent-river--party-label state))
-             (cwd (agent-river-state-cwd state)))
+             (cwd (agent-river-state-cwd state))
+             (anchors (agent-river-state-anchors state)))
          (maphash (lambda (path entry)
                     (push (list :party party
                                 :cwd cwd
+                                :anchor (and anchors (gethash path anchors))
                                 :file path
                                 :weight (agent-river--heat-weight entry)
                                 :last (plist-get entry :last))
@@ -2757,12 +2796,12 @@ unknown, and guessing at it would place files in directories no agent
 ever opened.
 
 A key that is a bare name is resolved as a file sitting directly in the
-cwd, which is what it almost always is; `agent-river--rel' degrades a file
-*outside* the cwd to the same shape, and those land here as a file of that
-name in the root.  Contained rather than corrected: a bare name has no
-directory component, so it can never be summed into a subdirectory, and
-the worst it can do is put one line in a listing it does not belong to."
-  (let ((cwd (plist-get entry :cwd))
+cwd, which is what it almost always is.  `agent-river--rel' degrades a
+file *outside* the cwd to the same shape, and resolving those against the
+cwd used to draw them inside a tree they have nothing to do with; they
+carry an `:anchor' instead, the directory they were really folded from,
+and it wins over the cwd here."
+  (let ((cwd (or (plist-get entry :anchor) (plist-get entry :cwd)))
         (file (plist-get entry :file)))
     (and cwd (not (string-empty-p cwd)) file (not (string-empty-p file))
          (expand-file-name file (file-name-as-directory cwd)))))
@@ -3121,18 +3160,22 @@ most worth being able to scan a whole listing for."
         (t a)))
 
 (defun agent-river--map-all-roots (&optional scope)
-  "Return all unique roots from touched files, sorted by recency.
+  "Return every directory tree the agents have touched, newest first.
 
-Each root is the session's cwd from which files were touched.
-Roots are sorted by the most recent touch time within them."
+A root is a session's cwd, or -- for a file outside it -- the `:anchor'
+that says where the file really is.  Taking the cwd alone put every stray
+under whichever project happened to be current, which is the whole reason
+the anchor is folded: a session editing one file under ~/.claude has two
+roots, not one, and a view that shows a single root is hiding the second.
+Roots are sorted by the most recent touch within them."
   (let ((roots (make-hash-table :test 'equal))
         (entries (agent-river--heat-entries scope)))
     (dolist (entry entries)
-      (let ((cwd (plist-get entry :cwd)))
-        (when (and cwd (not (string-empty-p cwd)))
-          (puthash cwd
+      (let ((root (or (plist-get entry :anchor) (plist-get entry :cwd))))
+        (when (and root (not (string-empty-p root)))
+          (puthash root
                    (agent-river--map-later
-                    (gethash cwd roots)
+                    (gethash root roots)
                     (plist-get entry :last))
                    roots))))
     ;; Convert to a sorted list: most recent first

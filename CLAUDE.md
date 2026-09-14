@@ -176,6 +176,14 @@ These are load-bearing; the tests enforce most of them.
   worse than matching on the name for *identity* questions and strictly better
   for *placement* ones, so both readings exist and each says which it is: file
   shading still matches on the basename, directory aggregation resolves.
+  A file *outside* the cwd is degraded to a bare basename by the same
+  normalisation, so the cwd cannot place it either — resolving one against the
+  cwd drew a file edited under `~/.claude` inside the project tree. Those keys
+  carry their real directory in `anchors` (`agent-river--anchor`), folded from
+  `:path` and kept only for the strays: a key under the cwd is placed by the
+  cwd already, and a second copy of that fact is only a way for the two to
+  disagree. An anchor is dropped as soon as the key is reached from inside the
+  cwd, because the same basename is reachable both ways.
 - **One session, one way in** (`agent-river--claim`). The hooks and the
   agent-shell stream describe the same session, so folding both counts every
   step twice — and a doubled failure streak states a fact that is false, to the
@@ -229,11 +237,12 @@ What a consumer must respect:
 - **The state cannot address a file on disk** — `agent-river--rel` sees to that,
   and it must keep doing so. Three ways out. Look the file up *from* the
   consumer's side by basename (what `agent-river-touching` matches on); read an
-  extra event key the fold ignores (`:path`, the absolute name, carried beside
-  `:file` and never folded); or resolve a key against `agent-river-state-cwd`
-  (`agent-river--heat-absolute`), which is the only one that can place a key in
-  a directory tree and the only one that re-splits a worktree from its main
-  checkout. Reach for the third when the question is *where*, not *which*.
+  extra event key the fold keeps out of the artifact keys (`:path`, the
+  absolute name, carried beside `:file`); or resolve a key against
+  `agent-river-state-cwd`, falling back to its `anchors` entry where the cwd
+  cannot place it (`agent-river--heat-absolute`) — the only one that can place
+  a key in a directory tree and the only one that re-splits a worktree from its
+  main checkout. Reach for the third when the question is *where*, not *which*.
 - **Off by default, and the gesture that turns it on is what turns it off.**
   Writing into buffers the user did not point this at needs consent, which is
   what the global minor mode is for (`agent-river-heat-mode`). A consumer that
