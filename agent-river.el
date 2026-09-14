@@ -2299,8 +2299,13 @@ EVENT is the mouse event, when invoked from one."
      (t (pop-to-buffer buffer)))))
 
 (defun agent-river--panel-block ()
-  "Return one panel line per live session, newest state first,
-closed by the `* -- eventlog' heading that starts the log.
+  "Return one panel line per live session, and nothing else.
+
+There is no heading closing the block off from the log below it.  One was
+tried -- `* -- eventlog', so the log was an outline subtree TAB could fold
+away -- and removed: a divider that exists only to be a fold handle earns
+its line from nobody who is reading, and TAB now unfolds the session under
+point instead.
 
 Lives at the foot of the log rather than in the header line, because a
 header line is structurally single-line: with two sessions it could only

@@ -103,25 +103,36 @@ Codex or Gemini session.
 
 ## What you see
 
-One line per step:
+One line per step — and one line per *tool call*, which is not the same
+thing. Shown oldest-first here for reading; the buffer itself is newest-first.
 
 ```
-16:22:48 ◆ add a queue-position render field     ← task from the user
-16:22:59 ▸ Bash  Syntax-check the updated hook   ← acting: about to run a tool
-16:23:01 · Bash ✓  12ms                          ← tool returned, how long it took
-16:23:03 ◇ The mode sets truncate-lines, so a…   ← the agent's own reasoning
-16:23:03 ▸ Edit  supersonic-mpv.el
-16:23:05 · Bash ✗  2.1s                          ← interrupted, not a success
-16:23:09 ✗ Bash  340ms                           ← errored
-16:23:12 ■ waiting for you                       ← idle
+16:22:48 ◆ add a queue-position render field       ← task from the user
+16:22:59 ▸ Bash  Syntax-check the updated hook (✓  12ms)
+                                               ↑ appended when the call returned;
+                                                 the timestamp is when it started
+16:23:03 ◇ The mode sets truncate-lines, so a…     ← the agent's own reasoning
+16:23:03 ▸ Edit  supersonic-mpv.el (✗  2.1s)       ← interrupted, not a success
+16:23:09 ▸ Bash  Run the test suite (✗  340ms)     ← errored
+16:23:12 ■ waiting for you                         ← idle
 ```
+
+A call's outcome is written onto the line that opened it rather than taking
+a line of its own, so the timestamp stays the one the call *began* at and
+`agent-river-max-entries` holds twice the history. The pairing is by
+`tool_use_id`, never by nearness or tool name — two parallel `Bash` calls
+would otherwise complete each other. Where the opening line is gone (trimmed
+away, or never written because Emacs started mid-run) or the host names no
+call at all, the outcome still takes a line of its own, `·` for a completion
+and `✗` for a failure: a tidier log that silently drops outcomes is the wrong
+trade.
 
 Two things worth knowing about what lands on those lines. `Bash` and `Task`
 calls carry a human-written `description` alongside the raw command, and the
 HUD prefers it — "Syntax-check the updated hook" reads better on stream than
 the shell it expands to. And `PostToolUse` carries `duration_ms` plus
-`tool_response`, so the closing line reports how long the call took and
-marks an interrupted one with `✗` rather than claiming success.
+`tool_response`, so the outcome reports how long the call took and marks an
+interrupted one with `✗` rather than claiming success.
 
 Failures get their own `PostToolUseFailure` hook and a red `✗` line, which is
 a different thing from the `✗` that `think` shows for an *interrupted* call.
@@ -135,10 +146,9 @@ first**:
 ```
 * supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
 * supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
-* -- eventlog
-19:07:03 super<2> ▸ Edit supersonic-mpv.el
-19:07:01 superson · Read ✓  2ms
-19:06:58 superson ▸ Read  Cask
+19:07:03 super<2> ▸ Edit  supersonic-mpv.el
+19:06:58 superson ▸ Read  Cask (✓  2ms)
+19:06:55 superson ◆ fix the mpv bridge
 ```
 
 The `*` on a session line spins through a handful of star-like glyphs
@@ -151,11 +161,21 @@ reads the text, not the picture. `agent-river-spinner-frames` set to nil
 turns it off, which is also the answer for a font that does not have the
 glyphs.
 
-Each block line is an outline heading, and `* -- eventlog` is the heading
-whose subtree the log is, so `TAB` (`outline-cycle`) folds the log away and
-leaves just the state.  The fold is for looking, not state: it lives in
-overlays, and the block is rebuilt on every fold, so the next event unfolds
-it again.
+Each block line is an outline heading. There is no heading over the log —
+one was tried and removed: a divider that exists only to be a fold handle
+earns its line from nobody who is reading. `TAB` instead unfolds the session
+under point, into the same touch counts the block condenses into its one
+parenthetical, at a grain that says what the step count is made of:
+
+```
+* supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
+** files: mpv.el 6 · supersonic-mpv.el 2 · Cask 1
+```
+
+That fold is a flag, not an overlay. The block is erased and rebuilt on
+every event, so an outline fold would spring open on the next tool call;
+a flag means the rebuilt block is drawn already open and stays that way
+until it is asked to close.
 
 A scrolling log shows activity. Only the block answers what is being worked
 on right now, which is the question an onlooker actually has — and the
@@ -369,9 +389,8 @@ failures raise a streak that got reported against the parent. `agent_type`
 doubles as the label, which reads better than a directory name:
 
 ```
-18:25:36 ▸ Agent  Verify subagent tree folding
 18:25:38 Explore  ▸ Read  Makefile
-18:25:44 superson · Agent ✓  7.8s
+18:25:36 superson ▸ Agent  Verify subagent tree folding (✓  7.8s)
 ```
 
 The parent still sees what it set in motion, aggregated on demand from the
