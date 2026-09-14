@@ -2844,12 +2844,17 @@ half of what it shows is what is on disk and untouched."
   (let ((agent-river--map-folds nil))
     ;; An entry with activity opens by default -- the files are why it is
     ;; annotated at all.
-    (should (agent-river--map-open-p '(:name "dialog" :files ((:rel "a.el")))))
-    (should-not (agent-river--map-open-p '(:name "docs" :files nil)))
+    (should (agent-river--map-open-p '(:name "dialog" :files ((:rel "a.el"))) "/repo"))
+    (should-not (agent-river--map-open-p '(:name "docs" :files nil) "/repo"))
     ;; And a toggle wins from then on, because the map is redrawn every few
     ;; seconds and a fold that sprang back each time would not be a fold.
-    (let ((agent-river--map-folds '(("dialog" . nil))))
-      (should-not (agent-river--map-open-p '(:name "dialog" :files ((:rel "a.el"))))))))
+    (let ((agent-river--map-folds '(("/repo/dialog" . nil))))
+      (should-not (agent-river--map-open-p '(:name "dialog" :files ((:rel "a.el")))
+                                           "/repo"))
+      ;; Keyed on the path, so the same name under another root is untouched
+      ;; by it -- the overview shows several roots at once.
+      (should (agent-river--map-open-p '(:name "dialog" :files ((:rel "a.el")))
+                                       "/other")))))
 
 ;;; The map, rendered as Markdown
 ;;
@@ -2866,14 +2871,20 @@ half of what it shows is what is on disk and untouched."
     (should (string-prefix-p "## `common/`"
                              (agent-river--map-line 2 "common/" nil)))
     (should (string-prefix-p "- `c.el`"
-                             (agent-river--map-line 3 "c.el" nil)))))
+                             (agent-river--map-line 'file "c.el" nil)))
+    ;; A file says `file' rather than a number for exactly this reason: the
+    ;; overview pushes entries to level 3 to make room for root headings,
+    ;; and a file taking its level from its entry would follow it into
+    ;; being a heading.
+    (should (string-prefix-p "### `common/`"
+                             (agent-river--map-line 3 "common/" nil)))))
 
 (ert-deftest agent-river-test-a-filename-is-not-eaten-by-markup ()
   ;; Bare in Markdown, `foo_bar_baz.el' renders with `bar' in italics and
   ;; the underscores gone -- a filename the view would be lying about.  A
   ;; code span is both what a path is for and where inline markup stops.
   (should (string-match-p "`foo_bar_baz\\.el`"
-                          (agent-river--map-line 3 "foo_bar_baz.el" nil))))
+                          (agent-river--map-line 'file "foo_bar_baz.el" nil))))
 
 (ert-deftest agent-river-test-map-shading-rides-on-its-own-property ()
   (let* ((parties '((:party "alpha" :weight 9 :current t)))
@@ -2893,7 +2904,7 @@ half of what it shows is what is on disk and untouched."
   (let* ((agent-river-map-name-width 24)
          (parties '((:party "alpha" :weight 9)))
          (heading (agent-river--map-line 2 "common/" parties))
-         (item (agent-river--map-line 3 "c.el" parties)))
+         (item (agent-river--map-line 'file "c.el" parties)))
     ;; The markers are different widths -- `## ' against `- ' -- so the
     ;; padding has to be measured from the whole prefix.  Measured from the
     ;; name alone, every list item's reading sat one column left of every
@@ -2904,18 +2915,18 @@ half of what it shows is what is on disk and untouched."
   ;; One fact, one encoding.  The weight is the shading on the name, and
   ;; printing it in the brackets too gave a reader two readings of it to
   ;; reconcile while the digits crowded out the names.
-  (let ((line (agent-river--map-line 3 "c.el" '((:party "alpha" :weight 9)))))
+  (let ((line (agent-river--map-line 'file "c.el" '((:party "alpha" :weight 9)))))
     (should (string-match-p "\\[alpha\\]" line))
     (should-not (string-match-p "[0-9]" line)))
   ;; The position marker stays: it belongs to a party, not to the weight.
   (should (string-match-p
            "\\[alpha▸\\]"
-           (agent-river--map-line 3 "c.el" '((:party "alpha" :weight 9 :current t)))))
+           (agent-river--map-line 'file "c.el" '((:party "alpha" :weight 9 :current t)))))
   ;; And several parties still read as several.
   (should (string-match-p
            "\\[alpha beta\\]"
-           (agent-river--map-line 3 "c.el" '((:party "alpha" :weight 9)
-                                             (:party "beta" :weight 2))))))
+           (agent-river--map-line 'file "c.el" '((:party "alpha" :weight 9)
+                                                  (:party "beta" :weight 2))))))
 
 (ert-deftest agent-river-test-the-map-degrades-without-tree-sitter ()
   ;; The mode ships with Emacs 31, the grammars do not.  Without them the
@@ -3049,40 +3060,80 @@ same either way."
                 (should (member root2 root-dirs)))))
         (delete-directory root2 t)))))
 
-(ert-deftest agent-river-test-map-single-root-mode-shows-one-root ()
-  "Single-root mode (when agent-river--map-root is set) shows only that root."
-  (agent-river-test--with-map root
-    ;; When agent-river--map-root is set, the map should be in single-root mode
-    ;; and should only show entries under that root.
-    (should agent-river--map-root)
-    ;; The first entry name should be one of the known entries
-    (should (member (get-text-property (line-beginning-position) 'agent-river-map-name)
-                    '("common" "dialog")))))
+(defmacro agent-river-test--with-overview (var &rest body)
+  "Fold one session across two trees, draw the overview, run BODY.
+VAR is bound to the second tree; `agent-river-test--with-tree' names the
+first."
+  (declare (indent 1))
+  `(agent-river-test--with-tree root1
+     (agent-river-test--with-session state
+       (let ((,var (make-temp-file "agent-river-root2" t)))
+         (unwind-protect
+             (progn
+               ;; Two sessions, because that is what two roots are in
+               ;; practice.  One session folding both would only prove that
+               ;; its cwd slot holds whichever it saw last.
+               (agent-river-fold state (list :kind "act" :cwd root1
+                                             :file "common/c.el"
+                                             :path (expand-file-name "common/c.el" root1)))
+               (let ((other (agent-river-state "s2" "beta")))
+                 (agent-river-fold other (list :kind "act" :cwd ,var
+                                               :file "other.el"
+                                               :path (expand-file-name "other.el" ,var))))
+               (with-temp-buffer
+                 (rename-buffer agent-river-map-buffer-name)
+                 (agent-river-map-plain-mode)
+                 (setq agent-river--map-root nil
+                       agent-river--map-folds nil)
+                 (agent-river--map-draw)
+                 ,@body))
+           (delete-directory ,var t))))))
 
-(ert-deftest agent-river-test-map-multi-root-mode-shows-all-roots ()
-  "Multi-root mode (when agent-river--map-root is nil) shows all touched roots."
-  (agent-river-test--with-tree root1
+(ert-deftest agent-river-test-the-overview-heads-every-tree-and-favours-none ()
+  (agent-river-test--with-overview root2
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      ;; Naming the heading after one of the trees -- the most recent, as it
+      ;; used to be -- read as though that one were the project and the rest
+      ;; were somewhere inside it.  There is no reference project: the state
+      ;; spans whatever directories the sessions were started in.
+      (should (string-match-p "\\`# 2 roots  ·  session frame" text))
+      ;; Each tree heads its own section, one level under the header.
+      (dolist (root (list root1 root2))
+        (should (string-match-p (concat "^## `" (regexp-quote (abbreviate-file-name root)))
+                                text)))
+      ;; And the entries sit under the tree they belong to, not under the
+      ;; first one drawn.
+      (should (string-match-p "^### `common/`" text))
+      (should (string-match-p "^### `other.el`" text)))))
+
+(ert-deftest agent-river-test-one-tree-needs-no-heading-of-its-own ()
+  (agent-river-test--with-tree root
     (agent-river-test--with-session state
-      (let* ((root2 (make-temp-file "agent-river-root2" t)))
-        (unwind-protect
-            (progn
-              ;; Touch files in both roots
-              (dotimes (_ 5)
-                (agent-river-fold state (list :kind "act" :cwd root1 :file "file1.el")))
-              (dotimes (_ 3)
-                (agent-river-fold state (list :kind "act" :cwd root2 :file "file2.el")))
-              ;; Create map buffer in multi-root mode (agent-river--map-root = nil)
-              (with-temp-buffer
-                (rename-buffer agent-river-map-buffer-name)
-                (agent-river-map-plain-mode)
-                (setq agent-river--map-root nil)  ; Enable multi-root mode
-                (agent-river--map-draw)
-                ;; Buffer should contain roots as headings
-                (let ((buffer-text (buffer-string)))
-                  ;; Should mention multiple roots or touched roots
-                  (should (or (string-match-p "root" buffer-text)
-                              (string-match-p "Touched roots" buffer-text))))))
-          (delete-directory root2 t))))))
+      (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"
+                                    :path (expand-file-name "common/c.el" root)))
+      (with-temp-buffer
+        (rename-buffer agent-river-map-buffer-name)
+        (agent-river-map-plain-mode)
+        (setq agent-river--map-root nil agent-river--map-folds nil)
+        (agent-river--map-draw)
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          ;; The header already names it; repeating it as a section heading
+          ;; would indent the whole listing to say nothing.
+          (should (string-match-p (concat "\\`# `" (regexp-quote (abbreviate-file-name root)))
+                                  text))
+          (should (string-match-p "^## `common/`" text))
+          (should-not (string-match-p "^### " text)))))))
+
+(ert-deftest agent-river-test-climbing-out-of-a-tree-reaches-the-overview ()
+  (agent-river-test--with-overview root2
+    ;; A touched root is the top of a tree the state knows about.  Climbing
+    ;; past it walked into directories no agent had been near, with the
+    ;; other trees still out of view.
+    (setq agent-river--map-root root2)
+    (agent-river-map-up)
+    (should-not agent-river--map-root)
+    ;; And from the overview there is nowhere further out.
+    (should-error (agent-river-map-up) :type 'user-error)))
 
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here

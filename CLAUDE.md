@@ -402,8 +402,22 @@ several agents spread over a large repository are visible at once. Same
 weighting, same `agent-river--heat-entries` derivation, different grain — so
 the two cannot drift.
 
-Three things about the map are load-bearing:
+Four things about the map are load-bearing:
 
+- **There is no reference project, so the map opens on all of them.** The
+  state spans whatever directories the sessions were started in; a heading
+  naming one of them — the most recently seen, as it used to be — reads as
+  though that tree were the project and the others were somewhere inside it.
+  `agent-river--map-root` nil is the overview, and each tree heads its own
+  section (`agent-river--map-all-roots`). Setting it is a *zoom*, which is
+  where RET goes and where `^` comes back from: at a touched root `^` returns
+  to the overview rather than climbing into directories no agent has been
+  near. One tree is drawn without a section heading, since the header already
+  names it and repeating it would indent the listing to say nothing — which is
+  also why a file passes `file` to `agent-river--map-marker` rather than a
+  number, so that pushing entries down a level for the root headings cannot
+  push files into being headings too. Folds are keyed on absolute paths for
+  the same reason: `src` under one root is not `src` under another.
 - **Breadth at one level, depth only where there is activity.** A whole tree
   unfolded is unreadable in a monorepo; a view of only the touched paths says
   where without saying where that is *relative to* anything. So RET descends

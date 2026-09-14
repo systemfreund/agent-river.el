@@ -3461,14 +3461,21 @@ marks what was left off."
 When nil, the map shows all touched roots; when set, it shows only that root.")
 
 (defvar-local agent-river--map-folds nil
-  "Alist of entry name to whether its files are shown, where the user said.
+  "Alist of absolute entry path to whether its files are shown.
+Only where the user said so.
 
 Only the entries that were toggled by hand.  Everything else falls back to
 the default in `agent-river--map-open-p', so a new directory an agent has
 just moved into opens without needing an entry here -- and a fold made by
 hand survives the redraws, which is the whole reason this is data rather
 than outline overlays.  The block is rebuilt every few seconds and an
-overlay fold would spring open on each one.")
+overlay fold would spring open on each one.
+
+Keyed on the path rather than the name, because the overview shows
+several roots at once and `src' under one of them is not `src' under
+another.  Being absolute, the keys also survive descending, where a
+name-keyed fold had to be thrown away on the way in or it would have
+folded whatever entry in the new listing happened to share a name.")
 
 (defvar agent-river--map-dirty nil
   "Non-nil when an event has landed that the map has not yet drawn.")
@@ -3527,13 +3534,16 @@ Directories are headings and files are list items, which is what each of
 them is: a heading has something under it and folds, a leaf does not.
 Making every file a level-3 heading instead would set the whole listing in
 the heading face and leave the structure saying that a file contains the
-lines after it.
+lines after it.  So a file passes `file' rather than a number: the
+overview pushes the entries down a level to make room for the root
+headings, and a file that took its level from its entry would have
+followed them into being a heading.
 
 The markup is left visible.  Hiding it is `markdown-ts-view-mode's own
 default and it looks better on prose, but here the marker is the
 indentation -- hidden, a directory and the files under it start in the
 same column and the tree stops being one."
-  (pcase level (1 "# ") (2 "## ") (_ "- ")))
+  (pcase level (1 "# ") (2 "## ") (3 "### ") (_ "- ")))
 
 (defun agent-river--map-line (level name parties &optional missing)
   "Return one map line: NAME at LEVEL, annotated with PARTIES.
@@ -3572,27 +3582,36 @@ than shaded -- there is no file on disk for the shading to be about."
             (overlay-put overlay 'evaporate t)))
         (setq pos next)))))
 
-(defun agent-river--map-open-p (entry)
-  "Return non-nil when ENTRY's reached files are shown beneath it.
+(defun agent-river--map-open-p (entry root)
+  "Return non-nil when ENTRY's reached files are shown beneath it, under ROOT.
 
 An entry with activity opens by default -- the files are the reason the
 entry is annotated at all -- and a toggle by hand wins from then on."
-  (let ((cell (assoc (plist-get entry :name) agent-river--map-folds)))
+  (let ((cell (assoc (expand-file-name (plist-get entry :name) root)
+                     agent-river--map-folds)))
     (if cell (cdr cell) (and (plist-get entry :files) t))))
 
-(defun agent-river--map-header (root entries)
+(defun agent-river--map-header (root entries &optional roots)
   "Return the map's own heading for ROOT, given its ENTRIES.
+
 Says which frame the numbers below come from.  The map defaults to the
 session frame and the dired heat to the task frame, so a reading lifted
 from one and compared against the other is a mistake waiting to be made
-unless the line says which is which."
+unless the line says which is which.
+
+ROOT is nil in the overview, which spans ROOTS trees and has no one path
+to be named after.  Titling it with any of them -- the most recent, say --
+is what this replaced: the heading then read as though that tree were the
+project and the others were somewhere inside it."
   (let ((parties (agent-river--map-merge-parties
                   (mapcar (lambda (entry)
                             (list :parties (plist-get entry :parties)))
                           entries))))
     (concat (agent-river--map-marker 1)
-            (agent-river--map-mark (agent-river--map-name
-                                    (abbreviate-file-name root))
+            (agent-river--map-mark (if root
+                                       (agent-river--map-name
+                                        (abbreviate-file-name root))
+                                     (format "%d roots" (or roots 0)))
                                    'agent-river-prompt)
             (format "  ·  %s frame" (if (eq agent-river-map-scope 'session)
                                         "session" "task"))
@@ -3632,87 +3651,98 @@ start of the buffer."
 (defun agent-river--map-draw ()
   "Redraw the map buffer from the state, if it is still alive.
 
-If agent-river--map-root is set, shows only that root (single-root mode).
-Otherwise shows all touched roots organized by root directory (multi-root mode)."
+With `agent-river--map-root' set the map is zoomed into that one tree.
+With it nil -- which is what the map opens on -- it shows every tree the
+agents have touched.  The state spans whatever directories the sessions
+were started in and there is no reference project among them, so naming
+one of them as the root and hiding the rest was a view of the state that
+the state does not have.
+
+One tree is drawn without a heading of its own: the header already names
+it, and a second line repeating it would indent the whole listing to say
+nothing."
   (let ((buffer (get-buffer agent-river-map-buffer-name)))
     (when buffer
       (with-current-buffer buffer
         (let* ((here (agent-river--map-here))
                (inhibit-read-only t)
-               (single-root-mode agent-river--map-root)
-               ;; In single-root mode, show only the specified root.
-               ;; In multi-root mode, gather all touched roots.
-               (roots (if single-root-mode
-                          (list agent-river--map-root)
-                        (mapcar #'car (agent-river--map-all-roots agent-river-map-scope)))))
+               (roots (or (and agent-river--map-root (list agent-river--map-root))
+                          (mapcar #'car (agent-river--map-all-roots
+                                         agent-river-map-scope))
+                          ;; Nothing folded yet.  Showing where this Emacs
+                          ;; happens to be beats an empty buffer: the listing
+                          ;; is still a listing before any agent has reached
+                          ;; into it.
+                          (list (agent-river--map-default-root))))
+               (sections (mapcar (lambda (root)
+                                   (cons root (agent-river--map-entries
+                                               root agent-river-map-scope)))
+                                 roots))
+               (split (> (length sections) 1))
+               (level (if split 3 2)))
           (erase-buffer)
-          ;; Render appropriate header based on mode
-          (if (or (not single-root-mode) (= (length roots) 1))
-              ;; Single root mode, or multi-root with only one root: use traditional header
-              (let* ((root (car roots))
-                     (entries (and root (agent-river--map-entries root agent-river-map-scope))))
-                (insert (if root
-                            (agent-river--map-header root entries)
-                          (concat (agent-river--map-marker 1) "No activity yet"))
-                        "\n"))
-            ;; Multi-root mode with multiple roots
-            (insert (agent-river--map-marker 1) "Touched roots · "
-                    (format "%d root%s\n" (length roots) (if (= (length roots) 1) "" "s"))))
-          ;; Render each root section
-          (dolist (root roots)
-            (let ((entries (and root (agent-river--map-entries root agent-river-map-scope))))
-              ;; In multi-root mode with multiple roots, show root as level-1 heading
-              (when (and (not single-root-mode) (> (length roots) 1) root)
-                (let ((all-parties (agent-river--map-merge-parties
-                                    (mapcar (lambda (entry)
-                                              (list :parties (plist-get entry :parties)))
-                                            entries))))
-                  (insert (agent-river--map-line 1 (abbreviate-file-name root)
-                                                 all-parties)
-                          "\n")))
-              ;; Render entries under this root
-              (when entries
-                (dolist (entry entries)
-                  (let* ((name (plist-get entry :name))
-                         (dir (plist-get entry :dir))
-                         (path (expand-file-name name root))
-                         ;; In single-root or multi-root with one root, entries are level 2;
-                         ;; in multi-root with multiple roots, entries are level 2.
-                         (level (if (and (not single-root-mode) (> (length roots) 1)) 2 2)))
-                    (insert (propertize
-                             (concat (agent-river--map-line
-                                      level (concat name (if dir "/" ""))
-                                      (plist-get entry :parties)
-                                      (plist-get entry :missing))
-                                     "\n")
-                             'agent-river-map-name name
-                             'agent-river-map-path path
-                             'agent-river-map-dir dir
-                             ;; What `agent-river-map-next-active' stops on.  Read
-                             ;; off the parties rather than off the annotation
-                             ;; text, so the motion and the reading cannot come
-                             ;; apart if the line is ever formatted differently.
-                             'agent-river-map-active (and (plist-get entry :parties) t)))
-                    (when (agent-river--map-open-p entry)
-                      (let* ((files (plist-get entry :files))
-                             (shown (seq-take files agent-river-map-detail-files)))
-                        (dolist (file shown)
-                          (insert (propertize
-                                   (concat (agent-river--map-line
-                                            (+ level 1) (plist-get file :rel)
-                                            (plist-get file :parties))
-                                           "\n")
-                                   'agent-river-map-name name
-                                   'agent-river-map-rel (plist-get file :rel)
-                                   'agent-river-map-path
-                                   (expand-file-name (plist-get file :rel) path)
-                                   'agent-river-map-active
-                                   (and (plist-get file :parties) t))))
-                        (when (> (length files) (length shown))
-                          (insert (propertize
-                                   (concat (agent-river--map-marker (+ level 1)) "…\n")
-                                   'agent-river-map-face 'agent-river-stale
-                                   'agent-river-map-name name))))))))))
+          (insert (if split
+                      (agent-river--map-header
+                       nil (apply #'append (mapcar #'cdr sections)) (length sections))
+                    (agent-river--map-header (caar sections) (cdar sections)))
+                  "\n")
+          (dolist (section sections)
+            (let ((root (car section))
+                  (entries (cdr section)))
+              (when split
+                (insert (propertize
+                         (concat (agent-river--map-line
+                                  2 (abbreviate-file-name root)
+                                  (agent-river--map-merge-parties
+                                   (mapcar (lambda (entry)
+                                             (list :parties (plist-get entry :parties)))
+                                           entries)))
+                                 "\n")
+                         ;; A root is a place like any other line's, so RET
+                         ;; zooms into it and the motions stop on it.
+                         'agent-river-map-name (abbreviate-file-name root)
+                         'agent-river-map-path root
+                         'agent-river-map-dir t
+                         'agent-river-map-section t
+                         'agent-river-map-active (and entries t))))
+              (dolist (entry entries)
+                (let* ((name (plist-get entry :name))
+                       (dir (plist-get entry :dir))
+                       (path (expand-file-name name root)))
+                  (insert (propertize
+                           (concat (agent-river--map-line
+                                    level (concat name (if dir "/" ""))
+                                    (plist-get entry :parties)
+                                    (plist-get entry :missing))
+                                   "\n")
+                           'agent-river-map-name name
+                           'agent-river-map-path path
+                           'agent-river-map-dir dir
+                           ;; What `agent-river-map-next-active' stops on.  Read
+                           ;; off the parties rather than off the annotation
+                           ;; text, so the motion and the reading cannot come
+                           ;; apart if the line is ever formatted differently.
+                           'agent-river-map-active (and (plist-get entry :parties) t)))
+                  (when (agent-river--map-open-p entry root)
+                    (let* ((files (plist-get entry :files))
+                           (shown (seq-take files agent-river-map-detail-files)))
+                      (dolist (file shown)
+                        (insert (propertize
+                                 (concat (agent-river--map-line
+                                          'file (plist-get file :rel)
+                                          (plist-get file :parties))
+                                         "\n")
+                                 'agent-river-map-name name
+                                 'agent-river-map-rel (plist-get file :rel)
+                                 'agent-river-map-path
+                                 (expand-file-name (plist-get file :rel) path)
+                                 'agent-river-map-active
+                                 (and (plist-get file :parties) t))))
+                      (when (> (length files) (length shown))
+                        (insert (propertize
+                                 (concat (agent-river--map-marker 'file) "…\n")
+                                 'agent-river-map-face 'agent-river-stale
+                                 'agent-river-map-name name)))))))))
           (agent-river--map-shade)
           (agent-river--map-goto here)
           (agent-river--map-settle-point)
@@ -3865,16 +3895,21 @@ first thing anyone does with a new buffer is press one of them."
 (defun agent-river-map-toggle ()
   "Show or hide the reached files under the entry at point."
   (interactive)
-  (let ((name (get-text-property (line-beginning-position) 'agent-river-map-name)))
-    (unless name (user-error "No entry on this line"))
-    (let* ((entry (seq-find (lambda (e) (equal (plist-get e :name) name))
-                            (agent-river--map-entries agent-river--map-root
-                                                      agent-river-map-scope)))
-           (open (and entry (agent-river--map-open-p entry)))
-           (cell (assoc name agent-river--map-folds)))
+  (let ((name (get-text-property (line-beginning-position) 'agent-river-map-name))
+        (path (get-text-property (line-beginning-position) 'agent-river-map-path)))
+    (when (get-text-property (line-beginning-position) 'agent-river-map-section)
+      (user-error "A root heading holds the listing below it, not files"))
+    (unless (and name path) (user-error "No entry on this line"))
+    ;; The root is the entry's own parent rather than `agent-river--map-root',
+    ;; which is nil in the overview and would name the wrong tree in it.
+    (let* ((root (directory-file-name (file-name-directory path)))
+           (entry (seq-find (lambda (e) (equal (plist-get e :name) name))
+                            (agent-river--map-entries root agent-river-map-scope)))
+           (open (and entry (agent-river--map-open-p entry root)))
+           (cell (assoc path agent-river--map-folds)))
       (if cell
           (setcdr cell (not open))
-        (push (cons name (not open)) agent-river--map-folds)))
+        (push (cons path (not open)) agent-river--map-folds)))
     (agent-river--map-draw)))
 
 (defun agent-river-map-visit ()
@@ -3892,20 +3927,30 @@ full, and going deeper means looking somewhere else."
 
 (defun agent-river-map-descend (dir)
   "Point the map at DIR.
-The hand-made folds are dropped with the listing they were about: the
-names in them belong to the directory being left, and carrying them over
-would fold entries in the new one that happen to share a name."
-  (setq agent-river--map-root (directory-file-name (expand-file-name dir))
-        agent-river--map-folds nil)
+The hand-made folds are kept: they are keyed on absolute paths, so none
+of them can mean an entry of the listing being entered."
+  (setq agent-river--map-root (directory-file-name (expand-file-name dir)))
   (agent-river--map-draw))
 
 (defun agent-river-map-up ()
-  "Point the map at the parent of the directory it is showing."
+  "Point the map at the parent of the directory it is showing.
+
+A touched root goes back to the overview rather than to its parent.  Those
+are the tops of the trees the state knows about, and climbing past one
+leads into directories no agent has been near -- a listing that gets
+emptier the further up it goes, with the other trees still out of view."
   (interactive)
-  (let ((up (file-name-directory (directory-file-name agent-river--map-root))))
-    (if (or (null up) (equal (directory-file-name up) agent-river--map-root))
-        (user-error "Already at the root")
-      (agent-river-map-descend up))))
+  (let ((root agent-river--map-root))
+    (cond
+     ((null root) (user-error "Already showing every root"))
+     ((member root (mapcar #'car (agent-river--map-all-roots agent-river-map-scope)))
+      (setq agent-river--map-root nil)
+      (agent-river--map-draw))
+     (t
+      (let ((up (file-name-directory (directory-file-name root))))
+        (if (or (null up) (equal (directory-file-name up) root))
+            (user-error "Already at the root")
+          (agent-river-map-descend up)))))))
 
 (declare-function markdown-ts-view-mode "markdown-ts-mode" ())
 ;; Declared so the byte-compiler sees a special variable rather than a free
@@ -4077,19 +4122,18 @@ in, this lists one directory in full and says what has happened beneath
 each entry, so several agents spread over a large repository are visible
 at once.
 
-With ASK (a prefix argument):
-  - C-u: Prompt for a specific directory to show (single-root mode)
-  - C-u C-u: Show all touched roots (multi-root mode)
+Opens on every tree the agents have touched.  There is no reference
+project to open on instead: the state spans whatever directories the
+sessions were started in, and picking one of them would hide the others
+behind a heading claiming to be the root of all of them.  RET zooms into
+a tree from there, and `^' comes back out.
+
+With ASK (a prefix argument), prompt for one directory to show instead.
 
 Needs no mode to be switched on: the buffer is the consent, and killing it
 takes the map off the event stream."
   (interactive "P")
-  (let* ((multi-root-mode (and ask (listp ask) (= (car ask) 16)))
-         (ask-single (and ask (not multi-root-mode)))
-         (root (cond
-                (multi-root-mode nil)  ; nil means multi-root mode
-                (ask-single (read-directory-name "Map: " nil nil t))
-                (t (agent-river--map-default-root))))
+  (let* ((root (and ask (read-directory-name "Map: " nil nil t)))
          (buffer (get-buffer-create agent-river-map-buffer-name)))
     (with-current-buffer buffer
       ;; Set unconditionally rather than only on a fresh buffer: the answer
@@ -4098,8 +4142,8 @@ takes the map off the event stream."
       (if (agent-river--markdown-ts-p)
           (agent-river-map-mode)
         (agent-river-map-plain-mode))
-      (setq agent-river--map-root (if multi-root-mode nil
-                                       (directory-file-name (expand-file-name root)))
+      (setq agent-river--map-root (and root (directory-file-name
+                                             (expand-file-name root)))
             agent-river--map-folds nil)
       (add-hook 'kill-buffer-hook #'agent-river--map-teardown nil t))
     (add-hook 'agent-river-observers #'agent-river--map-observe)
