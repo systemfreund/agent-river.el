@@ -230,10 +230,8 @@
     (let ((lines (split-string (substring-no-properties
                                 (agent-river--panel-block))
                                "\n" t)))
-      ;; One line per session heading, then the eventlog heading dividing
-      ;; block from log.
-      (should (= (length lines) 3))
-      (should (string-prefix-p "* -- eventlog" (nth 2 lines)))
+      ;; One line per session heading.
+      (should (= (length lines) 2))
       ;; Every block line is an outline heading (`* ' at column zero).
       (should (string-prefix-p "* " (nth 0 lines)))
       (should (string-prefix-p "* " (nth 1 lines)))
@@ -261,12 +259,10 @@
     (with-current-buffer (agent-river--buffer)
       (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
              (lines (split-string text "\n" t)))
-        ;; State block on top, then the eventlog heading, then the log
-        ;; newest-first underneath.
+        ;; State block on top, then the log newest-first underneath.
         (should (string-match-p "repo" (nth 0 lines)))
-        (should (string-prefix-p "* -- eventlog" (nth 1 lines)))
-        (should (string-match-p "second" (nth 2 lines)))
-        (should (string-match-p "first" (nth 3 lines)))))))
+        (should (string-match-p "second" (nth 1 lines)))
+        (should (string-match-p "first" (nth 2 lines)))))))
 
 (ert-deftest agent-river-test-trim-drops-the-oldest ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -288,23 +284,19 @@
       (agent-river-observe '(:kind "act" :session "s1" :label "repo"
                                    :detail "Edit a.el")))
     (with-current-buffer (agent-river--buffer)
-      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-        ;; One block at the foot, however many events went through -- the
-        ;; eventlog heading is what would multiply if it were appended each
-        ;; time.
-        (should (= 1 (length (seq-filter
-                              (lambda (line) (string-prefix-p "* -- eventlog" line))
-                              (split-string text "\n")))))))))
+      ;; The block is rewritten, not appended -- it appears once at the head
+      ;; whatever number of events went through.
+      (let ((lines (split-string (buffer-substring-no-properties (point-min) (point-max)) "\n")))
+        (should (= 1 (length (seq-filter (lambda (l) (string-prefix-p "* repo" l)) lines))))))))
 
 (ert-deftest agent-river-test-block-doubles-as-an-outline ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
     (agent-river-observe '(:kind "act" :session "s1" :label "repo" :detail "Read"))
     (with-current-buffer (agent-river--buffer)
-      ;; TAB folds the log away and leaves just the state: the block lines
-      ;; are level-1 headings and the eventlog heading starts the one
-      ;; subtree worth hiding.  The fold lives in overlays, so a later
-      ;; redraw unfolds it again -- that is accepted, not a bug.
+      ;; TAB folds each session's details.  The block lines are level-1
+      ;; headings.  The fold lives in overlays, so a later redraw unfolds it
+      ;; again -- that is accepted, not a bug.
       (should (bound-and-true-p outline-minor-mode))
       (should (eq (lookup-key agent-river-mode-map (kbd "TAB"))
                   #'agent-river-toggle-at-point))
@@ -322,11 +314,11 @@
     (agent-river-observe '(:kind "act" :session "s1" :label "repo"
                                  :file "b.el" :detail "Edit"))
     ;; Collapsed by default: the header is the whole session line, and the
-    ;; block is exactly one line per session plus the eventlog heading.
+    ;; block is exactly one line per session.
     (let ((block (substring-no-properties (agent-river--panel-block))))
       (should-not (string-match-p "hottest" block))
       (should-not (string-match-p "files:" block))
-      (should (= 2 (length (split-string block "\n" t)))))
+      (should (= 1 (length (split-string block "\n" t)))))
     (with-current-buffer (agent-river--buffer)
       (agent-river-toggle-details)
       (let ((block (substring-no-properties (agent-river--panel-block))))
@@ -2176,11 +2168,8 @@ first line from a survey."
       (should (seq-find (lambda (l) (string-prefix-p "* alpha" l)) lines))
       (should (seq-find (lambda (l) (string-prefix-p "** files:" l)) lines))
       (should (seq-find (lambda (l) (string-match-p "Edit a\\.el" l)) lines))
-      ;; The eventlog divider is structure rather than an entry, and a
-      ;; motion that stopped there would stop on a line with nothing to do
-      ;; and nothing to read.
-      (should-not (seq-find (lambda (l) (string-prefix-p "* -- eventlog" l))
-                            lines)))))
+      ;; Log lines start with timestamps and are all fair game.
+      )))
 
 (ert-deftest agent-river-test-hud-session-motion-is-the-selection ()
   (agent-river-test--with-hud

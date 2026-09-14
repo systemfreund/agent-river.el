@@ -1865,9 +1865,8 @@ for; anywhere else it takes them all.  ID overrides both."
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
   (setq-local wrap-prefix (make-string 11 ?\s))
-  ;; The block doubles as an outline: every session line and the eventlog
-  ;; divider are level-1 headings, so `outline-cycle' (TAB) can fold the log
-  ;; away and leave just the state.  The fold is for looking, not state: it
+  ;; The session lines are outline headings, so `outline-cycle' (TAB) can
+  ;; fold each session's details.  The fold is for looking, not state: it
   ;; lives in overlays, and the block is erased and rebuilt on every fold,
   ;; so the next event naturally unfolds it again.
   (setq-local outline-regexp "^\\*+ ")
@@ -2156,12 +2155,7 @@ with nothing to say they were different agents."
                   ;; Stable order, so a line does not move under the eye
                   ;; just because another session acted.
                   (sort lines (lambda (a b) (string< (car a) (car b))))
-                  "\n")
-       "\n"
-       ;; The block's closing line is itself a heading, so the log
-       ;; underneath reads as its subtree: TAB folds the log away and
-       ;; leaves just the state.
-       (propertize "* -- eventlog" 'face 'agent-river-time)))))
+                  "\n")))))
 
 (defun agent-river--update-panel (state)
   "Note STATE as the session that last acted, for `agent-river-set-intent'.
@@ -2487,16 +2481,10 @@ until asked to close."
 (defun agent-river-toggle-at-point ()
   "Toggle the block heading on this line of the HUD.
 
-On the `* -- eventlog' heading this folds the log away, as in any outline;
-on a session heading it unfolds that session's detail headings.  Both live
-on TAB because they are the same gesture -- open or close the thing under
-the heading -- applied to the two kinds of heading the block has."
+On a session heading this unfolds that session's detail headings.  TAB is
+for opening or closing the thing under the heading."
   (interactive)
-  (if (save-excursion
-        (goto-char (line-beginning-position))
-        (looking-at "^\\* -- eventlog"))
-      (outline-cycle)
-    (agent-river-toggle-details)))
+  (agent-river-toggle-details))
 
 ;; `outline-minor-mode-cycle' binds TAB only when the user opted in, so the
 ;; heading navigation has to be on the mode's own map to be there at all.
