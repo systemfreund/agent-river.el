@@ -1651,6 +1651,210 @@ and through the main checkout counts as one artifact."
                        :steps (apply #'+ (mapcar #'agent-river-state-steps kids))
                        :each (mapcar #'agent-river--child-digest kids)))))))))
 
+;;; Handing the state out -- Markdown, for where it is going to be read
+;;
+;; The one place Markdown belongs in this package.  The HUD is deliberately
+;; not rendered as Markdown and should stay that way: its log carries
+;; prompts, reasoning and tool arguments -- text the package does not
+;; control -- and Markdown would hand that text the power to restructure the
+;; view that is watching it.  Here the state is *leaving*, and where it
+;; lands -- an issue, a pull request, a message -- Markdown is what gets
+;; read.
+;;
+;; A third derivation of the state, beside the panel and the report, and not
+;; built on either.  The report's values are already formatted for a human
+;; reading a plist, and re-formatting a formatted string is the
+;; second-account problem wearing a different hat.  What the report gets for
+;; free from its key names -- `:task-hottest' against `:session-hottest' --
+;; has to be done by hand here, so it is, and tested: two numbers on
+;; different clocks sitting side by side unlabelled read as if they were
+;; comparable.
+
+(defun agent-river--md-escape (text)
+  "Return TEXT with its Markdown-active punctuation neutralised.
+
+For the values the agent wrote: a prompt, a stated intent.  They do not
+stop being arbitrary text because the export is going somewhere Markdown
+is read -- an intent containing an asterisk would silently italicise the
+rest of the line, and one containing a bracket would swallow it into a
+link.  This is the same hazard that keeps the HUD out of Markdown; here it
+is small enough to escape, because only two values are the agent's."
+  (replace-regexp-in-string "[][\\\\`*_<>&#|~]" "\\\\\\&" (or text "")))
+
+(defun agent-river--md-code (text)
+  "Return TEXT as a Markdown code span, fenced long enough to hold it.
+
+A file name will almost never contain a backtick, and the one that does
+must not be able to close the span it is sitting in and turn the rest of
+the line into markup."
+  (let ((longest 0))
+    (dolist (run (split-string (or text "") "[^`]+" t))
+      (setq longest (max longest (length run))))
+    (let ((fence (make-string (1+ longest) ?`)))
+      ;; CommonMark strips one space from each end, which is how a span
+      ;; whose content touches a backtick is written.
+      (if (zerop longest)
+          (concat fence text fence)
+        (concat fence " " text " " fence)))))
+
+(defun agent-river--md-files (state scope)
+  "Return STATE's artifacts in SCOPE as Markdown, or nil for none.
+
+Capped by `agent-river-panel-detail-files' rather than by a setting of its
+own: it is the same question the HUD's `files' heading asks, and two
+answers would let a snapshot disagree with the view it is a snapshot of."
+  (let* ((files (agent-river--artifact-list state scope))
+         (shown (seq-take files agent-river-panel-detail-files)))
+    (when files
+      (concat (mapconcat (lambda (pair)
+                           (format "%s ×%d"
+                                   (agent-river--md-code (car pair)) (cdr pair)))
+                         shown " · ")
+              (if (> (length files) (length shown)) " · …" "")))))
+
+(defun agent-river--md-child (child)
+  "Return one Markdown line for subagent CHILD, indented under its parent.
+
+Read off the child's own state rather than through
+`agent-river--child-digest', whose `:hottest' is a string already
+formatted for a plist a human reads.  Re-formatting that would mean taking
+a file name back out of prose, and the name is the one thing on this line
+that has to come out as a code span like every other name in the export."
+  (let* ((steps (agent-river-state-steps child))
+         (streak (agent-river-state-fail-streak child))
+         (hottest (car (agent-river--artifact-list child 'session))))
+    (format "    - %s — %s · %d step%s%s%s"
+            (agent-river--md-code (or (agent-river-state-agent-type child) "agent"))
+            (cond ((agent-river-state-done child) "done")
+                  ((agent-river--active-p child) "running")
+                  ;; Neither an end event nor recent activity: something went
+                  ;; away without saying so, and the export should say that
+                  ;; rather than quietly count it as running.
+                  (t "stale"))
+            steps (if (= steps 1) "" "s")
+            (if hottest
+                (format " · hottest %s ×%d"
+                        (agent-river--md-code (car hottest)) (cdr hottest))
+              "")
+            (if (> streak 0) (format " · %d failing" streak) ""))))
+
+(defun agent-river--md-session (state)
+  "Return the Markdown for root STATE, its subagents folded in under it.
+
+Subagents get no section of their own, exactly as they get no panel line:
+their work is counted on the parent and aggregated on demand, so that the
+two cannot drift."
+  (let* ((kids (agent-river-children (agent-river-state-id state)))
+         (task (agent-river-state-task state))
+         (intent (agent-river-state-intent state))
+         (streak (agent-river-state-fail-streak state))
+         (phase (agent-river--phase state))
+         lines)
+    (push (format "### %s%s\n"
+                  (agent-river--md-escape (or (agent-river-state-label state) "?"))
+                  (if phase (format " — %s" phase) ""))
+          lines)
+    (when (and task (not (string-empty-p task)))
+      (push (format "- **prompt** — %s" (agent-river--md-escape task)) lines))
+    ;; The frame is in the name of the bullet, not left to the reader.  The
+    ;; task tally resets with every prompt and the session tally does not.
+    (push (format "- **this task** — %d step%s · %d failure%s%s%s"
+                  (agent-river-state-steps state)
+                  (if (= (agent-river-state-steps state) 1) "" "s")
+                  (or (agent-river-state-task-failures state) 0)
+                  (if (= (or (agent-river-state-task-failures state) 0) 1) "" "s")
+                  (let ((started (agent-river-state-task-started state)))
+                    (if started (concat " · " (agent-river--ago started)) ""))
+                  (let ((files (agent-river--md-files state nil)))
+                    (if files (concat " · " files) "")))
+          lines)
+    (push (format "- **this session** — %s%s"
+                  (let ((started (agent-river-state-started state)))
+                    (if started (agent-river--ago started) "just started"))
+                  (let ((files (agent-river--md-files state 'session)))
+                    (if files (concat " · " files) "")))
+          lines)
+    ;; A live failure run is the one thing a reader must not have to infer.
+    (when (> streak 0)
+      (push (format "- **failing** — %d in a row" streak) lines))
+    ;; Last, and marked twice.  This is the agent talking about itself, and a
+    ;; claim that a later reader takes for one of the measurements above it
+    ;; is exactly the confusion the `intent' slots are kept apart to prevent.
+    (when intent
+      (push (format "- **claims** — %s *(self-reported%s)*"
+                    (agent-river--md-escape intent)
+                    (if (agent-river--intent-stale-p state) ", stale" ""))
+            lines))
+    ;; Only the halves that happened.  A tally reading "0 notes" is noise in
+    ;; a snapshot someone is about to paste somewhere, and it makes the two
+    ;; counts that did happen harder to find.
+    (let* ((signals (length (agent-river-state-signals state)))
+           (notes (length (agent-river-state-notes state)))
+           (parts (delq nil
+                        (list (when (> signals 0)
+                                (format "%d observation%s"
+                                        signals (if (= signals 1) "" "s")))
+                              (when (> notes 0)
+                                (format "%d note%s"
+                                        notes (if (= notes 1) "" "s")))))))
+      (when parts
+        (push (concat "- **handed back** — " (string-join parts " · ")) lines)))
+    (when kids
+      (push (format "- **subagents** — %d of %d running · %d step%s"
+                    (seq-count #'agent-river--active-p kids) (length kids)
+                    (apply #'+ (mapcar #'agent-river-state-steps kids))
+                    (if (= (apply #'+ (mapcar #'agent-river-state-steps kids)) 1)
+                        "" "s"))
+            lines)
+      (dolist (child (sort kids (lambda (a b)
+                                  (string< (or (agent-river-state-agent-type a) "")
+                                           (or (agent-river-state-agent-type b) "")))))
+        (push (agent-river--md-child child) lines)))
+    (string-join (nreverse lines) "\n")))
+
+;;;###autoload
+(defun agent-river-markdown (&optional id)
+  "Return the state as Markdown, or nil when there is nothing to say.
+
+Every live root session, in the order and by the rule the state block
+shows them, so this is a snapshot of that block and not a second opinion
+about which sessions count.  ID narrows it to one."
+  (let (states)
+    (maphash (lambda (key state)
+               (when (and (null (agent-river-state-parent state))
+                          (agent-river--active-p state)
+                          (or (null id) (equal key id)))
+                 (push state states)))
+             agent-river-registry)
+    (when states
+      (setq states (sort states (lambda (a b)
+                                  (string< (or (agent-river-state-label a) "")
+                                           (or (agent-river-state-label b) "")))))
+      (concat (format "## agent-river — %d session%s, %s\n\n"
+                      (length states) (if (= (length states) 1) "" "s")
+                      (format-time-string "%Y-%m-%d %H:%M"))
+              (mapconcat #'agent-river--md-session states "\n\n")
+              "\n"))))
+
+;;;###autoload
+(defun agent-river-copy-report (&optional id)
+  "Put the state on the kill ring as Markdown, and return it.
+
+For where the state is going to be read rather than watched: an issue, a
+pull request, a message.  Called with point on a session line in the HUD
+it takes that session alone, which is what the line under the cursor is
+for; anywhere else it takes them all.  ID overrides both."
+  (interactive
+   (list (get-text-property (line-beginning-position) 'agent-river-session)))
+  (let ((markdown (agent-river-markdown id)))
+    (unless markdown
+      (user-error "No live session to report on"))
+    (kill-new markdown)
+    (when (called-interactively-p 'interactive)
+      (message "Copied %s as Markdown"
+               (if id (format "session %s" id) "the state")))
+    markdown))
+
 
 ;;; The view
 

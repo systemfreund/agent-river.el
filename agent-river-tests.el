@@ -2119,6 +2119,108 @@ CALL overrides fields of the tool call record."
         (should-not (memq #'agent-river--after-save after-save-hook))
         (should (string-match-p "save watch stopped" (agent-river-test--hud)))))))
 
+;;; Handing the state out as Markdown
+;;
+;; The export is a third derivation of the state beside the panel and the
+;; report, so it inherits none of their labelling and every bit of it is
+;; asserted here.  The escaping is the other half: this is the one place the
+;; package puts the agent's own words into a format that can act on them.
+
+(defmacro agent-river-test--with-export (&rest body)
+  "Fold a session worth reporting on into an isolated registry, run BODY."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-auto-display nil))
+     (let ((state (agent-river-state "s1" "alpha")))
+       (agent-river-fold state '(:kind "prompt" :cwd "/repo" :text "Rewrite it"))
+       (dotimes (_ 5)
+         (agent-river-fold state '(:kind "act" :cwd "/repo" :tool "Edit"
+                                         :file "src/a.el")))
+       (ignore state)
+       ,@body)))
+
+(ert-deftest agent-river-test-the-export-labels-both-frames ()
+  (agent-river-test--with-export
+    (agent-river-fold state '(:kind "prompt" :cwd "/repo" :text "Next thing"))
+    (agent-river-fold state '(:kind "act" :cwd "/repo" :tool "Edit" :file "b.el"))
+    (let ((markdown (agent-river-markdown)))
+      ;; The report gets this for free from its key names -- :task-hottest
+      ;; against :session-hottest -- and the export has to say it in words.
+      ;; Two numbers on different clocks side by side, unlabelled, read as
+      ;; if they were comparable.
+      (should (string-match-p "\\*\\*this task\\*\\*" markdown))
+      (should (string-match-p "\\*\\*this session\\*\\*" markdown))
+      ;; And they are genuinely different readings: the task frame was
+      ;; cleared by the second prompt, the session frame was not.
+      (should (string-match-p "this task\\*\\* — 1 step" markdown))
+      (should (string-match-p "this session.*`a\\.el` ×5" markdown)))))
+
+(ert-deftest agent-river-test-the-export-marks-a-claim-as-one ()
+  (agent-river-test--with-export
+    (agent-river-fold state '(:kind "intent" :text "narrowing it down"))
+    (let ((markdown (agent-river-markdown)))
+      ;; Marked twice, and last.  This is the agent talking about itself,
+      ;; and a claim a later reader takes for one of the measurements above
+      ;; it is exactly the confusion the intent slots are kept apart to
+      ;; prevent -- the more so once the text has left this package.
+      (should (string-match-p "\\*\\*claims\\*\\* — narrowing it down" markdown))
+      (should (string-match-p "self-reported" markdown))
+      (should (> (string-match "claims" markdown)
+                 (string-match "this session" markdown))))))
+
+(ert-deftest agent-river-test-the-export-neutralises-what-the-agent-wrote ()
+  (agent-river-test--with-export
+    (agent-river-fold state '(:kind "intent" :text "the *parser* in a_b [see #1]"))
+    (let ((markdown (agent-river-markdown)))
+      ;; The agent's words do not stop being arbitrary text because they are
+      ;; going somewhere Markdown is read.  Unescaped, an asterisk silently
+      ;; italicises the rest of the line and a bracket swallows it into a
+      ;; link -- the same hazard that keeps the HUD out of Markdown, small
+      ;; enough to escape here because only two values are the agent's.
+      (should (string-match-p "the \\\\\\*parser\\\\\\* in a\\\\_b" markdown))
+      (should (string-match-p "\\\\\\[see \\\\#1\\\\\\]" markdown)))))
+
+(ert-deftest agent-river-test-a-name-cannot-break-out-of-its-code-span ()
+  ;; A file name will almost never hold a backtick, and the one that does
+  ;; must not be able to close the span it is in and turn the rest of the
+  ;; line into markup.
+  (should (equal (agent-river--md-code "a.el") "`a.el`"))
+  (should (equal (agent-river--md-code "a`b.el") "`` a`b.el ``"))
+  (should (equal (agent-river--md-code "a``b.el") "``` a``b.el ```")))
+
+(ert-deftest agent-river-test-the-export-folds-subagents-under-the-parent ()
+  (agent-river-test--with-export
+    (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
+      (dotimes (_ 3)
+        (agent-river-fold child '(:kind "act" :cwd "/repo" :tool "Read"
+                                        :file "README.md"))))
+    (let ((markdown (agent-river-markdown)))
+      ;; No section of its own, exactly as it gets no panel line: the work
+      ;; is counted on the parent and aggregated on demand, so the two
+      ;; cannot drift.
+      (should-not (string-match-p "^### .*Explore" markdown))
+      (should (string-match-p "\\*\\*subagents\\*\\* — 1 of 1 running" markdown))
+      (should (string-match-p "    - `Explore` — running · 3 steps" markdown))
+      ;; The name comes out as a code span like every other name here, which
+      ;; is why this is read off the child's state rather than out of
+      ;; `agent-river--child-digest's already-formatted string.
+      (should (string-match-p "hottest `README\\.md` ×3" markdown)))))
+
+(ert-deftest agent-river-test-the-export-mirrors-the-block-not-the-registry ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    ;; Nothing live, nothing to hand out -- and nil rather than an empty
+    ;; document, so the command can say so instead of putting a heading with
+    ;; no body on the kill ring.
+    (should-not (agent-river-markdown))
+    (let ((state (agent-river-state "s1" "alpha")))
+      (agent-river-fold state '(:kind "act" :cwd "/repo" :tool "Edit" :file "a.el"))
+      (should (agent-river-markdown))
+      ;; A subagent is never a section, so a registry holding only one has
+      ;; nothing to report at the top level.
+      (should-not (agent-river-markdown "s1/a1")))))
+
+
 ;;; The anchor -- where a session's keys are relative to
 ;;
 ;; The artifact keys stay relative on purpose, so a worktree and its main

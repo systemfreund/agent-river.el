@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (187 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (193 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -308,6 +308,39 @@ Reading notes back and deciding what to tell the agent is a separate step, and
 is deliberately not built: `agent-river--signal` still fires on fail streaks
 only. Notes are visible in the HUD (`◉`) and counted in the report (`:notes`)
 first, so the rate can be seen before anything is fed back.
+
+### Markdown belongs where the state leaves, not where it is watched
+
+`agent-river-markdown` / `agent-river-copy-report` render the state for an
+issue, a PR or a message. The HUD is deliberately *not* Markdown and must stay
+that way: its log carries prompts, reasoning and tool arguments — text the
+package does not control — and Markdown would hand that text the power to
+restructure the view watching it. A prompt beginning `# ` becomes a heading.
+Wrapping the whole payload in code spans would fix that and destroy the
+per-kind colouring that is the HUD's main signal.
+
+The map could go Markdown because four things held: the content *is* a
+document, every token in it is ours, it is rebuilt every few seconds rather
+than every event, and it had structure being faked with `*`. Check all four
+before rendering anything else as Markdown.
+
+The export is a third derivation of the state beside the panel and the report,
+built on neither — the report's values are already formatted for a human
+reading a plist, and re-formatting a formatted string is the second-account
+problem in a different hat (see `agent-river--md-child`, which reads the
+child's state rather than take a file name back out of
+`agent-river--child-digest`'s prose). Three things it owes:
+
+- **Both frames named in words** (`**this task**` / `**this session**`). The
+  report gets that free from its key names; here it is hand-written, so it is
+  tested.
+- **The claim marked twice and placed last.** `intent` is the agent talking
+  about itself, and it is leaving the package — a reader who takes it for one
+  of the measurements above it has no way back to the distinction.
+- **The agent's words escaped** (`agent-river--md-escape`), names fenced as
+  code spans long enough to hold a backtick (`agent-river--md-code`). Only two
+  values are the agent's, which is the whole reason this is tractable here and
+  is not in the HUD.
 
 ### The two views of the artifact tables
 
