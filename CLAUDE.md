@@ -425,6 +425,30 @@ Four things about the map are load-bearing:
   in a monorepo, so RET descends (`agent-river-map-descend`) rather than
   widening, and a file five directories down is shown under the one entry the
   listing has a line for, with the rest of its path inline.
+- **A name fades like the shading does** (`agent-river-map-party-floor`).
+  The shading has always had a floor — `agent-river-heat-levels` runs out at
+  1, below which there is no face and no overlay — and the name in the
+  brackets had none. The weights decay exponentially, so they approach zero
+  without reaching it, and after an hour in a small repository every file
+  carried a name and every line read alike. A view where everything is marked
+  marks nothing. Two things hold it together: **a party is never dropped from
+  the one file it reached most recently**, whatever that weighs, because cold
+  is not the same as gone and that file is the answer to "where is this agent
+  now" — so a quiet map settles at one line per agent rather than at none;
+  and the floor is applied at **both** reads of the artifact tables
+  (`agent-river--map-live-p`, asked by `agent-river--map-all-roots` and
+  `agent-river--map-reach`), since a root kept alive by a touch too cold to
+  name would head a section with nothing under it.
+- **Fading is not finishing** (`agent-river-forget-artifacts`). The floor
+  handles the everyday case on its own, but work that has just landed — a
+  merge, a release — is history rather than cold, and only the user knows
+  which has happened. The command empties the artifact tables and the anchors
+  with them, and nothing else: steps, failures and the task survive, so it is
+  not `agent-river-reset` in a smaller hat. It goes through the fold as a
+  `forget` event rather than clearing the tables where the command is
+  written, because the fold owns the state. Deliberately not on the map's
+  keymap: it throws measurements away, and a single keystroke in a view
+  buffer is the wrong gesture for that.
 - **Weight and position are different readings.** The numbers say where an
   agent has *been*; `:current` says where it *is*, and after a long task those
   are different places. `:current` is computed across everything a party

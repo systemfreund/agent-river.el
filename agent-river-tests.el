@@ -2825,6 +2825,105 @@ half of what it shows is what is on disk and untouched."
           (should-not (plist-get (nth 3 entries) :dir))
           (should-not (plist-get (car entries) :parties)))))))
 
+(defun agent-river-test--cool (state path seconds)
+  "Back-date STATE's touches of PATH by SECONDS, in both frames.
+The weighting is recomputed from `:last' on every read, so aging a touch
+is how a test asks what the view looks like once the work has moved on."
+  (dolist (table (list (agent-river-state-artifacts state)
+                       (agent-river-state-task-artifacts state)))
+    (let ((entry (gethash path table)))
+      (when entry
+        (puthash path
+                 (list :touches (plist-get entry :touches)
+                       :last (time-subtract (plist-get entry :last) seconds))
+                 table)))))
+
+(ert-deftest agent-river-test-a-cold-name-stops-being-drawn ()
+  ;; The shading has always had a floor and the name had none, so the weights
+  ;; decayed toward zero without reaching it and every file a session ever
+  ;; touched kept an agent on it.  A view where everything is marked marks
+  ;; nothing.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        ;; Age the older touch past the floor, leaving the newer one fresh.
+        (agent-river-test--cool state "common/c.el" 3600)
+        (should (equal (mapcar (lambda (e) (plist-get e :name))
+                               (agent-river--map-entries root))
+                       '("dialog")))))))
+
+(ert-deftest agent-river-test-a-party-keeps-the-file-it-is-on ()
+  ;; Cold is not gone.  The one file a party reached last is the answer to
+  ;; "where is this agent now", which is the question an idle agent provokes
+  ;; -- so a quiet map settles at one line per agent rather than at none.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-test--cool state "common/c.el" 3600)
+        (let ((entries (agent-river--map-entries root)))
+          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
+                         '("common")))
+          (should (plist-get (car (plist-get (car entries) :parties)) :current)))))))
+
+(ert-deftest agent-river-test-a-cold-root-stops-heading-a-section ()
+  ;; Both readings of the artifact tables have to apply the floor, or a root
+  ;; kept alive by a touch too cold to name heads a section with nothing
+  ;; under it.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (should (equal (mapcar #'car (agent-river--map-all-roots)) (list root)))
+        (agent-river-test--cool state "common/c.el" 3600)
+        ;; Still the one root: it holds the party's current file.
+        (should (equal (mapcar #'car (agent-river--map-all-roots)) (list root)))
+        ;; Truly nothing left to name, and the root goes with it.
+        (agent-river-fold state '(:kind "forget"))
+        (should-not (agent-river--map-all-roots))))))
+
+(ert-deftest agent-river-test-no-floor-names-every-touch ()
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor nil)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        (agent-river-test--cool state "common/c.el" 3600)
+        ;; The off switch restores what this replaced.
+        (should (equal (sort (mapcar (lambda (e) (plist-get e :name))
+                                     (agent-river--map-entries root))
+                             #'string<)
+                       '("common" "dialog")))))))
+
+(ert-deftest agent-river-test-forget-drops-the-files-and-keeps-the-session ()
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "prompt" :text "land the branch"))
+    (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"
+                                    :path "/w/elsewhere/a.el" :cwd "/w"))
+    (agent-river-test--fail state 2)
+    (agent-river-fold state '(:kind "forget"))
+    (should (= (hash-table-count (agent-river-state-artifacts state)) 0))
+    (should (= (hash-table-count (agent-river-state-task-artifacts state)) 0))
+    ;; The anchors are keyed on artifact keys, so without them they address
+    ;; nothing.
+    (should (= (hash-table-count (agent-river-state-anchors state)) 0))
+    ;; What the session is and how it is going survives -- this forgets
+    ;; where the work was, not that there was any.
+    (should (equal (agent-river-state-task state) "land the branch"))
+    (should (= (agent-river-state-steps state) 1))
+    (should (= (agent-river-state-fail-streak state) 2))))
+
 (ert-deftest agent-river-test-the-filter-never-hides-activity ()
   ;; The one thing the map exists not to do.  The filter is written as "has
   ;; no parties" rather than "is not on disk", so an entry the state knows

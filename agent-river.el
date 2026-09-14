@@ -677,6 +677,22 @@ replaying a session's events from the start."
       (push (cons (current-time) (plist-get event :text))
             (agent-river-state-notes state)))
 
+     ((equal kind "forget")
+      ;; The artifact tables emptied, and nothing else: the session goes on,
+      ;; its steps and failures still count, and only the record of which
+      ;; files it has been in is dropped.  Folded rather than cleared where
+      ;; the command is written, because the fold owns the state -- a
+      ;; `clrhash' from outside would be a transition no event accounts for,
+      ;; and the replay promise in `agent-river-fold's docstring would stop
+      ;; being true without anything failing.
+      ;;
+      ;; The anchors go with them.  They are keyed on artifact keys, so
+      ;; without the artifacts they address nothing, and a later touch of
+      ;; the same file re-folds the anchor from its `:path' anyway.
+      (clrhash (agent-river-state-artifacts state))
+      (clrhash (agent-river-state-task-artifacts state))
+      (clrhash (agent-river-state-anchors state)))
+
      ((equal kind "intent")
       (setf (agent-river-state-intent state) (plist-get event :text)
             (agent-river-state-intent-at state) (current-time)
@@ -2585,6 +2601,42 @@ half that also folds."
   (agent-river--stop-timer)
   (agent-river--stop-spinner))
 
+
+;;;###autoload
+(defun agent-river-forget-artifacts ()
+  "Forget which files the sessions have been in, keeping the sessions.
+
+For the moment work lands -- a merge, a release -- after which the files
+it was in are history rather than context.  `agent-river-map-party-floor'
+handles the everyday case on its own by letting a name fade, but cold is
+not the same as done, and only you know which has just happened.
+
+Not the same as `agent-river-reset', which forgets the sessions
+themselves.  Here the steps, the failures and the task survive; only the
+record of where the work was is dropped.
+
+Deliberately left off the map's keymap.  It throws measurements away, and
+a single keystroke in a view buffer is the wrong gesture for that."
+  (interactive)
+  (let ((n 0))
+    (maphash (lambda (_key state)
+               (setq n (+ n (hash-table-count (agent-river-state-artifacts state))))
+               (agent-river-fold state '(:kind "forget")))
+             agent-river-registry)
+    ;; Logged only into a HUD that already exists.  `agent-river-log' would
+    ;; otherwise create the buffer and `agent-river-auto-display' pop a
+    ;; window for it, which is a lot of furniture to move in answer to a
+    ;; command run from the map.
+    (if (get-buffer agent-river-buffer-name)
+        (agent-river-log "note" (format "forgot %d artifact%s"
+                                        n (if (= n 1) "" "s")))
+      (agent-river--redraw-block))
+    ;; Drawn rather than marked dirty: the map's timer only runs while an
+    ;; agent is working, so a flag set between turns would sit there until
+    ;; the next one and the view would go on naming what was just forgotten.
+    (agent-river--map-draw)
+    (message "agent-river: forgot %d artifact%s" n (if (= n 1) "" "s"))))
+
 ;;;###autoload
 (defun agent-river-status ()
   "Show every folded session in a readable buffer.
@@ -3447,6 +3499,62 @@ most worth being able to scan a whole listing for."
         ((time-less-p a b) b)
         (t a)))
 
+(defcustom agent-river-map-party-floor 0.25
+  "The weight below which an agent stops being named on a map line.
+
+The shading has had a floor all along -- `agent-river-heat-levels' runs
+out at 1, and below it a file gets no face and no overlay.  The name in
+the brackets had none, and the weights decay exponentially, so they
+approach zero without reaching it: after an hour in a small repository
+every file carried a name, every line read alike, and a view where
+everything is marked marks nothing.
+
+At the default half-life a single touch falls under this in about four
+minutes and a file touched ten times in about eleven, so what is left is
+where the work has been recently rather than everywhere it has ever been.
+
+A party is never dropped from the one file it reached most recently,
+whatever that weighs.  Cold is not the same as gone: that file is the
+answer to \"where is this agent now\", which is the map's most useful
+single fact, and an idle agent is exactly when it is asked.  So a quiet
+map settles at one line per agent rather than at none.
+
+Nil turns the floor off and restores the old behaviour, where a touch is
+named for as long as the session is folded."
+  :type '(choice (const :tag "Never drop a name" nil) number))
+
+(defun agent-river--map-newest (entries)
+  "Return a hash of party to the file it reached most recently.
+
+Computed across every entry, not just the ones under some root: taken per
+root, descending into a subdirectory would invent a second \"most recent\"
+file that only looks like one because the real one is out of view."
+  (let ((newest (make-hash-table :test 'equal)))
+    (dolist (entry entries)
+      (let ((abs (agent-river--heat-absolute entry))
+            (party (plist-get entry :party))
+            (last (plist-get entry :last)))
+        (when abs
+          (let ((seen (gethash party newest)))
+            (when (or (null seen)
+                      (eq last (agent-river--map-later (plist-get seen :last) last)))
+              (puthash party (list :abs abs :last last) newest))))))
+    newest))
+
+(defun agent-river--map-live-p (entry newest)
+  "Return non-nil while ENTRY still earns its party a name on the map.
+
+Above `agent-river-map-party-floor', or the one file NEWEST says that
+party reached last.  Asked in both places that read the artifact tables
+for the map -- which trees to draw, and what to draw in them -- because a
+root kept alive by a touch too cold to name would head a section with
+nothing under it."
+  (let ((abs (agent-river--heat-absolute entry)))
+    (and abs
+         (or (null agent-river-map-party-floor)
+             (>= (plist-get entry :weight) agent-river-map-party-floor)
+             (equal abs (plist-get (gethash (plist-get entry :party) newest) :abs))))))
+
 (defun agent-river--map-all-roots (&optional scope)
   "Return every directory tree the agents have touched, newest first.
 
@@ -3456,11 +3564,13 @@ under whichever project happened to be current, which is the whole reason
 the anchor is folded: a session editing one file under ~/.claude has two
 roots, not one, and a view that shows a single root is hiding the second.
 Roots are sorted by the most recent touch within them."
-  (let ((roots (make-hash-table :test 'equal))
-        (entries (agent-river--heat-entries scope)))
+  (let* ((roots (make-hash-table :test 'equal))
+         (entries (agent-river--heat-entries scope))
+         (newest (agent-river--map-newest entries)))
     (dolist (entry entries)
       (let ((root (or (plist-get entry :anchor) (plist-get entry :cwd))))
-        (when (and root (not (string-empty-p root)))
+        (when (and root (not (string-empty-p root))
+                   (agent-river--map-live-p entry newest))
           (puthash root
                    (agent-river--map-later
                     (gethash root roots)
@@ -3491,20 +3601,20 @@ been.  Computed across everything the party reached, not just what fell
 inside ROOT, so descending into a subdirectory cannot invent a second
 \"most recent\" file that only looks like one because the real one was out
 of view."
-  (let ((prefix (file-name-as-directory (expand-file-name root)))
-        (by-rel (make-hash-table :test 'equal))
-        (newest (make-hash-table :test 'equal))
-        (entries (agent-river--heat-entries scope)))
+  (let* ((prefix (file-name-as-directory (expand-file-name root)))
+         (by-rel (make-hash-table :test 'equal))
+         (entries (agent-river--heat-entries scope))
+         (newest (agent-river--map-newest entries)))
     (dolist (entry entries)
       (let ((abs (agent-river--heat-absolute entry))
             (party (plist-get entry :party))
             (last (plist-get entry :last)))
-        (when abs
-          (let ((seen (gethash party newest)))
-            (when (or (null seen)
-                      (eq last (agent-river--map-later (plist-get seen :last) last)))
-              (puthash party (list :abs abs :last last) newest))))
-        (when (and abs (string-prefix-p prefix abs))
+        ;; A touch too cold to name is not reached any more, so the node it
+        ;; would have made is never built: an entry left with no parties
+        ;; would otherwise be listed with an empty annotation, which reads
+        ;; as an agent whose name failed to render.
+        (when (and abs (string-prefix-p prefix abs)
+                   (agent-river--map-live-p entry newest))
           (let* ((rel (substring abs (length prefix)))
                  (parties (or (gethash rel by-rel)
                               (puthash rel (make-hash-table :test 'equal) by-rel)))
