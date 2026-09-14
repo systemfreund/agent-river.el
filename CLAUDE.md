@@ -17,7 +17,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (182 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (187 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -377,6 +377,29 @@ step. Four things the Markdown base forces:
 Padding is measured from the whole prefix, not from the name: `## ` and `- `
 are different widths, and measured from the name alone every list item's
 reading sits one column left of every heading's.
+
+Motion is dired's, because the map answers dired's question over a wider
+area. Three grains, and collapsing them loses the one a reader wants: `n`/`p`
+(and the remapped arrow keys) walk every entry, `M-n`/`M-p` walk the listing's
+own entries past an unfolded directory's files, and `>`/`<` walk only the
+lines with agents on them — in a thirty-module repository that last one is the
+difference between reading the view and searching it. Three rules hold it
+together:
+
+- **Which lines a motion may stop on is read off text properties, not off the
+  text.** `agent-river-map-path` marks a line that names something (the root
+  heading and the elision line have none, which is what makes them
+  unstoppable-on), `agent-river-map-rel` separates a file from its entry, and
+  `agent-river-map-active` is set from the parties rather than from the
+  rendered annotation — so a reformatting cannot pull the motion and the
+  reading apart.
+- **Point lands on the name** (`agent-river--map-beginning-of-name`), never in
+  column zero, where it would sit on the Markdown marker and read as though
+  the markup were the content. `agent-river--map-settle-point` runs after every
+  redraw, so a freshly drawn map is never left with point on the header.
+- **A motion with nowhere to go refuses** rather than landing somewhere near.
+  The next RET would otherwise visit something the eye never chose, and this
+  view's whole job is being trusted about where things are.
 
 ### Pieces that span files or need context
 

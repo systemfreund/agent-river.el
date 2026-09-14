@@ -2485,6 +2485,93 @@ half of what it shows is what is on disk and untouched."
     (should (eq (lookup-key agent-river-map-mode-map (kbd key))
                 (lookup-key agent-river-map-plain-mode-map (kbd key))))))
 
+;;; Moving about the map
+;;
+;; The text here is ours rather than a host package's, so the motion over it
+;; is ours to get right and ours to test.  What matters is which lines a
+;; motion is allowed to stop on and what it does when there is no such line;
+;; where those lines happen to be drawn is not asserted anywhere.
+
+(defmacro agent-river-test--with-map (root &rest body)
+  "Draw a map of a throwaway tree into a buffer, bind ROOT, and run BODY.
+The plain mode rather than the Markdown one: the grammars are not part of
+the suite's world, and the text -- which is all the motion reads -- is the
+same either way."
+  (declare (indent 1))
+  `(let ((agent-river-heat-half-life nil))
+     (agent-river-test--with-tree ,root
+       (agent-river-test--with-session state
+         (dotimes (_ 7)
+           (agent-river-fold state (list :kind "act" :cwd ,root :file "common/c.el")))
+         (dotimes (_ 2)
+           (agent-river-fold state (list :kind "act" :cwd ,root
+                                         :file "dialog/src/main/foo.el")))
+         (with-temp-buffer
+           (rename-buffer agent-river-map-buffer-name)
+           (agent-river-map-plain-mode)
+           (setq agent-river--map-root ,root)
+           (agent-river--map-draw)
+           ,@body)))))
+
+(ert-deftest agent-river-test-map-motion-stops-only-on-a-name ()
+  (agent-river-test--with-map root
+    ;; A fresh map has point on the header, which names nothing -- RET and
+    ;; TAB there would both complain, and pressing one of them is the first
+    ;; thing anyone does with a new buffer.
+    (should (agent-river--map-entry-line-p))
+    (should (equal (get-text-property (line-beginning-position)
+                                      'agent-river-map-name)
+                   "common"))
+    ;; And point is on the name, not in column zero: column zero is the
+    ;; Markdown marker, and a cursor on `#' reads as though the markup were
+    ;; the content.
+    (should (eq (char-before) ?`))
+    (should (looking-at-p "common/"))))
+
+(ert-deftest agent-river-test-map-motion-walks-files-and-directories ()
+  (agent-river-test--with-map root
+    (let (seen)
+      (while (agent-river--map-scan 1 #'agent-river--map-entry-line-p)
+        (push (get-text-property (line-beginning-position) 'agent-river-map-path)
+              seen))
+      ;; Every entry, files included.  Outline's own n/p stop at headings
+      ;; only, which in this view means skipping exactly the lines that say
+      ;; which file the work is in.
+      (should (member (expand-file-name "common/c.el" root) seen))
+      (should (member (expand-file-name "dialog" root) seen)))))
+
+(ert-deftest agent-river-test-map-entry-motion-skips-the-files ()
+  (agent-river-test--with-map root
+    (should (agent-river--map-scan 1 #'agent-river--map-top-line-p))
+    ;; From `common', whose file is unfolded beneath it, the next entry of
+    ;; the listing is `dialog' rather than `common/c.el'.
+    (should (equal (get-text-property (line-beginning-position)
+                                      'agent-river-map-name)
+                   "dialog"))))
+
+(ert-deftest agent-river-test-map-active-motion-skips-the-quiet ()
+  (agent-river-test--with-map root
+    (let (seen)
+      (while (agent-river--map-scan 1 #'agent-river--map-active-line-p)
+        (push (get-text-property (line-beginning-position)
+                                 'agent-river-map-name)
+              seen))
+      ;; In a thirty-module repository this is the difference between
+      ;; reading the view and searching it.
+      (should (member "dialog" seen))
+      (should-not (member "docs" seen))
+      (should-not (member "build.gradle.kts" seen)))))
+
+(ert-deftest agent-river-test-map-motion-refuses-rather-than-drifts ()
+  (agent-river-test--with-map root
+    (goto-char (point-max))
+    (forward-line -1)
+    (let ((before (point)))
+      ;; A motion that quietly lands somewhere else means the next RET
+      ;; visits something the eye never chose.
+      (should-not (agent-river--map-scan 1 #'agent-river--map-entry-line-p))
+      (should (= (point) before)))))
+
 (ert-deftest agent-river-test-the-map-is-not-on-the-stream-until-opened ()
   ;; No mode to switch on, because the map draws only into its own buffer:
   ;; opening it is the consent, and killing it is the retirement.

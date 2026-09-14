@@ -3103,7 +3103,12 @@ start of the buffer."
                                "\n")
                        'agent-river-map-name name
                        'agent-river-map-path path
-                       'agent-river-map-dir dir))
+                       'agent-river-map-dir dir
+                       ;; What `agent-river-map-next-active' stops on.  Read
+                       ;; off the parties rather than off the annotation
+                       ;; text, so the motion and the reading cannot come
+                       ;; apart if the line is ever formatted differently.
+                       'agent-river-map-active (and (plist-get entry :parties) t)))
               (when (agent-river--map-open-p entry)
                 (let* ((files (plist-get entry :files))
                        (shown (seq-take files agent-river-map-detail-files)))
@@ -3116,7 +3121,9 @@ start of the buffer."
                              'agent-river-map-name name
                              'agent-river-map-rel (plist-get file :rel)
                              'agent-river-map-path
-                             (expand-file-name (plist-get file :rel) path))))
+                             (expand-file-name (plist-get file :rel) path)
+                             'agent-river-map-active
+                             (and (plist-get file :parties) t))))
                   (when (> (length files) (length shown))
                     (insert (propertize
                              (concat (agent-river--map-marker 3) "…\n")
@@ -3124,6 +3131,7 @@ start of the buffer."
                              'agent-river-map-name name)))))))
           (agent-river--map-shade)
           (agent-river--map-goto here)
+          (agent-river--map-settle-point)
           (setq agent-river--map-dirty nil))))))
 
 (defun agent-river--map-default-root ()
@@ -3152,6 +3160,118 @@ folded yet, this buffer's own directory."
                  (and project (directory-file-name
                                (expand-file-name (project-root project))))))
           dir))))
+
+;;; Moving about the map
+;;
+;; Dired's gestures, because the map is answering dired's question over a
+;; wider area.  Point belongs on the name rather than in column zero: column
+;; zero is the Markdown marker, which is not what the line is about, and a
+;; cursor sitting on `#' reads as though the markup were the content.
+;;
+;; Three motions, because the map has three grains of "next thing" and
+;; collapsing them would lose the one a reader actually wants.  Every entry
+;; is the fine one; the top-level entries alone skip past an unfolded
+;; directory's files; and the entries with agents on them are why the map was
+;; opened at all -- in a thirty-module repository that last one is the
+;; difference between reading the view and searching it.
+
+(defun agent-river--map-line-path ()
+  "Return what this line names, or nil when it names nothing.
+The root heading and the elision line carry no path, which is exactly what
+makes them the lines no motion should ever stop on."
+  (get-text-property (line-beginning-position) 'agent-river-map-path))
+
+(defun agent-river--map-entry-line-p ()
+  "Return non-nil on a line naming a file or a directory."
+  (and (agent-river--map-line-path) t))
+
+(defun agent-river--map-top-line-p ()
+  "Return non-nil on one of the listing's own entries.
+A file shown under an unfolded directory carries `agent-river-map-rel';
+the entry itself does not, which is the difference between the two grains
+of motion."
+  (and (agent-river--map-entry-line-p)
+       (null (get-text-property (line-beginning-position) 'agent-river-map-rel))))
+
+(defun agent-river--map-active-line-p ()
+  "Return non-nil on a line some agent has been working under."
+  (and (agent-river--map-entry-line-p)
+       (get-text-property (line-beginning-position) 'agent-river-map-active)))
+
+(defun agent-river--map-beginning-of-name ()
+  "Put point on the first character of the name on this line.
+Falls back to the start of the line, so this is safe to call anywhere --
+the header has no name and point should not end up inside its markup."
+  (goto-char (line-beginning-position))
+  (re-search-forward "`" (line-end-position) t))
+
+(defun agent-river--map-scan (count test)
+  "Move to the COUNTth line satisfying TEST, forward when COUNT is positive.
+
+Returns nil and leaves point alone when there is no such line.  Refusing
+to move is the point: a motion that quietly lands somewhere else means the
+next RET visits something the eye never chose, and in a view whose whole
+job is to be trusted about where things are, that is worse than a beep."
+  (let ((found nil)
+        (step (if (> count 0) 1 -1))
+        (left (abs count)))
+    (save-excursion
+      (catch 'done
+        (while t
+          (unless (zerop (forward-line step)) (throw 'done nil))
+          (when (funcall test)
+            (setq left (1- left))
+            (when (zerop left)
+              (setq found (point))
+              (throw 'done nil))))))
+    (when found
+      (goto-char found)
+      (agent-river--map-beginning-of-name)
+      t)))
+
+(defun agent-river-map-next-line (&optional n)
+  "Move to the Nth next file or directory on the map."
+  (interactive "p")
+  (or (agent-river--map-scan (or n 1) #'agent-river--map-entry-line-p)
+      (user-error "No further entry")))
+
+(defun agent-river-map-previous-line (&optional n)
+  "Move to the Nth previous file or directory on the map."
+  (interactive "p")
+  (agent-river-map-next-line (- (or n 1))))
+
+(defun agent-river-map-next-entry (&optional n)
+  "Move to the Nth next entry of the listing, past any files shown under it."
+  (interactive "p")
+  (or (agent-river--map-scan (or n 1) #'agent-river--map-top-line-p)
+      (user-error "No further entry")))
+
+(defun agent-river-map-previous-entry (&optional n)
+  "Move to the Nth previous entry of the listing."
+  (interactive "p")
+  (agent-river-map-next-entry (- (or n 1))))
+
+(defun agent-river-map-next-active (&optional n)
+  "Move to the Nth next line an agent is working under."
+  (interactive "p")
+  (or (agent-river--map-scan (or n 1) #'agent-river--map-active-line-p)
+      (user-error "No further agent")))
+
+(defun agent-river-map-previous-active (&optional n)
+  "Move to the Nth previous line an agent is working under."
+  (interactive "p")
+  (agent-river-map-next-active (- (or n 1))))
+
+(defun agent-river--map-settle-point ()
+  "Put point somewhere a motion could have left it.
+Called after every redraw.  A freshly drawn map has point on the header,
+which names nothing -- RET and TAB there would both complain, and the
+first thing anyone does with a new buffer is press one of them."
+  (if (agent-river--map-entry-line-p)
+      (agent-river--map-beginning-of-name)
+    (goto-char (point-min))
+    (unless (agent-river--map-scan 1 #'agent-river--map-entry-line-p)
+      (goto-char (point-min)))))
 
 (defun agent-river-map-refresh ()
   "Redraw the map now."
@@ -3246,6 +3366,12 @@ then quietly stay in the fallback for the whole session."
   ;; deciding what gets drawn, which is the only kind of fold that survives
   ;; here.
   (setq-local outline-minor-mode-cycle nil)
+  ;; Navigating by keyboard with nothing marking where you are is navigating
+  ;; blind, and this view is read by eye far more than it is acted on.  The
+  ;; heat overlays keep their own background over the top of it, so the
+  ;; shading is still legible on the current line.  A mode hook is the way
+  ;; out for anyone who does not want it.
+  (when (fboundp 'hl-line-mode) (hl-line-mode 1))
   (buffer-disable-undo))
 
 ;; `markdown-ts-view-mode' rather than `markdown-ts-mode': it is the
@@ -3272,13 +3398,32 @@ makes this a degradation rather than a second view to keep in step."
 
 (dolist (map (list agent-river-map-mode-map agent-river-map-plain-mode-map))
   ;; Set on both maps from one list rather than inherited, because the two
-  ;; modes have different parents and neither can be the other's.
+  ;; modes have different parents and neither can be the other's.  The
+  ;; fallback has to carry the same keys or it stops being the same view
+  ;; drawn plainer and becomes a second one to keep in step.
   (define-key map (kbd "TAB") #'agent-river-map-toggle)
   (define-key map (kbd "RET") #'agent-river-map-visit)
   (define-key map (kbd "^") #'agent-river-map-up)
   ;; `markdown-ts-view-mode' binds this to `ignore' to keep `revert-buffer'
   ;; off it; here there is something to revert to.
-  (define-key map (kbd "g") #'agent-river-map-refresh))
+  (define-key map (kbd "g") #'agent-river-map-refresh)
+  ;; n/p are outline's in `markdown-ts-view-mode' and unbound in the
+  ;; fallback, so in one mode they skipped every file line and in the other
+  ;; there was no entry motion at all.
+  (define-key map (kbd "n") #'agent-river-map-next-line)
+  (define-key map (kbd "p") #'agent-river-map-previous-line)
+  (define-key map (kbd "SPC") #'agent-river-map-next-line)
+  (define-key map (kbd "DEL") #'agent-river-map-previous-line)
+  ;; Remapped rather than bound, the way dired does it, so the arrow keys
+  ;; and C-n/C-p land on a name too.  Line motion that leaves point in
+  ;; column zero puts the cursor on the Markdown marker, which reads as
+  ;; though the markup were the content.
+  (define-key map [remap next-line] #'agent-river-map-next-line)
+  (define-key map [remap previous-line] #'agent-river-map-previous-line)
+  (define-key map (kbd "M-n") #'agent-river-map-next-entry)
+  (define-key map (kbd "M-p") #'agent-river-map-previous-entry)
+  (define-key map (kbd ">") #'agent-river-map-next-active)
+  (define-key map (kbd "<") #'agent-river-map-previous-active))
 
 (defun agent-river--map-observe (_state _event)
   "Mark the map as needing a redraw, and make sure something will do it.
