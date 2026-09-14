@@ -816,9 +816,10 @@ The two agent-shell functions the label derivation borrows from are
 stubbed here so the tests do not depend on agent-shell being installed."
   (declare (indent 1))
   `(let ((buffers nil)
-         ;; All three are sticky for the Emacs session in real use; a test is
-         ;; a session of its own, so it starts with none of them.
-         (agent-river--shell-seen nil)
+         ;; Both outlive any one session in real use -- what agent-shell has
+         ;; hosted here is remembered after the buffer dies, which is the
+         ;; whole point of the index.  A test is an Emacs of its own, so it
+         ;; starts with neither.
          (agent-river--shell-sessions (make-hash-table :test 'equal))
          (agent-river--teardown-hooked (make-hash-table :test 'eq)))
      (unwind-protect
@@ -896,14 +897,62 @@ stubbed here so the tests do not depend on agent-shell being installed."
 (ert-deftest agent-river-test-a-closed-session-is-not-active ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-session-ttl 300))
+    (agent-river-test--with-shell '(("Claude Agent @ repo" "s1")
+                                    ("Claude Agent @ other" "gone"))
+      (let ((live (agent-river-state "s1" "repo"))
+            (closed (agent-river-state "gone" "other")))
+        (should (agent-river--active-p live))
+        (should (agent-river--active-p closed))
+        ;; A hosted session whose buffer is killed is over, however recently
+        ;; it acted -- and it is the *index* that says so, since a look at
+        ;; the buffers alive now cannot tell a session that lost its buffer
+        ;; from one that never had one.
+        (kill-buffer (agent-river--shell-buffer "gone"))
+        (should (agent-river--active-p live))
+        (should-not (agent-river--active-p closed))
+        (should (agent-river--gone-p closed))))))
+
+(ert-deftest agent-river-test-a-terminal-session-keeps-the-ttl ()
+  ;; What the sticky flag cost: once agent-shell had hosted anything here it
+  ;; became the authority over every root, so a session run from a terminal
+  ;; -- which has no buffer here and never did -- read as inactive while it
+  ;; was working.  Recorded per session, it simply keeps the fallback.
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-session-ttl 300))
     (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
       (agent-river-state "s1" "repo")
-      (agent-river-state "gone" "repo"))
-    ;; Outside the macro the buffers are killed: a hosted session whose
-    ;; buffer is gone is gone, however recently it acted.
-    (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
-      (should (agent-river--active-p (gethash "s1" agent-river-registry)))
-      (should-not (agent-river--active-p (gethash "gone" agent-river-registry))))))
+      (let ((cli (agent-river-state "cli" "repo")))
+        (should-not (agent-river--shell-hosted "cli"))
+        (should (agent-river--active-p cli))
+        (should-not (agent-river--gone-p cli))
+        (setf (agent-river-state-last-seen cli) (time-subtract (current-time) 9999))
+        (should-not (agent-river--active-p cli))
+        (should-not (agent-river--gone-p cli))))))
+
+(ert-deftest agent-river-test-a-session-is-looked-for-again-for-a-while ()
+  ;; A negative remembered forever is cheaper and is a trap: a session whose
+  ;; first event beats agent-shell to setting its id would be counted
+  ;; unhosted for the rest of the Emacs session, with no label, no reasoning
+  ;; lines and no RET, and nothing would ever say so.
+  (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
+    (should-not (agent-river--shell-buffer "late"))
+    ;; The answer is remembered, so nothing is walked again just yet.
+    (should (consp (gethash "late" agent-river--shell-sessions)))
+    (let ((buffer (generate-new-buffer "Claude Agent @ late")))
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (setq major-mode 'agent-shell-mode)
+              (setq-local agent-shell--state
+                          (list (cons :session (list (cons :id "late"))))))
+            ;; Still inside the window, so still nil ...
+            (should-not (agent-river--shell-buffer "late"))
+            ;; ... and found once it is up.
+            (puthash "late" (cons 'none (time-subtract (current-time)
+                                                       (1+ agent-river--shell-rescan)))
+                     agent-river--shell-sessions)
+            (should (eq (agent-river--shell-buffer "late") buffer)))
+        (kill-buffer buffer)))))
 
 (ert-deftest agent-river-test-subagents-still-use-the-ttl ()
   (let ((agent-river-registry (make-hash-table :test 'equal))

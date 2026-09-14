@@ -347,8 +347,26 @@ this needs no locking.")
   ;; on `featurep' would only be a shortcut that is awkward to fake in tests.
   (derived-mode-p 'agent-shell-mode))
 
-(defun agent-river--shell-buffer (id)
-  "Return the agent-shell buffer hosting session ID, or nil."
+(defconst agent-river--shell-rescan 5
+  "Seconds before a session with no agent-shell buffer is looked for again.
+Long enough that a session nobody here hosts costs nothing to keep asking
+about, short enough that one whose buffer arrives late is picked up while
+it is still the same turn.")
+
+(defvar agent-river--shell-sessions (make-hash-table :test 'equal)
+  "What is known about who hosts each session, as id -> BUFFER or (none . TIME).
+
+The index behind `agent-river--shell-buffer', and the reason liveness is
+cheap.  A buffer recorded here is one we have seen hosting that session,
+and it is kept after it dies: that a session *had* a buffer and no longer
+does is exactly what tells `agent-river--active-p' and
+`agent-river--gone-p' that it is over, and it is the one thing a snapshot
+of the buffers alive now can never say.")
+
+(defun agent-river--shell-scan (id)
+  "Return the agent-shell buffer hosting session ID by looking for it.
+The expensive half of `agent-river--shell-buffer': this walks every buffer
+in Emacs, which in a long-lived one is thousands of them."
   (seq-find
    (lambda (buffer)
      (with-current-buffer buffer
@@ -358,34 +376,52 @@ this needs no locking.")
                                                  agent-shell--state)))))))
    (buffer-list)))
 
-(defun agent-river--shell-hosted-p ()
-  "Return non-nil when agent-shell is hosting sessions in this Emacs."
-  (seq-some (lambda (buffer)
-              (with-current-buffer buffer (agent-river--shell-buffer-p)))
-            (buffer-list)))
+(defun agent-river--shell-buffer (id)
+  "Return the agent-shell buffer hosting session ID, or nil.
 
-(defvar agent-river--shell-seen nil
-  "Non-nil once agent-shell has been seen hosting a session here.
+Answered from `agent-river--shell-sessions' wherever it can be.  This is
+asked of every session by every redraw -- for its label, for whether the
+line can be jumped to, for whether it is still alive -- and a walk of the
+buffer list each time was most of what drawing the block cost: measured at
+1.4 ms a call in an Emacs with ten thousand buffers, against 13 ms for the
+whole block.
 
-Sticky on purpose, where `agent-river--shell-hosted-p' is a snapshot of the
-buffers alive right now.  Liveness takes the buffer as authoritative only
-when agent-shell is in play -- but asking \"is one hosting *now*\" makes the
-last buffer's death flip the answer, and every state it left behind falls
-back to the TTL.  A session that `agent-shell-restart' killed then reads as
-active for the whole TTL, so its panel line lingers, unopenable.  Seen once,
-agent-shell stays the authority for as long as this Emacs runs.")
+Three things can be known about an id, and the difference between the last
+two is the point:
 
-(defvar agent-river--shell-sessions (make-hash-table :test 'equal)
-  "Session ids agent-shell has been seen hosting, as id -> t.
+  - a buffer we have seen.  Live, it is the answer; dead, the session is
+    over and nothing will host that id again -- `agent-shell-restart' kills
+    the buffer and starts a *new* session -- so the answer is nil, and
+    still without looking.
+  - nothing at all: look, and remember what was found.
+  - looked and found nothing, with the time.  Looked for again every
+    `agent-river--shell-rescan' seconds.  Remembering that permanently
+    would be cheaper and is a trap: a session whose first event beats
+    agent-shell to setting its id would be counted unhosted for the rest of
+    the Emacs session -- no label from its buffer, no reasoning lines, no
+    RET -- and nothing would ever say so."
+  (let ((known (gethash id agent-river--shell-sessions)))
+    (cond
+     ((buffer-live-p known) known)
+     ((bufferp known) nil)
+     ((and (consp known)
+           (< (float-time (time-since (cdr known))) agent-river--shell-rescan))
+      nil)
+     (t (let ((found (agent-river--shell-scan id)))
+          (puthash id (or found (cons 'none (current-time)))
+                   agent-river--shell-sessions)
+          found)))))
 
-The same fact as `agent-river--shell-seen' asked one session at a time,
-and both are kept because they answer for different costs.  The sticky
-flag says \"agent-shell is the authority around here\", which is enough to
-call a session with no buffer inactive; `agent-river--gone-p' declares a
-session *ended*, and that must not be said of a session run from a
-terminal which never had a buffer to lose.  Recorded where the teardown
-hook is installed, so a session is in here exactly when we have seen its
-buffer, and kept after the buffer dies -- that is the whole point of it.")
+(defun agent-river--shell-hosted (id)
+  "Return the buffer we have seen hosting session ID, alive or dead.
+
+Nil for a session nobody here has ever hosted, which is a different answer
+from `agent-river--shell-buffer' returning nil and has to stay different:
+one says the session has ended, the other that it was never ours to watch.
+A session run from a terminal has no buffer to lose, and calling it dead
+for that would be calling every CLI session dead."
+  (let ((known (gethash id agent-river--shell-sessions)))
+    (and (bufferp known) known)))
 
 (defun agent-river--shell-default-name (buffer)
   "Return the name agent-shell would give BUFFER, or nil.
@@ -483,15 +519,22 @@ AGENT-TYPE are set once, when the state is created."
 
 A finished subagent says so via SubagentStop, which is authoritative.
 
-For a root session hosted by agent-shell the buffer settles it: the
-process runs in this Emacs, so whether it is alive is a fact and not an
-estimate.  The TTL is what is left for everything else -- subagents, and
-sessions nobody here owns -- and it was only ever a way of guessing at
-something we could not see."
+For a root session we have seen agent-shell hosting, the buffer settles
+it: the process runs in this Emacs, so whether it is alive is a fact and
+not an estimate.  The TTL is what is left for everything else --
+subagents, and sessions nobody here owns -- and it was only ever a way of
+guessing at something we could not see.
+
+Asked of `agent-river--shell-hosted', which is per session, where this
+used to ask a flag that went sticky as soon as agent-shell had hosted
+*anything* here.  The flag was a way of not forgetting a buffer that had
+died, which the index does properly; what it cost was every session run
+from a terminal, which has no buffer here and never did and was called
+inactive for it."
   (cond
    ((agent-river-state-done state) nil)
    ((and (null (agent-river-state-parent state))
-         (or agent-river--shell-seen (agent-river--shell-hosted-p)))
+         (agent-river--shell-hosted (agent-river-state-id state)))
     (and (agent-river--shell-buffer (agent-river-state-id state)) t))
    (t (let ((seen (agent-river-state-last-seen state)))
         (and seen (< (float-time (time-subtract (current-time) seen))
@@ -510,13 +553,10 @@ and a subagent whose own SubagentStop said it was finished.  A silent
 session nobody here owns is not gone, it is silent, and withdrawing a
 reading over that would be acting on an estimate.
 
-Which is also why this asks `agent-river--shell-sessions' rather than the
-sticky `agent-river--shell-seen' that `agent-river--active-p' asks.  That
-one makes agent-shell the authority over *every* root as soon as it has
-hosted any of them, and the cost is a session run from a terminal with
-hooks wired, which has no buffer here and never did: called merely
-inactive it loses a word in the panel, called gone it would lose its name
-and its marker on the map while it was still working.
+Which is why the root branch is gated on `agent-river--shell-hosted' and
+not merely on there being no buffer: a session run from a terminal with
+hooks wired has no buffer here and never did, and calling that gone would
+take its name and its marker off the map while it was still working.
 
 A subagent goes with its root as well, since a child of a session that no
 longer exists cannot still be running -- and the TTL, which is all a
@@ -527,7 +567,7 @@ subagent otherwise has, would take minutes to notice."
         (let ((root (gethash (agent-river-state-parent state)
                              agent-river-registry)))
           (and root (agent-river--gone-p root)))))
-   ((gethash (agent-river-state-id state) agent-river--shell-sessions)
+   ((agent-river--shell-hosted (agent-river-state-id state))
     (not (agent-river--shell-buffer (agent-river-state-id state))))))
 
 (defun agent-river--state-working-p (state)
@@ -1316,11 +1356,14 @@ map's timer defers the redraw for us, past this buffer's death."
   "Ensure BUFFER's session teardown is installed for session ID at most once.
 Where agent-shell hosts ID, its buffer dying is how a restart or a kill
 reaches us -- no hook event reports it, and a watched session sees only
-`clean-up', which folds nothing."
+`clean-up', which folds nothing.
+
+The lookup is also what puts ID in `agent-river--shell-sessions', which is
+where both liveness questions read it from afterwards.  Called from
+`agent-river-observe' on every event, so a session is recorded as hosted
+on its first one."
   (let ((buffer (agent-river--shell-buffer id)))
     (when buffer
-      (setq agent-river--shell-seen t)
-      (puthash id t agent-river--shell-sessions)
       (unless (gethash buffer agent-river--teardown-hooked)
         (puthash buffer t agent-river--teardown-hooked)
         (with-current-buffer buffer

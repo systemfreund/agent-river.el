@@ -460,10 +460,10 @@ Four things about the map are load-bearing:
   and the name fades at the floor like any other. Three things to keep:
   **gone is narrower than not-active** — `agent-river--active-p` falls back to
   the TTL, which is a guess, and a name is not withdrawn on a guess; the facts
-  are a killed buffer (recorded per session in `agent-river--shell-sessions`,
-  *not* the sticky `agent-river--shell-seen`, which would call a hooks-only CLI
-  session gone for never having had a buffer here) and a subagent's own
-  `SubagentStop`, plus a subagent whose root is gone. **Gone is folded over
+  are a buffer we saw and that has since been killed (`agent-river--shell-hosted`,
+  which is per session — a hooks-only CLI session never had a buffer here and
+  must not be called gone for it) and a subagent's own `SubagentStop`, plus a
+  subagent whose root is gone. **Gone is folded over
   the party, not the session** (`agent-river--gone-parties`): two `Explore`
   children of one root share the label `alpha/Explore`, so one live sibling
   keeps the party. And **the kill has to say so itself** — a dead session
@@ -656,6 +656,27 @@ together:
   estimated. These degrade to the TTL-based path when agent-shell is absent — keep
   that optional. The reasoning lines below are the one exception: they have no
   fallback.
+- **Which buffer hosts a session is indexed, never searched**
+  (`agent-river--shell-sessions`, read through `agent-river--shell-buffer`).
+  Every redraw asks this of every session three times over — label, is the
+  line visitable, is it still alive — and the search is a walk of every
+  buffer in Emacs: 1.4 ms a call in a long-lived one (10k buffers), which was
+  ~13 ms of the 13 ms a block redraw took. Indexed it is a hash lookup, and
+  the redraw is 0.1 ms. Three states, and the distinction between the last
+  two is the whole design: **a buffer we have seen** — live it is the answer,
+  dead the session is over and nothing will host that id again, since
+  `agent-shell-restart` starts a *new* one, so both answers are free;
+  **nothing recorded** — look once and remember; and **looked and found
+  nothing, with the time**, re-looked every `agent-river--shell-rescan`
+  seconds. That last one must not become permanent: a session whose first
+  event beats agent-shell to setting its id would be counted unhosted for the
+  rest of the Emacs session — no label, no reasoning lines, no RET — and
+  nothing would ever say so. The index is also what replaced the sticky
+  "agent-shell is the authority here" flag: keeping a dead buffer is what the
+  flag was really for, and it did it globally, which called every session run
+  from a terminal inactive as soon as agent-shell had hosted anything.
+  `agent-river--shell-hosted` is the per-session form of that question and is
+  what both liveness predicates gate on.
 - **Reasoning (`◇` lines) comes only from the ACP stream.** `agent_thought_chunk`
   notifications carry it; `agent-river--ensure-subscribed` attaches the handler on
   a session's first folded event, via `agent-river--acp-client`. Chunks accumulate
