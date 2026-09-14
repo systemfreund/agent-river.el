@@ -3064,18 +3064,16 @@ is how a test asks what the view looks like once the work has moved on."
   ;; elided.  "This file is not there" is worth saying exactly, and once the
   ;; line reads as gone it can no longer be mistaken for a place an agent is
   ;; still working in.
-  (should (equal (get-text-property 3 'agent-river-map-face
-                                    (agent-river--map-line
-                                     2 "scratch.el"
-                                     '((:party "alpha" :weight 3)) t))
-                 'agent-river-gone))
+  (should (let ((line (agent-river--map-line 2 "scratch.el"
+                                     '((:party "alpha" :weight 3)) t)))
+    (text-property-any 0 (length line) 'agent-river-map-face
+                       'agent-river-gone line)))
   ;; And a name that is on disk keeps its shading, which is a reading about
   ;; weight and must not be crowded out by one about existence.
-  (should-not (equal (get-text-property 3 'agent-river-map-face
-                                        (agent-river--map-line
-                                         2 "there.el"
-                                         '((:party "alpha" :weight 9))))
-                     'agent-river-gone)))
+  (should-not (let ((line (agent-river--map-line 2 "there.el"
+                                       '((:party "alpha" :weight 9)))))
+      (text-property-any 0 (length line) 'agent-river-map-face
+                         'agent-river-gone line))))
 
 (ert-deftest agent-river-test-a-deletion-is-still-news ()
   ;; A file deleted a moment ago is warm, and the deletion is something the
@@ -3507,16 +3505,18 @@ is how a test asks what the view looks like once the work has moved on."
     ;; file does not, so it is a list item.  Making every file a level-3
     ;; heading would set the whole listing in the heading face and say that
     ;; a file contains the lines after it.
-    (should (string-prefix-p "## `common/`"
-                             (agent-river--map-line 2 "common/" nil)))
-    (should (string-prefix-p "- `c.el`"
+    ;; The gutter sits between the marker and the name, so the heading is
+    ;; still a heading and the name is still a code span.
+    (should (string-match-p "\\`## +`common/`"
+                            (agent-river--map-line 2 "common/" nil)))
+    (should (string-match-p "\\`- +`c.el`"
                              (agent-river--map-line 'file "c.el" nil)))
     ;; A file says `file' rather than a number for exactly this reason: the
     ;; overview pushes entries to level 3 to make room for root headings,
     ;; and a file taking its level from its entry would follow it into
     ;; being a heading.
-    (should (string-prefix-p "### `common/`"
-                             (agent-river--map-line 3 "common/" nil)))))
+    (should (string-match-p "\\`### +`common/`"
+                            (agent-river--map-line 3 "common/" nil)))))
 
 (ert-deftest agent-river-test-a-filename-is-not-eaten-by-markup ()
   ;; Bare in Markdown, `foo_bar_baz.el' renders with `bar' in italics and
@@ -3677,21 +3677,17 @@ is how a test asks what the view looks like once the work has moved on."
     (should (text-property-any 0 (length column) 'agent-river-map-face
                                'agent-river-removed column))))
 
-(ert-deftest agent-river-test-a-quiet-line-still-holds-the-diffstat-column-open ()
+(ert-deftest agent-river-test-the-summary-column-starts-in-one-place ()
   (let* ((agent-river-map-name-width 24)
-         (agent-river-map-vc-width 11)
          (parties '((:party "alpha" :weight 9 :current t)))
-         (changed (agent-river--map-line 'file "a.el" parties nil "+10 -6"))
-         (quiet (agent-river--map-line 2 "common/" parties nil ""))
-         (none (agent-river--map-line 'file "a.el" parties)))
-    ;; The markers sit after the column, so where they land says whether
-    ;; every line reserved the same width for it.
-    (should (= (string-match-p agent-river-map-here-marker changed)
-               (string-match-p agent-river-map-here-marker quiet)))
-    ;; With no repository under the map at all, no line reserves anything:
-    ;; an empty column on every line is a column that says nothing.
-    (should (< (string-match-p agent-river-map-here-marker none)
-               (string-match-p agent-river-map-here-marker changed)))))
+         (deep (agent-river--map-line 3 "a-long-name/" parties nil "+1"))
+         (short (agent-river--map-line 'file "a.el" parties nil "+1")))
+    ;; The column is what can be read down the listing, and only if it
+    ;; starts in the same place whatever the level and the name.
+    (should (= (string-match-p "\\+1" deep) (string-match-p "\\+1" short))))
+  ;; With nothing to put in it there is no column and no trailing blank: a
+  ;; line's own markers live in the gutter before the name now.
+  (should-not (string-match-p " \\'" (agent-river--map-line 'file "a.el" nil))))
 
 (ert-deftest agent-river-test-the-diffstat-column-is-reserved-buffer-wide ()
   (let ((table (agent-river-test--numstat "2\t0\ta.el\0")))
@@ -4178,12 +4174,12 @@ first."
       (should (string-match-p "\\`# 2 roots  ·  " text))
       ;; Each tree heads its own section, one level under the header.
       (dolist (root (list root1 root2))
-        (should (string-match-p (concat "^## `" (regexp-quote (abbreviate-file-name root)))
+        (should (string-match-p (concat "^## [^`]*`" (regexp-quote (abbreviate-file-name root)))
                                 text)))
       ;; And the entries sit under the tree they belong to, not under the
       ;; first one drawn.
-      (should (string-match-p "^### `common/`" text))
-      (should (string-match-p "^### `other.el`" text)))))
+      (should (string-match-p "^### [^`]*`common/`" text))
+      (should (string-match-p "^### [^`]*`other.el`" text)))))
 
 (ert-deftest agent-river-test-one-tree-needs-no-heading-of-its-own ()
   (agent-river-test--with-tree root
@@ -4200,7 +4196,7 @@ first."
           ;; would indent the whole listing to say nothing.
           (should (string-match-p (concat "\\`# `" (regexp-quote (abbreviate-file-name root)))
                                   text))
-          (should (string-match-p "^## `common/`" text))
+          (should (string-match-p "^## [^`]*`common/`" text))
           (should-not (string-match-p "^### " text)))))))
 
 (ert-deftest agent-river-test-climbing-out-of-a-tree-reaches-the-overview ()

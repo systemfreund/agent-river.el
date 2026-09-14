@@ -3820,7 +3820,28 @@ most worth being able to scan a whole listing for."
   "Marker for the entry holding an agent's most recent touch.
 Drawn only while that agent still exists: the marker is the map's one
 present-tense reading, and over a session that has ended it points at
-where nobody is."
+where nobody is.
+
+It sits in the gutter immediately before the name, which is where a
+marker about *this line* belongs: read down the listing it is the answer
+to \"where is the work\", and at the end of a line it was separated from
+the thing it is about by however wide the name happened to be."
+  :type 'string)
+
+(defcustom agent-river-map-open-marker "▾"
+  "Marker for a node whose contributed rows are shown beneath it.
+In the same gutter as the other two, because \"there is more here\" is a
+fact about the line and is scanned the same way."
+  :type 'string)
+
+(defcustom agent-river-map-closed-marker "…"
+  "Marker for a node whose contributed rows are folded away.
+
+Deliberately not a sideways triangle, which is what a folded outline
+usually gets: `agent-river-map-here-marker' is already one, in the same
+gutter, and two triangles a column apart meaning unrelated things is how
+a reader stops trusting either.  An ellipsis says what a closed node has
+to say anyway -- there is more here that you are not being shown."
   :type 'string)
 
 (defcustom agent-river-map-vc t
@@ -3851,16 +3872,6 @@ The read is asynchronous either way, so this sets how stale the column
 may be, never how long a redraw waits: nothing waits.  \\[agent-river-map-refresh]
 drops the cache, so the reading someone asked for by hand is fresh."
   :type 'number)
-
-(defcustom agent-river-map-vc-width 11
-  "Column width reserved for the diffstat, when it is shown at all.
-
-Reserved on every line once any root has a repository under it, so the
-brackets stay in one place: a width chosen per line would put the party
-names somewhere different on every row and give up the one thing a column
-is for.  A stat wider than this pushes that line's brackets right rather
-than being truncated, the same bargain `agent-river-map-name-width' makes."
-  :type 'integer)
 
 (defcustom agent-river-map-new-marker "?"
   "Marker for a name git has never seen, beside its neighbours' line counts.
@@ -4306,10 +4317,10 @@ and nothing else in this column, which is what makes it free here.")
 
 Each value is a plist: `:at' when the read finished, `:table' its result,
 `:ahead' the paths this branch has changed against the main branch,
-`:main' the revision that branch resolved to (or `none'), `:proc' the read
-still running.  A `:table' of nil is a real answer -- not a repository, or
-no git -- and is stored like any other so a failure is throttled by the
-TTL rather than retried on every redraw.
+`:main' the revision that branch resolved to (or `none'), and `:out' how
+many reads are still running.  A `:table' of nil is a real answer -- not
+a repository, or no git -- and is stored like any other so a failure is
+throttled by the TTL rather than retried on every redraw.
 
 `:ahead' is nil for \"not asked, or could not be asked\", which is a
 different answer from an empty table: empty says every path this branch
@@ -4317,13 +4328,19 @@ touched is in the main branch, nil says we do not know, and nothing is
 marked landed on a nil.")
 
 (defun agent-river--vc-claim (root process)
-  "Record PROCESS as the read currently in flight for ROOT."
-  (let ((cell (gethash root agent-river--vc-cache)))
+  "Count one more read in flight for ROOT, or one fewer when PROCESS is nil.
+
+A count rather than the process itself, since the reads run beside each
+other now: holding the last one started would let the first to finish
+clear the flag while its sibling was still running, and the next redraw
+would start the whole thing again underneath it."
+  (let* ((cell (gethash root agent-river--vc-cache))
+         (out (max 0 (+ (or (plist-get cell :out) 0) (if process 1 -1)))))
     (puthash root (list :at (or (plist-get cell :at) 0)
                         :table (plist-get cell :table)
                         :ahead (plist-get cell :ahead)
                         :main (plist-get cell :main)
-                        :proc process)
+                        :out out)
              agent-river--vc-cache)))
 
 (defun agent-river--vc-store (root table &optional ahead main)
@@ -4343,7 +4360,7 @@ not having read it."
                         :table table
                         :ahead (or ahead (plist-get cell :ahead))
                         :main (or main (plist-get cell :main))
-                        :proc nil)
+                        :out (or (plist-get cell :out) 0))
              agent-river--vc-cache))
   (when (get-buffer agent-river-map-buffer-name)
     (setq agent-river--map-dirty t)
@@ -4461,19 +4478,34 @@ All of it is read with ROOT as the working directory and scoped to it --
 to ROOT rather than to the top of the checkout.  A session started in a
 subdirectory of a repository is therefore annotated with its own subtree,
 not with every change in a tree it has nothing to do with."
-  (let ((table (make-hash-table :test 'equal)))
+  (let* ((table (make-hash-table :test 'equal))
+         (left 2)
+         (done (lambda ()
+                 ;; The barrier is what chaining used to buy: a half-filled
+                 ;; table stored would draw the column one file at a time.
+                 ;; Bought explicitly now, because the two reads answer
+                 ;; different questions and waiting for the first to come
+                 ;; back before asking the second cost a round trip through
+                 ;; the event loop for nothing.
+                 (setq left (1- left))
+                 (when (zerop left)
+                   (agent-river--vc-store root table)
+                   (agent-river--vc-ahead root table)))))
     (condition-case nil
-        (agent-river--vc-run
-         root '("diff" "--numstat" "--relative" "-z" "HEAD" "--")
-         (lambda (output)
-           (agent-river--vc-parse output root table)
-           (agent-river--vc-run
-            root '("ls-files" "--others" "--exclude-standard" "-z")
-            (lambda (others)
-              (dolist (name (split-string others "\0" t))
-                (puthash (expand-file-name name root) 'new table))
-              (agent-river--vc-store root table)
-              (agent-river--vc-ahead root table)))))
+        (progn
+          (agent-river--vc-run
+           root '("diff" "--numstat" "--relative" "-z" "HEAD" "--")
+           (lambda (output)
+             (agent-river--vc-parse output root table)
+             (funcall done))
+           (lambda () (agent-river--vc-store root nil)))
+          (agent-river--vc-run
+           root '("ls-files" "--others" "--exclude-standard" "-z")
+           (lambda (others)
+             (dolist (name (split-string others "\0" t))
+               (puthash (expand-file-name name root) 'new table))
+             (funcall done))
+           (lambda () (agent-river--vc-store root nil))))
       ;; No git on PATH at all.  Stored like any other answer, so the map
       ;; loses its column rather than throwing once every redraw.
       (error (agent-river--vc-store root nil)))))
@@ -4487,28 +4519,40 @@ diffstat left it, with `:ahead' unset, which the marker reads as \"do not
 know\" rather than as \"landed\".  Claiming a landing we could not check
 would be the one mistake worth avoiding here -- it says work is safely in
 the main branch."
-  (let ((patterns (mapcar #'car agent-river--vc-main-candidates)))
+  (let ((known (let ((main (plist-get (gethash root agent-river--vc-cache) :main)))
+                 (and (stringp main) main)))
+        (patterns (mapcar #'car agent-river--vc-main-candidates)))
     (condition-case nil
-        (agent-river--vc-run
-         root (append '("for-each-ref" "--format=%(refname)") patterns)
-         (lambda (refs)
-           (let ((rev (agent-river--vc-main-rev (split-string refs "\n" t))))
-             (if (not rev)
-                 (agent-river--vc-store root table nil 'none)
-               (agent-river--vc-run
-                root (list "diff" "--name-only" "--relative" "-z"
-                           (concat rev "...HEAD") "--")
-                (lambda (output)
-                  (let ((ahead (make-hash-table :test 'equal)))
-                    (dolist (name (split-string output "\0" t))
-                      (puthash (expand-file-name name root) t ahead))
-                    (agent-river--vc-store root table ahead rev)))
-                ;; A revision that resolves but cannot be diffed against --
-                ;; an empty repository, a shallow clone with no merge base.
-                ;; The column stays; only the marker goes unanswered.
-                (lambda () (agent-river--vc-store root table nil 'none))))))
-         (lambda () (agent-river--vc-store root table nil 'none)))
+        (if known
+            ;; Which branch is the main one changes about as often as the
+            ;; checkout does, and every read of it is a round trip through
+            ;; the event loop.  Remembered, it costs one command the first
+            ;; time and none after that; `g' drops the cache, which is where
+            ;; a branch that has been renamed is noticed.
+            (agent-river--vc-ahead-diff root table known)
+          (agent-river--vc-run
+           root (append '("for-each-ref" "--format=%(refname)") patterns)
+           (lambda (refs)
+             (let ((rev (agent-river--vc-main-rev (split-string refs "\n" t))))
+               (if rev
+                   (agent-river--vc-ahead-diff root table rev)
+                 (agent-river--vc-store root table nil 'none))))
+           (lambda () (agent-river--vc-store root table nil 'none))))
       (error (agent-river--vc-store root table nil 'none)))))
+
+(defun agent-river--vc-ahead-diff (root table rev)
+  "Read which of ROOT's paths this branch has outside REV, beside TABLE."
+  (agent-river--vc-run
+   root (list "diff" "--name-only" "--relative" "-z" (concat rev "...HEAD") "--")
+   (lambda (output)
+     (let ((ahead (make-hash-table :test 'equal)))
+       (dolist (name (split-string output "\0" t))
+         (puthash (expand-file-name name root) t ahead))
+       (agent-river--vc-store root table ahead rev)))
+   ;; A revision that resolves but cannot be diffed against -- an empty
+   ;; repository, a shallow clone with no merge base.  The column stays;
+   ;; only the marker goes unanswered.
+   (lambda () (agent-river--vc-store root table nil 'none))))
 
 (defun agent-river--vc-stats (root)
   "Return ROOT's diffstat table, starting a fresh read when this one is old.
@@ -4517,7 +4561,7 @@ Returns what is cached, including nil, and never waits for the read it
 starts: the caller is a redraw."
   (when agent-river-map-vc
     (let ((cell (gethash root agent-river--vc-cache)))
-      (when (and (not (process-live-p (plist-get cell :proc)))
+      (when (and (zerop (or (plist-get cell :out) 0))
                  (or (null cell)
                      (> (float-time (time-since (plist-get cell :at)))
                         agent-river-map-vc-ttl)))
@@ -4933,7 +4977,7 @@ indentation -- hidden, a directory and the files under it start in the
 same column and the tree stops being one."
   (pcase level (1 "# ") (2 "## ") (3 "### ") (_ "- ")))
 
-(defun agent-river--map-line (level name parties &optional missing stat)
+(defun agent-river--map-line (level name parties &optional missing stat rows)
   "Return one map line: NAME at LEVEL, annotated with PARTIES.
 MISSING marks a name only the state knows about, which is struck through
 rather than shaded -- there is no file on disk for the shading to be
@@ -4948,31 +4992,40 @@ and a row says what a bracket never could: how long ago, and how much of
 it was writing rather than reading.
 
 STAT is the reading a contributor earned on this line, from
-`agent-river--map-summary', padded here to `agent-river-map-vc-width'.
-Nil leaves the column out for every line in the buffer, which is what
-happens when no contributor under this map has anything to put in it."
+`agent-river--map-summary'.  Nil leaves the column out for every line in
+the buffer, which is what happens when no contributor under this map has
+anything to put in it.
+
+ROWS is `open' or `closed' when this node has contributed rows, nil when
+it has none.  A folded node used to look exactly like a node with nothing
+under it, which made the fold a way of losing things quietly."
   (let* ((marker (agent-river--map-marker level))
          (face (if missing
                    'agent-river-gone
                  (agent-river--heat-face (agent-river--map-weight parties))))
          (shown (agent-river--map-name name))
-         (pad (max 1 (- agent-river-map-name-width
-                        (length marker) (string-width shown))))
-         (markers
-          (concat (if (> (length parties) 1) agent-river-map-contended-marker " ")
+         ;; The gutter: everything that is about this line rather than about
+         ;; the tree, in one fixed-width place before the name.  At the end
+         ;; of the line these were held away from what they mark by however
+         ;; wide the name happened to be, which is the opposite of what a
+         ;; marker is for.
+         (gutter
+          (concat (pcase rows ('open agent-river-map-open-marker)
+                         ('closed agent-river-map-closed-marker)
+                         (_ " "))
+                  (if (> (length parties) 1) agent-river-map-contended-marker " ")
                   (if (seq-some (lambda (party) (plist-get party :current)) parties)
-                      agent-river-map-here-marker " "))))
+                      agent-river-map-here-marker " ")
+                  " "))
+         (pad (max 1 (- agent-river-map-name-width
+                        (length marker) (string-width gutter)
+                        (string-width shown)))))
     (string-trim-right
      (concat marker
+             gutter
              (agent-river--map-mark shown face)
              (make-string pad ?\s)
-             (if stat
-                 (concat stat (make-string
-                               (max 1 (- agent-river-map-vc-width
-                                         (string-width stat)))
-                               ?\s))
-               "")
-             markers))))
+             (or stat "")))))
 
 (defun agent-river--map-row-line (row &optional nested)
   "Return contributed ROW as a line, one level deeper again when NESTED.
@@ -5216,7 +5269,8 @@ nothing."
                                              (list :parties (plist-get entry :parties)))
                                            entries))
                                   nil
-                                  (agent-river--map-summary (gethash root rows) column))
+                                  (agent-river--map-summary (gethash root rows) column)
+                                  (and (gethash root rows) 'open))
                                  "\n")
                          ;; A root is a place like any other line's, so RET
                          ;; zooms into it and the motions stop on it.
@@ -5237,7 +5291,8 @@ nothing."
                                     level (concat name (if dir "/" ""))
                                     (plist-get entry :parties)
                                     (plist-get entry :missing)
-                                    (agent-river--map-summary mine column))
+                                    (agent-river--map-summary mine column)
+                                    (and mine (if open 'open 'closed)))
                                    "\n")
                            'agent-river-map-name name
                            'agent-river-map-path path
@@ -5264,7 +5319,8 @@ nothing."
                                           'file (plist-get file :rel)
                                           (plist-get file :parties)
                                           nil
-                                          (agent-river--map-summary frows column))
+                                          (agent-river--map-summary frows column)
+                                          (and frows (if fopen 'open 'closed)))
                                          "\n")
                                  'agent-river-map-name name
                                  'agent-river-map-rel (plist-get file :rel)

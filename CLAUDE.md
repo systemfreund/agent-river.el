@@ -519,6 +519,20 @@ Four things about the map are load-bearing:
   per root: thirty lines with a subprocess each, every TTL, is a fork bomb
   with a view attached. A contributor that throws is **retired on the spot**,
   like an observer — this runs on every draw.
+- **What an asynchronous read costs is round trips, not the command.**
+  Measured on this machine: git answers in ~1 ms, `make-process` costs
+  0.1 ms, and each sentinel is another ~1–2 ms through the event loop — so a
+  chain of four reads spent almost all of its time waiting to be told the
+  last one had finished. The diffstat's reads therefore run *beside* each
+  other behind a counted barrier (`agent-river--vc-claim` counts reads, it
+  does not hold the last process, or the first to finish would clear the
+  flag while its sibling was still running), and the main branch is
+  remembered in the cache rather than resolved again every time. Cold ~11 ms
+  to the landed marker, warm ~8 ms. What a reader actually waits for is
+  neither: the answer only marks the map dirty, so it lands on the next tick
+  of `agent-river-map-refresh-interval`, and the read does not start until
+  the cache is `agent-river-map-vc-ttl` old. Those two knobs are the
+  perceived latency; the subprocesses are noise beside them.
 - **The diffstat is a contributor like any other** (`agent-river--rows-vc`),
   and that is load-bearing rather than tidy. It is the asynchronous case, the
   batched case and the aggregating case at once, so if the protocol needed an
