@@ -539,10 +539,17 @@ replaying a session's events from the start."
         (ms   (plist-get event :ms)))
     ;; Folded rather than set where the state is addressed, so it keeps the
     ;; promise the docstring makes: replay the events and the anchor comes
-    ;; back with them.  Refreshed on every event that carries one, because a
-    ;; session that changes directory re-anchors its later keys and the two
-    ;; must not disagree.  Events made inside Emacs -- a note, a signal --
-    ;; carry none and leave it alone.
+    ;; back with them.  Refreshed on every event that carries one rather than
+    ;; kept from the first, though measured on 2026-09-14 that moves nothing
+    ;; on the hook path: a payload's cwd is the directory the agent was
+    ;; started in, repeated identically on every event, and a `cd' inside a
+    ;; Bash call is another process that never reaches it.  Only the
+    ;; agent-shell path can move it -- it reads the buffer's
+    ;; `default-directory' per event, so `M-x cd' there re-anchors the
+    ;; session, and keys folded before that go on resolving against the new
+    ;; cwd.  Left that way deliberately: a second account per key is a lot of
+    ;; bookkeeping for a case only a hand gesture can provoke.  Events made
+    ;; inside Emacs -- a note, a signal -- carry none and leave it alone.
     (let ((cwd (plist-get event :cwd)))
       (when (and cwd (not (string-empty-p cwd)))
         (setf (agent-river-state-cwd state) (directory-file-name cwd))))

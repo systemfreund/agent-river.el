@@ -170,9 +170,12 @@ These are load-bearing; the tests enforce most of them.
 - **The anchor lives beside the keys, never inside them** (`agent-river-state-cwd`).
   A normalised key cannot say which tree it is in, which is the price of the
   invariant above and not a defect in it. The cwd is folded as a measurement of
-  its own — refreshed by every event carrying one, so a session that changes
-  directory re-anchors — and a view that needs a real path puts the two back
-  together deliberately (`agent-river--heat-absolute`). Resolving is strictly
+  its own — refreshed by every event carrying one, though on the hook path
+  that never moves it: the payload repeats the directory the agent was started
+  in, and a `cd` inside a Bash call is a different process. Only the
+  agent-shell path can re-anchor a session, since it reads the buffer's
+  `default-directory` per event. A view that needs a real path puts the cwd
+  and the key back together deliberately (`agent-river--heat-absolute`). Resolving is strictly
   worse than matching on the name for *identity* questions and strictly better
   for *placement* ones, so both readings exist and each says which it is: file
   shading still matches on the basename, directory aggregation resolves.
