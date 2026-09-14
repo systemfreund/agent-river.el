@@ -15,6 +15,7 @@
 
 (require 'ert)
 (require 'agent-river)
+(require 'agent-river-launch)
 
 (defmacro agent-river-test--with-session (var &rest body)
   "Bind VAR to a fresh state in an isolated registry and run BODY."
@@ -6362,6 +6363,221 @@ it clears them."
         (agent-river-fold state '(:kind "act" :cwd "/repo" :file "a.el"))
         (should-not (gethash "inc:INC-444"
                              (agent-river--domain-parties 'inc 'session)))))))
+
+;;; The spool -- an event becoming a candidate
+;;
+;; The three roles built so far are pure functions over a candidate and a
+;; directory, so they test without a poller, a watch or an agent: deliver a
+;; file, scan, and ask what the filesystem says.
+
+(defmacro agent-river-launch-test--with-spool (&rest body)
+  "Run BODY with an empty spool in a temporary directory."
+  (declare (indent 0))
+  `(let* ((agent-river-launch-spool (make-temp-file "agent-river-spool" t))
+          (agent-river-launch--queue nil)
+          (agent-river-launch--decisions nil)
+          (agent-river-launch-sources
+           (list (cons "river" #'agent-river-launch--read-river)))
+          (agent-river-auto-display nil))
+     (unwind-protect
+         (progn (agent-river-launch--ensure-dirs) ,@body)
+       (delete-directory agent-river-launch-spool t))))
+
+(defun agent-river-launch-test--deliver (data &optional name)
+  "Write DATA, an alist, into the inbox as NAME.
+Written and renamed in, the way a real source has to: the watcher sees a
+file the moment it appears, and a half-written one reads as malformed."
+  (let* ((file (expand-file-name (or name (format "%s.json" (random 100000)))
+                                 (agent-river-launch--dir nil)))
+         (tmp (concat file ".tmp")))
+    (with-temp-file tmp (insert (json-serialize data)))
+    (rename-file tmp file t)
+    file))
+
+(defun agent-river-launch-test--files (name)
+  "Return the candidate file names under spool subdirectory NAME."
+  (directory-files (agent-river-launch--dir name) nil "\\.json\\'"))
+
+(ert-deftest agent-river-launch-test-reads-the-normalised-shape ()
+  (agent-river-launch-test--with-spool
+    (let* ((file (agent-river-launch-test--deliver
+                  '((source . "river") (id . "42@t1") (title . "fix the fold")
+                    (actor . "octocat") (at . "2026-09-14T10:11:12Z"))))
+           (candidate (agent-river-launch--candidate file)))
+      ;; The key pairs the source with the occasion: two sources numbering
+      ;; their own events from one would otherwise share a ledger entry.
+      (should (equal (plist-get candidate :key) "river/42@t1"))
+      (should (equal (plist-get candidate :title) "fix the fold"))
+      (should (equal (plist-get candidate :actor) "octocat"))
+      (should (plist-get candidate :at)))))
+
+(ert-deftest agent-river-launch-test-candidate-needs-an-occasion ()
+  (agent-river-launch-test--with-spool
+    ;; No id at all: there is nothing to dedupe on, so this can never be
+    ;; acted on exactly once and must not be taken in at all.
+    (should-error (agent-river-launch--candidate
+                   (agent-river-launch-test--deliver '((source . "river")))))
+    ;; No source: nothing says which dialect the payload is in.
+    (should-error (agent-river-launch--candidate
+                   (agent-river-launch-test--deliver '((id . "42")))))))
+
+(ert-deftest agent-river-launch-test-title-falls-back-to-the-id ()
+  (agent-river-launch-test--with-spool
+    (let ((candidate (agent-river-launch--candidate
+                      (agent-river-launch-test--deliver
+                       '((source . "river") (id . "42@t1"))))))
+      (should (equal (plist-get candidate :title) "42@t1")))))
+
+(ert-deftest agent-river-launch-test-time-falls-back-to-the-file ()
+  (agent-river-launch-test--with-spool
+    ;; A candidate with no time of its own still has to be orderable, or the
+    ;; queue cannot say which of two waiting candidates came first.
+    (let ((candidate (agent-river-launch--candidate
+                      (agent-river-launch-test--deliver
+                       '((source . "river") (id . "42@t1"))))))
+      (should (plist-get candidate :at)))))
+
+(ert-deftest agent-river-launch-test-a-source-adapter-owns-its-dialect ()
+  (agent-river-launch-test--with-spool
+    ;; What a poller would rely on: it writes its host's raw JSON and
+    ;; understands none of it, and the knowledge of what that host calls
+    ;; things lives here in Elisp, where it is testable.
+    (push (cons "gh" (lambda (source data)
+                       (let ((issue (alist-get 'issue data)))
+                         (list :key (format "%s/%s@%s" source
+                                            (alist-get 'number issue)
+                                            (alist-get 'updated issue))
+                               :source source
+                               :title (alist-get 'title issue)))))
+          agent-river-launch-sources)
+    (let ((candidate (agent-river-launch--candidate
+                      (agent-river-launch-test--deliver
+                       '((source . "gh")
+                         (issue . ((number . 42) (updated . "t1")
+                                   (title . "crash"))))))))
+      (should (equal (plist-get candidate :key) "gh/42@t1"))
+      (should (equal (plist-get candidate :title) "crash")))))
+
+(ert-deftest agent-river-launch-test-unknown-source-falls-back ()
+  (agent-river-launch-test--with-spool
+    ;; The normalised shape is the fallback rather than an error, which is
+    ;; what lets a source that can already write it need no adapter.
+    (let ((candidate (agent-river-launch--candidate
+                      (agent-river-launch-test--deliver
+                       '((source . "whatever") (id . "1"))))))
+      (should (equal (plist-get candidate :key) "whatever/1")))))
+
+(ert-deftest agent-river-launch-test-ledger-names-cannot-collide ()
+  ;; Sanitising alone maps both of these onto one name, and a false match in
+  ;; a dedupe ledger is a launch that never happens and never says why.
+  (should-not (equal (agent-river-launch--filename "gh/a/b")
+                     (agent-river-launch--filename "gh/a_b"))))
+
+(ert-deftest agent-river-launch-test-scan-queues-and-files ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t1")))
+    (should (= 1 (agent-river-launch-scan)))
+    (should (= 1 (length agent-river-launch--queue)))
+    ;; The inbox is emptied and the queue's durable form is `queued/'.  A file
+    ;; left in the inbox would be taken in again on the next scan.
+    (should (null (agent-river-launch-test--files nil)))
+    (should (= 1 (length (agent-river-launch-test--files "queued"))))))
+
+(ert-deftest agent-river-launch-test-one-occasion-is-taken-in-once ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t1"))
+                                      "first.json")
+    (agent-river-launch-scan)
+    ;; The same occasion again, as a poller with no memory of its own would
+    ;; deliver it on every tick.
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t1"))
+                                      "second.json")
+    (should (= 0 (agent-river-launch-scan)))
+    (should (= 1 (length agent-river-launch--queue)))
+    (should (eq 'duplicate (plist-get (car agent-river-launch--decisions)
+                                      :decision)))))
+
+(ert-deftest agent-river-launch-test-a-new-occasion-is-not-a-duplicate ()
+  (agent-river-launch-test--with-spool
+    ;; The distinction the key exists for: the same issue, moved.  Keying on
+    ;; the object alone would silently swallow this, which is the mistake
+    ;; `(streak N)' made once already.
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t1")))
+    (agent-river-launch-scan)
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t2")))
+    (should (= 1 (agent-river-launch-scan)))
+    (should (= 2 (length agent-river-launch--queue)))))
+
+(ert-deftest agent-river-launch-test-a-decided-occasion-stays-decided ()
+  (agent-river-launch-test--with-spool
+    ;; What `done/' is for: an occasion that has been acted on is not taken
+    ;; in again once it leaves the queue.
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t1")))
+    (agent-river-launch-scan)
+    (rename-file (agent-river-launch--path "queued" "river/42@t1")
+                 (agent-river-launch--path "done" "river/42@t1"))
+    (setq agent-river-launch--queue nil)
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t1")))
+    (should (= 0 (agent-river-launch-scan)))
+    (should (null agent-river-launch--queue))))
+
+(ert-deftest agent-river-launch-test-unreadable-is-kept-not-dropped ()
+  (agent-river-launch-test--with-spool
+    (let ((file (expand-file-name "junk.json" (agent-river-launch--dir nil))))
+      (with-temp-file file (insert "{not json"))
+      (agent-river-launch-scan)
+      ;; Filed rather than deleted: the only way to fix a source is to look
+      ;; at what it wrote.  And out of the inbox, so it is not re-read on
+      ;; every scan for the rest of the Emacs session.
+      (should (null (agent-river-launch-test--files nil)))
+      (should (= 1 (length (agent-river-launch-test--files "failed"))))
+      (should (eq 'malformed (plist-get (car agent-river-launch--decisions)
+                                        :decision))))))
+
+(ert-deftest agent-river-launch-test-a-full-queue-defers-rather-than-drops ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-queue-limit 1))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      (agent-river-launch-test--deliver '((source . "river") (id . "2")))
+      (should (= 0 (agent-river-launch-scan)))
+      ;; Back-pressure: the file stays where it is and is taken in once
+      ;; there is room, rather than being dropped for arriving at a bad
+      ;; moment.
+      (should (= 1 (length (agent-river-launch-test--files nil))))
+      (setq agent-river-launch--queue nil)
+      (should (= 1 (agent-river-launch-scan))))))
+
+(ert-deftest agent-river-launch-test-the-queue-survives-a-restart ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t1")))
+    (agent-river-launch-scan)
+    ;; Emacs restarts: the store is gone, the filesystem is not.
+    (setq agent-river-launch--queue nil)
+    (agent-river-launch--recover)
+    (should (= 1 (length agent-river-launch--queue)))
+    (should (equal "river/42@t1" (plist-get (car agent-river-launch--queue)
+                                            :key)))
+    ;; And recovering twice does not queue it twice -- turning the mode off
+    ;; and on again is the ordinary way this happens.
+    (agent-river-launch--recover)
+    (should (= 1 (length agent-river-launch--queue)))))
+
+(ert-deftest agent-river-launch-test-refusals-are-recorded-too ()
+  (agent-river-launch-test--with-spool
+    ;; The evidence the later rungs are armed on is the refusals, not the
+    ;; launches: a log of only what happened cannot say what would have.
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t1"))
+                                      "a.json")
+    (agent-river-launch-scan)
+    (agent-river-launch-test--deliver '((source . "river") (id . "42@t1"))
+                                      "b.json")
+    (agent-river-launch-scan)
+    (should (equal '(duplicate queued)
+                   (mapcar (lambda (e) (plist-get e :decision))
+                           agent-river-launch--decisions)))
+    (should (seq-every-p (lambda (e) (plist-get e :reason))
+                         agent-river-launch--decisions))))
 
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here

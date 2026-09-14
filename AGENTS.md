@@ -16,14 +16,16 @@ It is deliberately *not* the design document any more: **this file is**. The
 reasoning behind a decision, and the failure it prevents, lives here and in the
 code comments. A change that moves behaviour updates both.
 
-Four files, no build system: `agent-river.el` (everything), `agent-river-tests.el`
-(ERT), `agent-river-hook.sh` (the bridge), and one example hook wiring per host —
-`claude-settings.json`, `codex-hooks.json`, `gemini-settings.json`.
+Five files, no build system: `agent-river.el` (everything), `agent-river-launch.el`
+(the other direction — starting a session from an event; optional, requires
+`agent-river`), `agent-river-tests.el` (ERT, covering both), `agent-river-hook.sh`
+(the bridge), and one example hook wiring per host — `claude-settings.json`,
+`codex-hooks.json`, `gemini-settings.json`.
 
 ## Commands
 
 ```sh
-# Full suite (389 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (389 tests). -L . is required: the tests require both .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -797,6 +799,46 @@ performed the dispatch, and nothing in this package performs one. A user does.
   failing to reach leaves a record nobody asked for, which only
   `agent-river-drop-artifact` takes back -- so the session is looked up while
   there is still nothing to take back. A test pins it.
+
+### The third direction — `agent-river-launch.el`
+
+Consumers carry state outward, producers add events about a session that
+already exists. This file turns an event from *outside* into a **new**
+session. It is the first thing here that acts, so it lives apart, is opt-in,
+and does not touch `agent-river.el` — what it takes from the river is the
+state it decides on. The README section *"A third direction: starting a
+session from an event"* is the design document for all of it, including the
+parts not written yet; read it before adding to this file.
+
+Built so far: source, ledger, queue. **No launcher** — nothing here starts
+anything, which is the point rather than an unfinished edge. Rules and the
+launcher are next. What is load-bearing already:
+
+- **The spool is the only door**, and the state *is* the filesystem —
+  `<spool>/` inbox, `queued/`, `done/`, `failed/`. No second account of what
+  has been handled that can disagree with the first, and the queue is
+  rebuilt from `queued/` on startup (`agent-river-launch--recover`), so a
+  crash at 3am comes back to its candidates rather than to an empty queue and
+  a `done/` claiming they were handled. A writer renames in; a half-written
+  file would read as malformed.
+- **A key names the occasion, not the object.** `issue-42` is wrong; an issue
+  reopened is a new reason to act. Same mistake as `(streak N)`. The ledger
+  file name carries a hash of the full key, because sanitising alone maps
+  `a/b` and `a_b` onto one file and a false match here is a launch that never
+  happens and never says why.
+- **A source adapter is the only thing that knows a dialect**
+  (`agent-river-launch-sources`), exactly as `agent-river--event` is for the
+  hosts — so a poller moves bytes and understands nothing. The normalised
+  shape is the fallback reader, which is why the protocol is not speculative.
+  A reader that throws costs its own file and no more: it goes to `failed/`
+  and is never read again, so unlike an observer there is no runaway to retire.
+- **Refusals are the measurement.** The decision log exists from the first
+  commit, before anything can launch, because the path to autonomy is paved
+  with a fortnight of decisions and those only accrue in wall-clock time. Once
+  a rule can refuse, the *reason* has to become durable too — right now only
+  the fact is, as which directory the file ended in.
+- **A full queue defers, it does not drop** — intake stops and the files stay
+  in the inbox, one log line per scan rather than one per file.
 
 ### One set of motions, every buffer
 

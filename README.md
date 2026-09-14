@@ -683,3 +683,253 @@ what turns it off.
 invariants are load-bearing, and what was tried first and lost something. It is
 written for whoever is changing this code — including an agent — and it is the
 file to read before altering behaviour rather than building on it.
+
+## A third direction: starting a session from an event
+
+**Mostly designed, partly built.** The code is `agent-river-launch.el`, a
+fifth file, optional and opt-in; this section is the whole shape, and what it
+has to answer to. The first of the four rungs below exists — the spool, the
+ledger and the queue, with **no launcher**, so candidates arrive and are
+decided about and nothing starts. Rules and the launcher are next. The rest
+of this section is written in the present tense because it is the design,
+not because it is all there.
+
+```elisp
+(agent-river-launch-mode 1)   ; watch the spool
+M-x agent-river-queue         ; read what was delivered and decided
+```
+
+The want is ordinary: a GitHub issue is opened and an agent goes to work on
+it. GitHub is only the example. The same mechanism should serve a file
+appearing in a directory, a build going red, or one agent finishing and a
+second being sent to review it.
+
+### Why this is not an observer
+
+Everything in this package so far runs in one direction. The stream is
+listened to, not spoken on; even a signal is deliberately narrow — facts,
+never instructions, one line, folded back in so its own rate is visible.
+Producers (`agent-river-note`) add events *about a session that exists*;
+consumers (`agent-river-observers`) carry state outward.
+
+Starting a session is neither. It is the first thing here that would *act*,
+and it is the most expensive action there is — an agent that writes files,
+makes commits, opens pull requests. So it lives in its own file behind its
+own opt-in, and the package's read-only posture is unchanged: what the
+launch layer takes from agent-river is the **state it decides on**, and what
+it gives back is a session that then folds like any other.
+
+An observer may still take part, but only at one point: it may **enqueue a
+candidate**, never launch one. Its return value stays ignored, it still
+speaks through no channel of its own, and a broken one is still retired on
+its first error. Everything expensive sits behind the queue, the budget and
+the gate.
+
+### Five roles, and three of them are pure
+
+```
+source   → candidate   an issue was opened; a session handed off
+rule     → decision    does this match, may it run now, with what prompt
+ledger   → dedupe      has this occasion already been acted on
+launcher → session     start it
+queue                  what has been decided and not yet started
+```
+
+`rule`, `ledger` and the queue are functions over a candidate and the
+registry, so they are testable the way the fold is: no GitHub, no
+subprocess, no frame. `source` and `launcher` are the two dirty ends.
+
+### The spool is the only door
+
+A candidate arrives as a file in a spool directory. Processed means moved,
+so the state *is* the filesystem — there is no second account of what has
+been handled that can disagree with the first, it survives an Emacs restart,
+and it can be read and fixed by hand.
+
+```
+<spool>/          the inbox: delivered, not yet taken in
+<spool>/queued/   taken in and waiting — the queue's durable form
+<spool>/done/     decided: launched, or refused with a reason
+<spool>/failed/   unreadable, kept for you to look at
+```
+
+`queued/` is why there are three and not two. A candidate taken in and
+recorded straight into `done/` would be gone from the queue and marked
+handled the moment Emacs restarted — which is the state a machine that works
+overnight is in most mornings. The queue is rebuilt from `queued/` instead,
+so it is derivable from disk the way a session's state is derivable from its
+events.
+
+A writer builds its file elsewhere and renames it in. The watch sees a file
+the moment it appears, and a half-written one would be read as malformed and
+filed as such; only `.json` is taken in, which leaves `.tmp` free for the
+writing half.
+
+This is the same decision the bridge already made: `agent-river-hook.sh`
+does no parsing, passes files in both directions, and keeps the derivation
+in Elisp where it is under test. A GitHub poller therefore writes `gh`'s raw
+JSON into the spool and understands none of it; a source adapter in Elisp
+turns that into a candidate. One place knows a dialect, exactly as
+`agent-river--event` is the one place that knows a host's.
+
+Everything writes to that door — the poller, the observer, an agent, and you
+with `echo`.
+
+### One occasion, one launch
+
+This is `agent-river--signalled-p` again, with real money on it. A poller
+sees the same issue on every tick; the candidate therefore carries the id of
+an **occasion**, not of an object. `issue-42` alone is wrong — an issue
+reopened two weeks later is a new reason to act, and the same mistake was
+made once already with `(streak N)`, which silently suppressed a genuinely
+new run of failures. So `(issue 42 <updated-at>)`.
+
+The difference from the signal log is durability. A lost signal is a
+sentence nobody heard; a lost launch record is a second agent on the same
+issue.
+
+### An agent may hand off, and the claim is the occasion — never the content
+
+An agent can signal that it is done by writing a candidate into the spool.
+It needs no new tool and no new hook to do it: that is an ordinary `Write`
+or `Bash` call, the source reads it like any other, and nothing in the fold
+changes.
+
+It is the better anchor of the two available. A turn ending says only that
+it ended; a handoff carries arguments — review this, against that branch,
+with this question — and it fires *during* a session, which is the only way
+a session that goes on working can be the occasion for more than one thing.
+It also comes with an identity already built: `SESSION\0CALL-ID`, the id
+`agent-river--event` assembles because Claude Code's `tool_use_id` is unique
+everywhere and ACP's only within its session. That is precisely what an
+occasion key needs.
+
+But a handoff is the agent talking about itself, which is the thing the
+`intent*` slots are kept apart from the measurements to contain. The line
+that keeps it usable:
+
+> **A claim may be the occasion. It must not be the content.**
+
+That the call happened is a measurement — the fold saw it, with a time, a
+session and an id. What it says is a claim. So the handoff *triggers*, and
+the prompt for the next agent is built from the **state**: which files, which
+task, which branch, what failed. The agent's own words travel as quoted
+context, marked as its, the way `intent` is marked twice and placed last in
+the Markdown export. Otherwise the first agent writes the second one's
+instructions and the chain contains no measurement at all.
+
+Two consequences:
+
+- **Reliability runs the other way.** The host observes a turn ending; a
+  handoff requires the agent to remember. So the handoff is the good path and
+  the turn ending is the fallback, and the ledger deduplicates them against
+  each other: a turn that has already handed off does not end a second time.
+- **A handoff belongs in the river.** The session that writes one gets a
+  `note` for it, so it shows in the HUD and is counted in the report —
+  which is how the rate becomes visible before anything is automated.
+
+### Chains
+
+A launched agent produces events, which the same observer sees. Left alone
+that is a thing that feeds itself, and unlike a runaway observer every
+iteration of this one spends tokens and writes to the repository.
+
+The first guard is provenance, as with any producer: a candidate whose actor
+is us does not fire. The second is blunter and holds when the first fails —
+each session carries the **generation** it was launched at (issue → A is 1,
+A → B is 2) and a cap cuts the chain. Notes already work this way, one level
+deep: a note made while a note is being handled is refused. This is the same
+idea with a counter instead of a flag, plus a rate budget and a kill switch
+that stops everything without anyone first having to work out which rule was
+at fault.
+
+### Identity is assigned where we control the call, and resolved where we do not
+
+A launcher is a plist — `:name :launch :resolve :available-p` — in the shape
+`agent-river-map-contributors` already uses.
+
+With **agent-shell**, the ACP session id appears after the process is up, so
+`:launch` can hand back only a handle (the buffer) and the binding candidate
+→ session key is resolved late, on the three-state pattern
+`agent-river--shell-buffer` already uses: seen / nothing yet / looked and
+found nothing, with the time. That last state must not become permanent here
+either.
+
+With a **headless** CLI the session id can be passed in, so the key is known
+before the process starts and the first hook event lands in the right place
+without being looked for. `:resolve` is nil there.
+
+The asymmetry is the protocol boundary, not a wart: **where we control the
+invocation we assign identity; where we do not, we resolve it afterwards.**
+
+It also decides which launcher is which. An agent-shell buffer at three in
+the morning waiting on a permission prompt is an agent spending the night
+waiting for a human. agent-shell is the calibration launcher; headless is
+the operating one. Switching is a setting, not a rewrite.
+
+### The queue is state; the buffer is a view of it
+
+Because it has to drain by itself eventually, the queue cannot be a feature
+of a buffer. It is a store and a drainer, and `RET` is one drain mode beside
+*automatic*. The buffer is a read-only view of state written elsewhere —
+the same role the map has, under the same rules.
+
+It is deliberately **not** in the registry. The fold's docstring promises a
+state can be rebuilt by replaying its events, and a candidate that has not
+started is none of its events.
+
+### Refusals are the measurement
+
+The path from *watch it decide* to *let it run overnight* is the whole
+point, and it only works if the ledger records **decisions** rather than
+launches: fired, and refused with the reason — no rule matched, budget
+spent, someone is already in those files, generation too deep, the actor was
+us. After a fortnight that log says which rule would have been wrong how
+often, and one rule is armed on the evidence.
+
+That is the same move notes make: visible in the HUD and counted in the
+report first, so the rate can be seen before anything is fed back.
+
+Four rungs:
+
+1. **Shadow.** Nothing starts. Everything is decided and logged.
+2. **`RET` starts it**, through agent-shell, while you watch.
+3. **One rule armed**, headless, in a worktree, a budget of one an hour,
+   only while you are at the keyboard.
+4. **Overnight**, with the budget and the kill switch, and a Markdown digest
+   in the morning through `agent-river-markdown`.
+
+### Rules are data, with functions as the way out
+
+A rule is a plist, and `:match`, `:gate` and `:prompt` each take a
+declarative value *or* a function.
+
+The default is the declarative form, and the reason is rung 1: calibrating
+means reading. A declarative rule can be explained in the queue buffer —
+matched on label `agent-ready`, refused on budget — where a function can
+only be named. What holds either way is that the ledger records the
+*outcome* of every gate, so a function rule is still answerable for
+afterwards; it just cannot explain itself in advance.
+
+### Two things that must be settled before rung 4
+
+- **The prompt is the attack surface.** An issue body is written by whoever
+  can open an issue, and it would arrive as instructions to an agent holding
+  tools. The defence is not phrasing, it is the gate: a trusted author, or a
+  label only a maintainer can set. The body travels as data, framed as such,
+  and the rule decides how much of it comes along at all.
+- **Never in the working checkout.** A worktree per launch, a branch rather
+  than `main`. The path normalisation here is already built for this — one
+  file reached from a worktree and from the main checkout is the same file
+  for identity, and `anchors` keeps the trees apart for placement.
+
+### Left open on purpose
+
+Two questions are deliberately unanswered, because the answers are likely to
+be obvious later and guessed wrong now:
+
+- How a rule builds a prompt out of the state without becoming a fourth
+  renderer beside the panel, the report and the Markdown export.
+- What becomes of a candidate that never resolves — the launcher started
+  something and no session ever appeared.
+
