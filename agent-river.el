@@ -4615,29 +4615,217 @@ the news."
                                        'agent-river-landed))
            "")))
 
-(defun agent-river--map-annotation (parties)
-  "Return PARTIES as the bracketed reading a map line ends with, or nil.
+(defcustom agent-river-map-detail-rows 6
+  "How many contributed rows a node shows before the rest are elided.
+The same wall `agent-river-map-detail-files' puts in front of a directory
+with a hundred reached files, and for the same reason: a listing that can
+be arbitrarily long is not a listing.  A contributor with more to say than
+this says the rest somewhere else."
+  :type 'integer)
 
-Who, not how much.  The weight is already the shading on the name
-\(`agent-river--map-line'), and printing it here as well made the one fact
-on the line that has two encodings -- a reader comparing the number
-against the colour learns nothing the colour did not already say, and the
-digits crowded out the names, which are what the brackets are for.
+;; Rows under a node, and who may contribute them
+;;
+;; A map line carries five facts already -- weight as shading, position and
+;; contention as markers, existence as a strike-through, the state of the
+;; work as a column -- and that is the ceiling.  The party names used to be
+;; a sixth, and they were the one ragged thing on the line, which is why
+;; nothing scannable could ever follow them.  They are rows now, and the
+;; room they left is what anything new gets to compete for.
+;;
+;; A row is detail and enrichment at once, which is the whole reason this
+;; shape was chosen: rows are drawn by default where there are any, and TAB
+;; hides them.  Visible by default is the enrichment; collapsible is the
+;; detail; and it is one mechanism rather than two, reusing the folds that
+;; already survive a redraw because they are data rather than overlays.
+;;
+;; The line stays a projection of the rows and never a second account of
+;; them -- the same rule the listing already follows one grain up, where a
+;; directory's reading is the aggregate of what lies beneath it so the two
+;; cannot disagree.
 
-The marker is repeated inside the brackets, against the party it belongs
-to.  In the left-hand column it is scannable but anonymous -- on a line
-three agents share it says only that one of them is here -- and \"where is
-this agent now\" is a question about a party rather than about a line."
-  (when parties
-    (concat
-     "["
-     (mapconcat (lambda (party)
-                  (concat (agent-river--map-mark (plist-get party :party)
-                                                 'agent-river-session)
-                          (if (plist-get party :current)
-                              agent-river-map-here-marker "")))
-                parties " ")
-     "]")))
+(defvar agent-river-map-contributors
+  (list (list :name 'parties :read #'agent-river--rows-parties)
+        (list :name 'step :read #'agent-river--rows-step))
+  "What may add rows under the map's nodes, in the order they are drawn.
+
+Each entry is a plist:
+
+  :name     a symbol, for attribution and for retiring a broken one
+  :read     (ROOT NODES) -> hash of absolute path to a list of rows
+  :refresh  (ROOT NODES) -> nil, optional, may take as long as it likes
+  :ttl      seconds before `:refresh\=' is offered that root again
+
+A row is a plist of `:text\=' (one line, which the map escapes), `:face\='
+\(a symbol, never a face on the text -- tree-sitter owns `face\=' in this
+buffer), `:key\=' (stable across redraws, or the point lands on the wrong
+row after one) and an optional `:visit\=' thunk for RET.
+
+NODES are the lines about to be drawn, each `:path\=', `:dir\=' and
+`:parties\=', so a contributor can answer for a directory as well as a file
+and can decide for itself whether its rows aggregate -- the parties\=' do,
+a list of diagnostics does not.
+
+Two functions rather than one because the redraw runs on a timer and must
+never wait: `:read\=' is synchronous and answers from whatever the
+contributor already has, `:refresh\=' is where waiting is allowed, and it
+hands its answer back by calling `agent-river-map-contribute\='.  The
+diffstat below is the worked example.
+
+Editing this list is the off switch, the way it is for
+`agent-river-observers\='.  The two sorts it starts with are built on the
+same mechanism a foreign one would use, so there is no privileged path
+through here for a contributor that happens to ship with the package.
+
+A `defvar\=' holding its own defaults rather than a `setq\=' below them: a
+reload must not quietly throw away a contributor somebody registered.")
+
+(defvar agent-river--map-refreshed (make-hash-table :test 'equal)
+  "When each contributor was last offered a root, as NAME/ROOT -> time.
+The map throttles how often it *asks*; whether a read is already in
+flight is the contributor\='s own business, since only it knows what it
+started.")
+
+(defun agent-river-map-contribute ()
+  "Say that a contributor has something new for the map to draw.
+
+Marks the map out of date rather than drawing it: the answer arrives
+while nothing else is happening, possibly after the redraw timer has
+retired, and a row that reached a cache but never the screen is the same
+as not having read it.  Deliberately takes no arguments -- the next draw
+asks every contributor what it has, so there is one path in and no way
+for an answer to arrive around the side of it."
+  (agent-river--map-invalidate))
+
+(defun agent-river--map-one-line (text)
+  "Return TEXT as something that can be one line of the map.
+
+The buffer is line-based: positions, text properties and every motion
+assume one node per line, so a newline in a contributed row would not make
+two rows, it would make one broken one.  The same reason a signal is held
+to a single line."
+  (string-trim (replace-regexp-in-string "[[:cntrl:]]+" " " (or text ""))))
+
+(defun agent-river--map-offer-refresh (contributor root nodes)
+  "Let CONTRIBUTOR start reading ROOT for NODES, if it is due."
+  (let ((refresh (plist-get contributor :refresh)))
+    (when refresh
+      (let* ((key (format "%s\0%s" (plist-get contributor :name) root))
+             (last (gethash key agent-river--map-refreshed))
+             (ttl (or (plist-get contributor :ttl) agent-river-map-vc-ttl)))
+        (when (or (null last) (> (float-time (time-since last)) ttl))
+          (puthash key (current-time) agent-river--map-refreshed)
+          (funcall refresh root nodes))))))
+
+(defun agent-river--map-rows (root nodes)
+  "Return what every contributor has to say about NODES under ROOT.
+
+A hash of absolute path to a list of (CONTRIBUTOR . ROWS), in the order
+the contributors are registered -- deterministic, because anything else
+reorders itself between two redraws with nothing having happened.
+
+A contributor that throws is retired on the spot, once, with a message:
+this runs on every redraw, so a broken one is broken thousands of times,
+and a view that dies with it is the worse outcome.  The same bargain
+`agent-river--run-observers\=' makes."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (contributor agent-river-map-contributors)
+      (condition-case err
+          (progn
+            (agent-river--map-offer-refresh contributor root nodes)
+            (let ((answer (funcall (plist-get contributor :read) root nodes)))
+              (when (hash-table-p answer)
+                (maphash (lambda (path rows)
+                           (when rows
+                             (puthash path
+                                      (append (gethash path table)
+                                              (list (cons contributor rows)))
+                                      table)))
+                         answer))))
+        (error
+         (setq agent-river-map-contributors
+               (delq contributor agent-river-map-contributors))
+         (message "agent-river: map contributor %s retired (%s)"
+                  (plist-get contributor :name)
+                  (error-message-string err)))))
+    table))
+
+(defun agent-river--map-row-list (contributed)
+  "Return the rows of CONTRIBUTED, flattened in contributor order."
+  (apply #'append (mapcar #'cdr contributed)))
+
+(defun agent-river--rows-parties (_root nodes)
+  "Return one row per party on each of NODES: the names that left the line.
+
+What a bracket could never say.  The line still shades by weight and
+still marks contention and position, because those are scannable down the
+listing; the row adds what only makes sense once you are looking at this
+one node -- whose touches they were, how long ago, and how many of them
+changed the file rather than read it.
+
+Ordered by the parties themselves, which `agent-river--map-reach\=' has
+already sorted heaviest first, so the row order is the same reading as the
+shading and cannot contradict it."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (node nodes)
+      (let ((rows
+             (mapcar
+              (lambda (party)
+                (let ((writes (or (plist-get party :writes) 0))
+                      (last (plist-get party :last)))
+                  (list :key (concat "party/" (plist-get party :party))
+                        :face (if (plist-get party :current)
+                                  'agent-river-prompt
+                                'agent-river-stale)
+                        :text (concat
+                               (plist-get party :party)
+                               (if (plist-get party :current)
+                                   (concat " " agent-river-map-here-marker) "")
+                               (if (> writes 0)
+                                   (format " · %d write%s" writes
+                                           (if (= writes 1) "" "s"))
+                                 "")
+                               (if last
+                                   (format " · %s ago" (agent-river--ago last))
+                                 "")))))
+              (plist-get node :parties))))
+        (when rows (puthash (plist-get node :path) rows table))))
+    table))
+
+(defun agent-river--rows-step (_root nodes)
+  "Return a row for any of NODES a session has a tool call open on.
+
+The one row here that is present tense, which is why it is a second sort
+rather than more of the first: the parties above it say where an agent has
+*been*, this says what is happening in the file right now, and after a
+long task those are different statements about different moments.
+
+Read from the sessions rather than from the node, because a step in
+flight is not in the artifact tables at all -- it is the call that has not
+come back yet."
+  (let ((table (make-hash-table :test 'equal)))
+    (maphash
+     (lambda (_id state)
+       (let ((step (agent-river-state-step state)))
+         (when (and step (plist-get step :file)
+                    (agent-river--state-working-p state))
+           (let ((abs (agent-river--heat-absolute
+                       (list :cwd (agent-river-state-cwd state)
+                             :file (plist-get step :file)))))
+             (when (and abs (seq-find (lambda (node)
+                                        (equal (plist-get node :path) abs))
+                                      nodes))
+               (puthash abs
+                        (append (gethash abs table)
+                                (list (list :key (concat "step/" (agent-river-state-id state))
+                                            :face 'agent-river-act
+                                            :text (format "%s: %s since %s"
+                                                          (agent-river--party-label state)
+                                                          (or (plist-get step :tool) "?")
+                                                          (agent-river--ago
+                                                           (plist-get step :at))))))
+                        table))))))
+     agent-river-registry)
+    table))
 
 (defun agent-river--map-marker (level)
   "Return the Markdown that opens a map line at LEVEL.
@@ -4664,12 +4852,17 @@ rather than shaded -- there is no file on disk for the shading to be
 about, and a line that reads as gone cannot be mistaken for a place an
 agent is still working in.
 
+PARTIES are no longer named on the line, only shaded and marked: their
+names are rows beneath it now (`agent-river--rows-parties').  The brackets
+were the one ragged thing here, which is why nothing scannable could ever
+be put after them -- moving them down is what freed the tail of the line,
+and a row says what a bracket never could: how long ago, and how much of
+it was writing rather than reading.
+
 STAT is the diffstat reading (`agent-river--vc-reading'), padded here to
-`agent-river-map-vc-width'.  It sits after the markers and before the
-brackets: the brackets are ragged by nature -- a variable-length list of
-party names -- so anything that wants reading down the listing has to
-come before them.  Nil leaves the column out for every line in the
-buffer, which is what happens when there is no repository under the map."
+`agent-river-map-vc-width'.  Nil leaves the column out for every line in
+the buffer, which is what happens when there is no repository under the
+map."
   (let* ((marker (agent-river--map-marker level))
          (face (if missing
                    'agent-river-gone
@@ -4691,8 +4884,49 @@ buffer, which is what happens when there is no repository under the map."
                                          (string-width stat)))
                                ?\s))
                "")
-             markers " "
-             (or (agent-river--map-annotation parties) "")))))
+             markers))))
+
+(defun agent-river--map-row-line (row &optional nested)
+  "Return contributed ROW as a line, one level deeper again when NESTED.
+
+The text is escaped, and that is not politeness.  The map is Markdown on
+the condition that every token in it is ours; a contributor\='s text is the
+first text here that is not, and a row beginning with a `#\=' or carrying a
+stray asterisk would restructure the view that is showing it -- which is
+exactly why the HUD is not Markdown at all.  The condition holds by force
+here instead of by luck.
+
+The face is applied the map\='s way, as `agent-river-map-face\=' turned into
+an overlay after the text is in: tree-sitter owns `face\=' in this buffer
+and refontifies on redisplay, so a face written as a text property is
+drawn once and then quietly gone."
+  (let ((text (agent-river--md-escape
+               (agent-river--map-one-line (plist-get row :text))))
+        (face (plist-get row :face)))
+    (concat (if nested "  - " "- ")
+            (if face (agent-river--map-mark text face) text))))
+
+(defun agent-river--map-rows-insert (contributed path &optional nested)
+  "Insert CONTRIBUTED rows for PATH, capped and marked for motion.
+
+Each row carries its node\='s path, so RET on a row acts on the thing the
+row is about; a row with a `:visit\=' of its own overrides that.  It carries
+its `:key\=' as well, which is what keeps point on the right row across a
+redraw -- `agent-river--map-goto\=' finds a line again by what it names, and
+a row that named only its parent would inherit its parent\='s identity and
+land point a line or two off after every draw."
+  (let* ((rows (agent-river--map-row-list contributed))
+         (shown (seq-take rows agent-river-map-detail-rows)))
+    (dolist (row shown)
+      (insert (propertize
+               (concat (agent-river--map-row-line row nested) "\n")
+               'agent-river-map-path path
+               'agent-river-map-row (or (plist-get row :key)
+                                        (plist-get row :text) "")
+               'agent-river-map-visit (plist-get row :visit))))
+    (when (> (length rows) (length shown))
+      (insert (propertize (concat (if nested "  - " "- ") "…\n")
+                          'agent-river-map-face 'agent-river-stale)))))
 
 (defun agent-river--map-shade ()
   "Turn this buffer's face marks into overlays, replacing the last set."
@@ -4709,14 +4943,46 @@ buffer, which is what happens when there is no repository under the map."
             (overlay-put overlay 'evaporate t)))
         (setq pos next)))))
 
-(defun agent-river--map-open-p (entry root)
-  "Return non-nil when ENTRY's reached files are shown beneath it, under ROOT.
+(defun agent-river--map-folded-p (path default)
+  "Return whether PATH's children are drawn, DEFAULT when nobody has said.
 
-An entry with activity opens by default -- the files are the reason the
-entry is annotated at all -- and a toggle by hand wins from then on."
-  (let ((cell (assoc (expand-file-name (plist-get entry :name) root)
-                     agent-river--map-folds)))
-    (if cell (cdr cell) (and (plist-get entry :files) t))))
+The fold is data rather than an overlay, which is what lets it survive a
+buffer rebuilt every few seconds -- an overlay fold springs open on the
+next redraw, which is not a fold."
+  (let ((cell (assoc path agent-river--map-folds)))
+    (if cell (cdr cell) default)))
+
+(defun agent-river--map-open-p (entry root &optional rows)
+  "Return non-nil when ENTRY's children are shown beneath it, under ROOT.
+
+An entry with something under it opens by default -- the files, and now
+the contributed ROWS, are the reason the entry is annotated at all -- and a
+toggle by hand wins from then on.  Rows counting here is what makes them
+enrichment and detail at once: drawn where there are any, hidden by the
+same TAB that hides the files."
+  (agent-river--map-folded-p (expand-file-name (plist-get entry :name) root)
+                             (and (or (plist-get entry :files) rows) t)))
+
+(defun agent-river--map-nodes (root entries)
+  "Return the lines ENTRIES will draw under ROOT, as nodes for a contributor.
+
+Each is `:path\=', `:dir\=' and `:parties\='.  Files are included whether or
+not their entry is open: a contributor is asked once per draw for the whole
+root, and asking again for each entry that turns out to be unfolded would
+put a subprocess behind a keystroke."
+  (let (nodes)
+    (dolist (entry entries)
+      (let ((path (expand-file-name (plist-get entry :name) root)))
+        (push (list :path path
+                    :dir (plist-get entry :dir)
+                    :parties (plist-get entry :parties))
+              nodes)
+        (dolist (file (plist-get entry :files))
+          (push (list :path (expand-file-name (plist-get file :rel) path)
+                      :dir nil
+                      :parties (plist-get file :parties))
+                nodes))))
+    (nreverse nodes)))
 
 (defun agent-river--map-header (root entries &optional roots)
   "Return the map's own heading for ROOT, given its ENTRIES.
@@ -4758,10 +5024,16 @@ project and the others were somewhere inside it."
               "  ·  quiet"))))
 
 (defun agent-river--map-here ()
-  "Return what identifies the line point is on, for a redraw to find again."
+  "Return what identifies the line point is on, for a redraw to find again.
+
+Three things name a line, not two: the entry, the file under it, and the
+contributed row under that.  A row that named only its node would share
+its node\='s identity with every other row there, and point would come back
+from a redraw one or two lines off every time."
   (let ((beg (line-beginning-position)))
     (list (get-text-property beg 'agent-river-map-name)
           (get-text-property beg 'agent-river-map-rel)
+          (get-text-property beg 'agent-river-map-row)
           (line-number-at-pos))))
 
 (defun agent-river--map-goto (here)
@@ -4778,12 +5050,15 @@ start of the buffer."
                                            'agent-river-map-name))
                  (equal (nth 1 here)
                         (get-text-property (line-beginning-position)
-                                           'agent-river-map-rel)))
+                                           'agent-river-map-rel))
+                 (equal (nth 2 here)
+                        (get-text-property (line-beginning-position)
+                                           'agent-river-map-row)))
             (setq found t)
           (forward-line 1))))
     (unless found
       (goto-char (point-min))
-      (forward-line (1- (max 1 (or (nth 2 here) 1)))))))
+      (forward-line (1- (max 1 (or (nth 3 here) 1)))))))
 
 (defun agent-river--map-draw ()
   "Redraw the map buffer from the state, if it is still alive.
@@ -4861,10 +5136,14 @@ nothing."
                          'agent-river-map-dir t
                          'agent-river-map-section t
                          'agent-river-map-active (and entries t))))
-              (dolist (entry entries)
+              (let ((rows (agent-river--map-rows
+                           root (agent-river--map-nodes root entries))))
+               (dolist (entry entries)
                 (let* ((name (plist-get entry :name))
                        (dir (plist-get entry :dir))
-                       (path (expand-file-name name root)))
+                       (path (expand-file-name name root))
+                       (mine (gethash path rows))
+                       (open (agent-river--map-open-p entry root mine)))
                   (insert (propertize
                            (concat (agent-river--map-line
                                     level (concat name (if dir "/" ""))
@@ -4878,39 +5157,46 @@ nothing."
                            'agent-river-map-name name
                            'agent-river-map-path path
                            'agent-river-map-dir dir
+                           ;; Whether its children were drawn, read back by TAB.
+                           ;; Off the rendering rather than derived again, so
+                           ;; the toggle cannot disagree with what is on screen.
+                           'agent-river-map-open open
                            ;; What `agent-river-map-next-active' stops on.  Read
                            ;; off the parties rather than off the annotation
                            ;; text, so the motion and the reading cannot come
                            ;; apart if the line is ever formatted differently.
                            'agent-river-map-active (and (plist-get entry :parties) t)))
-                  (when (agent-river--map-open-p entry root)
+                  (when open
+                    (agent-river--map-rows-insert mine path)
                     (let* ((files (plist-get entry :files))
                            (shown (seq-take files agent-river-map-detail-files)))
                       (dolist (file shown)
+                        (let* ((fpath (expand-file-name (plist-get file :rel) path))
+                               (frows (gethash fpath rows))
+                               (fopen (agent-river--map-folded-p fpath (and frows t))))
                         (insert (propertize
                                  (concat (agent-river--map-line
                                           'file (plist-get file :rel)
                                           (plist-get file :parties)
                                           nil
                                           (agent-river--vc-reading
-                                           root stats
-                                           (expand-file-name
-                                            (plist-get file :rel) path)
-                                           column
+                                           root stats fpath column
                                            (agent-river--map-writes
                                             (plist-get file :parties))))
                                          "\n")
                                  'agent-river-map-name name
                                  'agent-river-map-rel (plist-get file :rel)
-                                 'agent-river-map-path
-                                 (expand-file-name (plist-get file :rel) path)
+                                 'agent-river-map-path fpath
+                                 'agent-river-map-open fopen
                                  'agent-river-map-active
-                                 (and (plist-get file :parties) t))))
+                                 (and (plist-get file :parties) t)))
+                        (when fopen
+                          (agent-river--map-rows-insert frows fpath t))))
                       (when (> (length files) (length shown))
                         (insert (propertize
                                  (concat (agent-river--map-marker 'file) "…\n")
                                  'agent-river-map-face 'agent-river-stale
-                                 'agent-river-map-name name)))))))
+                                 'agent-river-map-name name))))))))
               ;; An empty listing has to say which kind of empty it is.
               ;; Filtered, the tree may be full of files nobody has been
               ;; near, and a blank section then reads as though the map had
@@ -4980,25 +5266,42 @@ makes them the lines no motion should ever stop on."
   "Return non-nil on a line naming a file or a directory."
   (and (agent-river--map-line-path) t))
 
+(defun agent-river--map-row-line-p ()
+  "Return non-nil on a row contributed under a node."
+  (and (get-text-property (line-beginning-position) 'agent-river-map-row) t))
+
 (defun agent-river--map-top-line-p ()
   "Return non-nil on one of the listing's own entries.
-A file shown under an unfolded directory carries `agent-river-map-rel';
-the entry itself does not, which is the difference between the two grains
-of motion."
+A file shown under an unfolded directory carries `agent-river-map-rel' and
+a contributed row carries `agent-river-map-row'; the entry itself carries
+neither, which is the difference between the two grains of motion.  A row
+inherits its node's path so that RET on it acts on the right thing, which
+is exactly why it cannot be told apart by the path alone."
   (and (agent-river--map-entry-line-p)
-       (null (get-text-property (line-beginning-position) 'agent-river-map-rel))))
+       (null (get-text-property (line-beginning-position) 'agent-river-map-rel))
+       (not (agent-river--map-row-line-p))))
 
 (defun agent-river--map-active-line-p ()
-  "Return non-nil on a line some agent has been working under."
+  "Return non-nil on a line some agent has been working under.
+Contributed rows carry no `agent-river-map-active\=' and are passed over:
+`>\=' is the motion for finding the agents, and a contributor that could
+put itself on it would be competing for the one gesture that is about
+them."
   (and (agent-river--map-entry-line-p)
        (get-text-property (line-beginning-position) 'agent-river-map-active)))
 
 (defun agent-river--map-beginning-of-name ()
   "Put point on the first character of the name on this line.
-Falls back to the start of the line, so this is safe to call anywhere --
-the header has no name and point should not end up inside its markup."
+
+The names are code spans, so the backtick finds them.  A contributed row
+has no code span -- its text is prose the map escaped -- so the marker is
+stepped over instead; landing in column zero would put the cursor on the
+Markdown marker, which reads as though the markup were the content.
+
+Falls back to the start of the line, so this is safe to call anywhere."
   (goto-char (line-beginning-position))
-  (re-search-forward "`" (line-end-position) t))
+  (or (re-search-forward "`" (line-end-position) t)
+      (re-search-forward "^[-# ]+" (line-end-position) t)))
 
 (defun agent-river--map-scan (count test)
   "Move to the COUNTth line satisfying TEST, forward when COUNT is positive.
@@ -5088,13 +5391,16 @@ on the redraw after this one."
     (when (get-text-property (line-beginning-position) 'agent-river-map-section)
       (user-error "A root heading holds the listing below it, not files"))
     (unless (and name path) (user-error "No entry on this line"))
-    ;; The root is the entry's own parent rather than `agent-river--map-root',
-    ;; which is nil in the overview and would name the wrong tree in it.
-    (let* ((root (directory-file-name (file-name-directory path)))
-           (entry (seq-find (lambda (e) (equal (plist-get e :name) name))
-                            (agent-river--map-entries root agent-river-map-scope)))
-           (open (and entry (agent-river--map-open-p entry root)))
-           (cell (assoc path agent-river--map-folds)))
+    (when (agent-river--map-row-line-p)
+      (user-error "A row is what folds away, not what folds"))
+    ;; Whether this line drew its children is read off the line itself
+    ;; rather than derived a second time.  Deriving it meant finding the
+    ;; entry again by name in a freshly built listing, which only worked for
+    ;; the listing's own entries -- a file line, which can now have rows of
+    ;; its own under it, was not in there at all and toggled nothing.
+    (let ((open (get-text-property (line-beginning-position)
+                                   'agent-river-map-open))
+          (cell (assoc path agent-river--map-folds)))
       (if cell
           (setcdr cell (not open))
         (push (cons path (not open)) agent-river--map-folds)))
@@ -5117,11 +5423,19 @@ goes on being what a fresh map opens with."
 (defun agent-river-map-visit ()
   "Descend into the directory at point, or open the file at point.
 The lens is moved rather than widened: one directory is always listed in
-full, and going deeper means looking somewhere else."
+full, and going deeper means looking somewhere else.
+
+On a contributed row, whatever that row said RET means -- and where it
+said nothing, the node the row is about.  Refusing would be the stricter
+reading of \"a motion with nowhere to go refuses\", but that rule is about
+landing *near* something the eye did not choose; the file a row is under
+is the thing the eye chose."
   (interactive)
   (let ((path (get-text-property (line-beginning-position) 'agent-river-map-path))
-        (dir (get-text-property (line-beginning-position) 'agent-river-map-dir)))
+        (dir (get-text-property (line-beginning-position) 'agent-river-map-dir))
+        (visit (get-text-property (line-beginning-position) 'agent-river-map-visit)))
     (cond
+     (visit (funcall visit))
      ((null path) (user-error "Nothing to visit on this line"))
      (dir (agent-river-map-descend path))
      ((file-exists-p path) (find-file path))

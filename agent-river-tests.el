@@ -3527,7 +3527,8 @@ is how a test asks what the view looks like once the work has moved on."
 
 (ert-deftest agent-river-test-map-shading-rides-on-its-own-property ()
   (let* ((parties '((:party "alpha" :weight 9 :current t)))
-         (line (agent-river--map-line 2 "common/" parties)))
+         (line (agent-river--map-line 2 "common/" parties))
+         (row (agent-river--map-row-line '(:text "alpha" :face agent-river-act))))
     ;; tree-sitter owns `face' in this buffer: it refontifies on redisplay
     ;; and appends or removes faces as the structure changes, so a shading
     ;; written there is drawn once and then quietly gone.  The mark is what
@@ -3536,36 +3537,50 @@ is how a test asks what the view looks like once the work has moved on."
     (should-not (text-property-not-all 0 (length line) 'face nil line))
     (should (text-property-any 0 (length line) 'agent-river-map-face
                                'agent-river-heat-3 line))
-    (should (text-property-any 0 (length line) 'agent-river-map-face
-                               'agent-river-session line))))
+    ;; And a contributed row is held to it too -- it is the first text here
+    ;; that is not ours, so it is the most likely place for a face to be set
+    ;; the wrong way.
+    (should-not (text-property-not-all 0 (length row) 'face nil row))
+    (should (text-property-any 0 (length row) 'agent-river-map-face
+                               'agent-river-act row))))
 
 (ert-deftest agent-river-test-map-annotations-line-up-across-levels ()
   (let* ((agent-river-map-name-width 24)
          (parties '((:party "alpha" :weight 9)))
-         (heading (agent-river--map-line 2 "common/" parties))
-         (item (agent-river--map-line 'file "c.el" parties)))
+         (heading (agent-river--map-line 2 "common/" parties nil "+1"))
+         (item (agent-river--map-line 'file "c.el" parties nil "+1")))
     ;; The markers are different widths -- `## ' against `- ' -- so the
     ;; padding has to be measured from the whole prefix.  Measured from the
     ;; name alone, every list item's reading sat one column left of every
     ;; heading's and the column stopped being one.
-    (should (= (string-match-p "\\[" heading) (string-match-p "\\[" item)))))
+    (should (= (string-match-p "\\+1" heading) (string-match-p "\\+1" item)))))
 
-(ert-deftest agent-river-test-the-brackets-name-parties-not-weights ()
-  ;; One fact, one encoding.  The weight is the shading on the name, and
-  ;; printing it in the brackets too gave a reader two readings of it to
-  ;; reconcile while the digits crowded out the names.
-  (let ((line (agent-river--map-line 'file "c.el" '((:party "alpha" :weight 9)))))
-    (should (string-match-p "\\[alpha\\]" line))
-    (should-not (string-match-p "[0-9]" line)))
-  ;; The position marker stays: it belongs to a party, not to the weight.
-  (should (string-match-p
-           "\\[alpha▸\\]"
-           (agent-river--map-line 'file "c.el" '((:party "alpha" :weight 9 :current t)))))
-  ;; And several parties still read as several.
-  (should (string-match-p
-           "\\[alpha beta\\]"
-           (agent-river--map-line 'file "c.el" '((:party "alpha" :weight 9)
-                                                  (:party "beta" :weight 2))))))
+(ert-deftest agent-river-test-the-line-shows-no-party-names ()
+  ;; The names were the one ragged thing on the line, so nothing scannable
+  ;; could ever follow them.  They are rows underneath now; what stays is
+  ;; what can be read down the listing -- the shading, and the two markers.
+  (let ((line (agent-river--map-line 'file "c.el"
+                                     '((:party "alpha" :weight 9 :current t)
+                                       (:party "beta" :weight 2)))))
+    (should-not (string-match-p "alpha" line))
+    ;; One fact, one encoding: the weight is the shading, never a number.
+    (should-not (string-match-p "[0-9]" line))
+    ;; Contention and position are still on the line, because "is anyone
+    ;; here" and "where is the work" are questions asked of the whole
+    ;; listing at once.
+    (should (string-match-p agent-river-map-contended-marker line))
+    (should (string-match-p agent-river-map-here-marker line)))
+  ;; And the names are where they went.
+  (let* ((rows (gethash "/repo/c.el"
+                        (agent-river--rows-parties
+                         "/repo" '((:path "/repo/c.el"
+                                    :parties ((:party "alpha" :weight 9 :writes 2
+                                               :current t)))))))
+         (text (plist-get (car rows) :text)))
+    (should (string-match-p "alpha" text))
+    ;; Saying what a bracket never could.
+    (should (string-match-p "2 writes" text))
+    (should (string-match-p agent-river-map-here-marker text))))
 
 (ert-deftest agent-river-test-the-map-degrades-without-tree-sitter ()
   ;; The mode ships with Emacs 31, the grammars do not.  Without them the
@@ -3663,16 +3678,18 @@ is how a test asks what the view looks like once the work has moved on."
 (ert-deftest agent-river-test-a-quiet-line-still-holds-the-diffstat-column-open ()
   (let* ((agent-river-map-name-width 24)
          (agent-river-map-vc-width 11)
-         (parties '((:party "alpha" :weight 9)))
+         (parties '((:party "alpha" :weight 9 :current t)))
          (changed (agent-river--map-line 'file "a.el" parties nil "+10 -6"))
          (quiet (agent-river--map-line 2 "common/" parties nil ""))
          (none (agent-river--map-line 'file "a.el" parties)))
-    ;; The brackets are ragged by nature, so the column before them is what
-    ;; can be read down the listing -- and only if every line reserves it.
-    (should (= (string-match-p "\\[" changed) (string-match-p "\\[" quiet)))
+    ;; The markers sit after the column, so where they land says whether
+    ;; every line reserved the same width for it.
+    (should (= (string-match-p agent-river-map-here-marker changed)
+               (string-match-p agent-river-map-here-marker quiet)))
     ;; With no repository under the map at all, no line reserves anything:
     ;; an empty column on every line is a column that says nothing.
-    (should (< (string-match-p "\\[" none) (string-match-p "\\[" changed)))))
+    (should (< (string-match-p agent-river-map-here-marker none)
+               (string-match-p agent-river-map-here-marker changed)))))
 
 (ert-deftest agent-river-test-the-diffstat-column-is-reserved-buffer-wide ()
   (let ((table (agent-river-test--numstat "2\t0\ta.el\0")))
@@ -3793,6 +3810,130 @@ is how a test asks what the view looks like once the work has moved on."
                                 (agent-river--map-entries root))))
           (should (= (agent-river--map-writes (plist-get common :parties)) 1))
           (should (= (agent-river--map-weight (plist-get common :parties)) 2)))))))
+
+(defun agent-river-test--contributor (name rows &rest extra)
+  "Return a contributor called NAME answering ROWS for every node."
+  (append (list :name name
+                :read (lambda (_root nodes)
+                        (let ((table (make-hash-table :test 'equal)))
+                          (dolist (node nodes)
+                            (puthash (plist-get node :path) rows table))
+                          table)))
+          extra))
+
+(ert-deftest agent-river-test-a-contributor-adds-rows-under-a-node ()
+  (let ((agent-river-map-contributors
+         (list (agent-river-test--contributor 'a '((:key "1" :text "one")))
+               (agent-river-test--contributor 'b '((:key "2" :text "two"))))))
+    (let* ((rows (agent-river--map-rows "/repo" '((:path "/repo/a.el"))))
+           (contributed (gethash "/repo/a.el" rows)))
+      ;; Grouped by contributor and in registration order: anything else
+      ;; reorders itself between two redraws with nothing having happened.
+      (should (equal (mapcar (lambda (pair) (plist-get (car pair) :name)) contributed)
+                     '(a b)))
+      (should (equal (mapcar (lambda (row) (plist-get row :text))
+                             (agent-river--map-row-list contributed))
+                     '("one" "two"))))))
+
+(ert-deftest agent-river-test-a-broken-contributor-is-retired ()
+  ;; This runs on every redraw, so a broken one is broken thousands of
+  ;; times.  A view that dies with it is the worse outcome -- the same
+  ;; bargain the observers make.
+  (let ((agent-river-map-contributors
+         (list (list :name 'broken :read (lambda (&rest _) (error "nope")))
+               (agent-river-test--contributor 'fine '((:key "1" :text "one"))))))
+    (let ((rows (agent-river--map-rows "/repo" '((:path "/repo/a.el")))))
+      ;; The good one still answered.
+      (should (gethash "/repo/a.el" rows)))
+    (should (equal (mapcar (lambda (c) (plist-get c :name))
+                           agent-river-map-contributors)
+                   '(fine)))))
+
+(ert-deftest agent-river-test-a-refresh-is-offered-on-its-own-clock ()
+  ;; The redraw fires every few seconds; a contributor that spawns work
+  ;; must not be asked to spawn it again each time.
+  (let* ((calls 0)
+         (agent-river--map-refreshed (make-hash-table :test 'equal))
+         (agent-river-map-contributors
+          (list (agent-river-test--contributor
+                 'slow nil
+                 :ttl 60
+                 :refresh (lambda (&rest _) (setq calls (1+ calls)))))))
+    (agent-river--map-rows "/repo" '((:path "/repo/a.el")))
+    (agent-river--map-rows "/repo" '((:path "/repo/a.el")))
+    (should (= calls 1))
+    ;; A different root is a different question, not the same one repeated.
+    (agent-river--map-rows "/other" '((:path "/other/a.el")))
+    (should (= calls 2))))
+
+(ert-deftest agent-river-test-a-contributed-row-cannot-restructure-the-map ()
+  ;; The map is Markdown only because every token in it is ours, and a
+  ;; contributor's text is the first text here that is not.  A row
+  ;; beginning with `#' or carrying an asterisk would restructure the view
+  ;; showing it -- which is why the HUD is not Markdown at all.
+  (let ((line (agent-river--map-row-line '(:text "# *boom* [x](y)"))))
+    (should-not (string-match-p "^- #" line))
+    (should (string-match-p "\\\\#" line))
+    (should (string-match-p "\\\\\\*" line)))
+  ;; And one row is one line: the buffer is line-based, so a newline would
+  ;; not make two rows, it would make one broken one.
+  (let ((line (agent-river--map-row-line '(:text "first\nsecond"))))
+    (should-not (string-match-p "\n" line))
+    (should (string-match-p "first second" line))))
+
+(ert-deftest agent-river-test-rows-are-capped-visibly ()
+  (let ((agent-river-map-detail-rows 2))
+    (with-temp-buffer
+      (agent-river--map-rows-insert
+       (list (cons nil (list '(:key "1" :text "one") '(:key "2" :text "two")
+                             '(:key "3" :text "three"))))
+       "/repo/a.el")
+      (let ((text (buffer-string)))
+        (should (string-match-p "one" text))
+        (should-not (string-match-p "three" text))
+        ;; A listing that can be arbitrarily long is not a listing, and a
+        ;; wall nobody can see is worse than the length.
+        (should (string-match-p "…" text))))))
+
+(ert-deftest agent-river-test-a-row-carries-its-own-identity ()
+  ;; The redraw finds a line again by what it names.  A row that named only
+  ;; its node would share that name with every other row there, and point
+  ;; would come back one or two lines off after every draw.
+  (with-temp-buffer
+    (agent-river--map-rows-insert
+     (list (cons nil (list '(:key "party/alpha" :text "alpha")))) "/repo/a.el")
+    (goto-char (point-min))
+    (should (equal (get-text-property (point) 'agent-river-map-row) "party/alpha"))
+    (should (equal (get-text-property (point) 'agent-river-map-path) "/repo/a.el"))
+    ;; And it is not one of the listing's own entries, so the coarse motion
+    ;; passes over it -- it inherits the path, which is what makes it
+    ;; impossible to tell apart by the path alone.
+    (should (agent-river--map-row-line-p))
+    (should-not (agent-river--map-top-line-p))
+    (should-not (agent-river--map-active-line-p))))
+
+(ert-deftest agent-river-test-a-node-with-rows-opens-and-folds ()
+  ;; Rows are enrichment and detail at once: drawn where there are any,
+  ;; hidden by the same TAB that hides the files.
+  (let ((agent-river--map-folds nil))
+    (should (agent-river--map-open-p '(:name "a.el") "/repo" '((nil . (1)))))
+    (should-not (agent-river--map-open-p '(:name "a.el") "/repo" nil))
+    (let ((agent-river--map-folds '(("/repo/a.el" . nil))))
+      (should-not (agent-river--map-open-p '(:name "a.el") "/repo" '((nil . (1))))))))
+
+(ert-deftest agent-river-test-the-step-row-is-present-tense ()
+  ;; The parties say where an agent has been; this says what is happening
+  ;; in the file right now, which after a long task is a different file.
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el" :cwd "/repo"))
+    (let ((rows (gethash "/repo/a.el"
+                         (agent-river--rows-step "/repo" '((:path "/repo/a.el"))))))
+      (should (string-match-p "Edit" (plist-get (car rows) :text))))
+    ;; The turn ends and the row goes: a call that has come back is not in
+    ;; flight, and nothing should read as though it were.
+    (agent-river-fold state '(:kind "idle"))
+    (should-not (gethash "/repo/a.el"
+                         (agent-river--rows-step "/repo" '((:path "/repo/a.el")))))))
 
 (ert-deftest agent-river-test-turning-the-diffstat-off-asks-git-nothing ()
   (let ((agent-river--vc-cache (make-hash-table :test 'equal))
