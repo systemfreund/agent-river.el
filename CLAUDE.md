@@ -439,20 +439,19 @@ Four things about the map are load-bearing:
   (`agent-river--map-live-p`, asked by `agent-river--map-all-roots` and
   `agent-river--map-reach`), since a root kept alive by a touch too cold to
   name would head a section with nothing under it.
-- **A deleted file is not where an agent is.** The exemption above is refused
-  to a file that is not on disk: it exists to say where an agent is *now*, and
-  without the check the map went on pointing `:current` at a name nothing
-  would ever touch again — the exemption holds whatever the weight decays to,
-  so that line never faded either. Only the exemption is checked, never the
-  floor. A file deleted a moment ago is still warm, and the deletion is
-  something the agent did; hiding it the instant it happens would drop the one
-  thing worth seeing about it. It fades out afterwards like anything else,
-  which is what makes the narrow rule enough — blanket removal was the
-  alternative and would also have made the map flicker every time a branch
-  switch took files away and put them back. The consequence to know: an agent
-  whose last act was a deletion, and which has since gone cold, is named
-  nowhere. That is the honest answer, and its next touch of a file that exists
-  brings it back.
+- **A file that is gone is struck through, not dropped**
+  (`agent-river-gone`, set on `:missing`). Removing them was tried first, in
+  two shapes, and both lost something. Dropping a deletion outright throws
+  away the deletion itself, which is a thing the agent *did* — and it would
+  make the map flicker every time a branch switch took files away and put
+  them back. Refusing them only the `:current` exemption was narrower, but it
+  left an agent whose last act was a deletion named nowhere at all, and
+  losing a party off the map is the worse of the two readings. The worry
+  behind both — that `:current` on a vanished file reads as "the agent is
+  here" — was a rendering problem, and it is fixed where it was: struck
+  through, the line says the agent's last move was into a file that has since
+  gone, which is true and worth knowing. Everything else about them is
+  ordinary: they fade at the floor like any other name.
 - **Fading is not finishing** (`agent-river-forget-artifacts`). The floor
   handles the everyday case on its own, but work that has just landed — a
   merge, a release — is history rather than cold, and only the user knows
@@ -485,10 +484,13 @@ Four things about the map are load-bearing:
   says which kind of empty it is: a filtered tree full of files nobody has
   been near would otherwise read as a map that had lost them.
 
-Encoding discipline, since there are three facts on a line: weight is shading
+Encoding discipline, since there are four facts on a line: weight is shading
 (the same `agent-river-heat-levels` faces), party is text, contention is a
-marker. A fourth colour would leave a reader unable to say which fact any
-given colour meant, and one fact must not take two encodings either — the
+marker, and existence is a strike-through. That last one is deliberately not
+a colour: `:missing` used to be drawn in the grey `agent-river-stale`, which
+put "this file is gone" on the same channel as the heat, where grey already
+meant stale and cold and elided besides. A fifth colour would leave a reader
+unable to say which fact any given colour meant, and one fact must not take two encodings either — the
 brackets used to read `[alpha:4]`, which gave the weight a second rendering
 nobody could reconcile against the first and pushed the names, which is what
 the brackets are for, into the margin. The position marker is repeated

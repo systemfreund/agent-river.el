@@ -227,6 +227,16 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
 (defface agent-river-note '((t :inherit font-lock-builtin-face))
   "Face for something observed outside the hook stream.")
 
+(defface agent-river-gone '((t :inherit agent-river-stale :strike-through t))
+  "Face for a name the state knows and the disk does not.
+
+Struck through rather than merely greyed, because grey is the map's word
+for several things at once -- stale, cold, elided -- and \"this file is
+not there\" is worth saying exactly.  A face and not Markdown `~~\': the
+names are code spans and inline markup does not apply inside one, and the
+map's shading already travels as an overlay because tree-sitter owns
+`face' in that buffer.  So this works in the plain fallback too.")
+
 (defconst agent-river-kinds
   '(("prompt" "◆" agent-river-prompt)
     ("act"    "▸" agent-river-act)
@@ -3550,24 +3560,19 @@ for the map -- which trees to draw, and what to draw in them -- because a
 root kept alive by a touch too cold to name would head a section with
 nothing under it.
 
-The second clause is refused to a file that is not there.  It exists to
-answer \"where is this agent now\", and a deleted file is not a place an
-agent can be: without the check the map went on pointing `:current' at a
-name nothing would ever touch again, since the exemption holds whatever
-the weight has decayed to.  Only the exemption is checked, never the
-floor -- a file deleted a moment ago is still warm, and that deletion is
-activity the map has no business hiding while it is the news.  It fades
-out afterwards like everything else, which is what makes this enough.
-
-One `file-exists-p' per party at worst: an entry above the floor never
-reaches the clause, and an entry below it is stat-ed only if it is that
-party's most recent."
+The exemption is granted to a deleted file too, which it was not for a
+while.  The worry was that `:current' would then read as \"the agent is
+here\" over a file that is not there -- but that was a rendering problem,
+and `agent-river-gone' fixes it where it was: struck through, the line
+says the agent's last move was into a file that has since gone, which is
+both true and worth knowing.  Refusing the exemption instead left an
+agent whose last act was a deletion named nowhere at all, and losing a
+party off the map entirely is the worse of the two readings."
   (let ((abs (agent-river--heat-absolute entry)))
     (and abs
          (or (null agent-river-map-party-floor)
              (>= (plist-get entry :weight) agent-river-map-party-floor)
-             (and (equal abs (plist-get (gethash (plist-get entry :party) newest) :abs))
-                  (file-exists-p abs))))))
+             (equal abs (plist-get (gethash (plist-get entry :party) newest) :abs))))))
 
 (defun agent-river--map-all-roots (&optional scope)
   "Return every directory tree the agents have touched, newest first.
@@ -3863,11 +3868,13 @@ same column and the tree stops being one."
 
 (defun agent-river--map-line (level name parties &optional missing)
   "Return one map line: NAME at LEVEL, annotated with PARTIES.
-MISSING marks a name only the state knows about, which is greyed rather
-than shaded -- there is no file on disk for the shading to be about."
+MISSING marks a name only the state knows about, which is struck through
+rather than shaded -- there is no file on disk for the shading to be
+about, and a line that reads as gone cannot be mistaken for a place an
+agent is still working in."
   (let* ((marker (agent-river--map-marker level))
          (face (if missing
-                   'agent-river-stale
+                   'agent-river-gone
                  (agent-river--heat-face (agent-river--map-weight parties))))
          (shown (agent-river--map-name name))
          (pad (max 1 (- agent-river-map-name-width

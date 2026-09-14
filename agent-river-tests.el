@@ -2873,29 +2873,28 @@ is how a test asks what the view looks like once the work has moved on."
                          '("common")))
           (should (plist-get (car (plist-get (car entries) :parties)) :current)))))))
 
-(ert-deftest agent-river-test-a-deleted-file-is-not-where-an-agent-is ()
-  ;; The `:current' exemption answers "where is this agent now", and a file
-  ;; that is gone is not a place an agent can be.  Without this the map went
-  ;; on pointing at a name nothing would ever touch again -- the exemption
-  ;; holds whatever the weight decays to, so it never faded either.
-  (let ((agent-river-heat-half-life 120)
-        (agent-river-map-party-floor 0.25)
-        (agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
-        (agent-river-fold state (list :kind "act" :cwd root :file "scratch.el"))
-        (agent-river-test--cool state "common/c.el" 3600)
-        (agent-river-test--cool state "scratch.el" 3600)
-        ;; scratch.el was never written to disk, so it reads as deleted: cold
-        ;; and gone, it takes its root with it.
-        (should-not (agent-river--map-entries root))
-        (should-not (agent-river--map-all-roots))))))
+(ert-deftest agent-river-test-a-gone-file-is-struck-through ()
+  ;; Grey is the map's word for several things at once -- stale, cold,
+  ;; elided.  "This file is not there" is worth saying exactly, and once the
+  ;; line reads as gone it can no longer be mistaken for a place an agent is
+  ;; still working in.
+  (should (equal (get-text-property 3 'agent-river-map-face
+                                    (agent-river--map-line
+                                     2 "scratch.el"
+                                     '((:party "alpha" :weight 3)) t))
+                 'agent-river-gone))
+  ;; And a name that is on disk keeps its shading, which is a reading about
+  ;; weight and must not be crowded out by one about existence.
+  (should-not (equal (get-text-property 3 'agent-river-map-face
+                                        (agent-river--map-line
+                                         2 "there.el"
+                                         '((:party "alpha" :weight 9))))
+                     'agent-river-gone)))
 
-(ert-deftest agent-river-test-a-fresh-deletion-is-still-news ()
-  ;; Only the exemption is refused, never the floor.  A file deleted a moment
-  ;; ago is warm, and that deletion is activity -- the agent did it.  Hiding
-  ;; it the instant it happens would drop the one thing worth seeing about it.
+(ert-deftest agent-river-test-a-deletion-is-still-news ()
+  ;; A file deleted a moment ago is warm, and the deletion is something the
+  ;; agent did.  Dropping it the instant it happens would throw away the one
+  ;; thing worth seeing about it.
   (let ((agent-river-heat-half-life 120)
         (agent-river-map-party-floor 0.25)
         (agent-river-map-untouched nil))
@@ -2906,6 +2905,24 @@ is how a test asks what the view looks like once the work has moved on."
           (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
                          '("scratch.el")))
           (should (plist-get (car entries) :missing)))))))
+
+(ert-deftest agent-river-test-an-agent-is-named-even-on-a-file-that-is-gone ()
+  ;; The exemption holds for a deleted file too.  Refusing it left an agent
+  ;; whose last act was a deletion named nowhere at all, and losing a party
+  ;; off the map is the worse of the two readings -- the strike-through is
+  ;; what keeps this one honest.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "scratch.el"))
+        (agent-river-test--cool state "scratch.el" 3600)
+        (let ((entries (agent-river--map-entries root)))
+          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
+                         '("scratch.el")))
+          (should (plist-get (car entries) :missing))
+          (should (plist-get (car (plist-get (car entries) :parties)) :current)))))))
 
 (ert-deftest agent-river-test-a-cold-root-stops-heading-a-section ()
   ;; Both readings of the artifact tables have to apply the floor, or a root
