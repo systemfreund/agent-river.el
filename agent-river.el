@@ -4424,18 +4424,41 @@ the timer decides how often that is worth acting on."
     (cancel-timer agent-river--map-timer))
   (setq agent-river--map-timer nil))
 
+(defun agent-river--map-cooling-p ()
+  "Return non-nil while cooling alone will still change the map.
+
+Two thresholds, because two things fade at different depths.  The
+shading runs out at the bottom of `agent-river-heat-levels', and asking
+only that retired the timer while names were still on screen waiting to
+cross `agent-river-map-party-floor' -- which sits below it, so the map
+froze mid-fade and the names sat there until the next event.
+
+A name held by the `:current' exemption is not cooling: it never crosses
+anything, so it is not something left to draw and must not keep the timer
+alive for as long as Emacs runs."
+  (and agent-river-heat-half-life
+       (or (agent-river--heat-visible-p agent-river-map-scope)
+           (and agent-river-map-party-floor
+                (seq-some (lambda (entry)
+                            (>= (plist-get entry :weight)
+                                agent-river-map-party-floor))
+                          (agent-river--heat-entries agent-river-map-scope))))))
+
 (defun agent-river--map-tick ()
   "Redraw the map, or stop the timer once there is nothing left to draw.
 Cooling counts as something to draw: with a half-life set, a listing whose
 agents have all stopped is still changing, and the weights would otherwise
-sit frozen at whatever they were when the last event landed."
+sit frozen at whatever they were when the last event landed.
+
+What it cannot see is the disk.  A file that comes back while no agent is
+working -- a branch switch, a build -- redraws on the next event or on
+`g', the way a dired buffer does; watching the filesystem to catch it is a
+lot of machinery for a view whose subject is the agents."
   (condition-case err
       (cond
        ((null (get-buffer agent-river-map-buffer-name))
         (agent-river--map-teardown))
-       ((or agent-river--map-dirty
-            (and agent-river-heat-half-life
-                 (agent-river--heat-visible-p agent-river-map-scope)))
+       ((or agent-river--map-dirty (agent-river--map-cooling-p))
         (agent-river--map-draw))
        (t (agent-river--stop-map-timer)))
     ;; Same bargain as the other two timers: a redraw that throws every few

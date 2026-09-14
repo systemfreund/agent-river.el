@@ -2873,6 +2873,39 @@ is how a test asks what the view looks like once the work has moved on."
                          '("common")))
           (should (plist-get (car (plist-get (car entries) :parties)) :current)))))))
 
+(ert-deftest agent-river-test-the-map-keeps-drawing-until-the-names-fade ()
+  ;; Two thresholds fade at different depths.  Asking only whether anything
+  ;; is still shaded retired the timer while names were on screen waiting to
+  ;; cross the party floor below it, so the map froze mid-fade and they sat
+  ;; there until the next event.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25)
+        (agent-river-map-scope 'session))
+    (agent-river-test--with-session state
+      (agent-river-fold state '(:kind "act" :cwd "/w" :file "a.el"))
+      ;; Cool past the shading, which runs out at 1, but not past the floor.
+      (agent-river-test--cool state "a.el" 120)
+      (should-not (agent-river--heat-visible-p 'session))
+      (should (agent-river--map-cooling-p))
+      ;; Past the floor as well: now there is genuinely nothing left to draw.
+      (agent-river-test--cool state "a.el" 600)
+      (should-not (agent-river--map-cooling-p)))))
+
+(ert-deftest agent-river-test-a-file-that-comes-back-stops-being-struck ()
+  ;; `:missing' is derived from the listing on every draw and the shading is
+  ;; torn down and rebuilt with it, so the mark follows the disk in both
+  ;; directions rather than being remembered anywhere.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "scratch.el"))
+        (should (plist-get (car (agent-river--map-entries root)) :missing))
+        (write-region "" nil (expand-file-name "scratch.el" root))
+        (should-not (plist-get (car (agent-river--map-entries root)) :missing))
+        (delete-file (expand-file-name "scratch.el" root))
+        (should (plist-get (car (agent-river--map-entries root)) :missing))))))
+
 (ert-deftest agent-river-test-a-gone-file-is-struck-through ()
   ;; Grey is the map's word for several things at once -- stale, cold,
   ;; elided.  "This file is not there" is worth saying exactly, and once the

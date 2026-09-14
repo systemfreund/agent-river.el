@@ -254,6 +254,16 @@ What a consumer must respect:
   `kill-buffer-hook` that is also the `agent-river-retire` property). What does
   not change either way is that there is exactly one gesture and it is
   reversible.
+- **The timer stops when nothing is left to *change*, which is not the same
+  as nothing being shaded** (`agent-river--map-cooling-p`). Two thresholds
+  fade at different depths: the shading runs out at the bottom of
+  `agent-river-heat-levels`, `agent-river-map-party-floor` sits below it, and
+  asking only the first retired the map's timer while names were still on
+  screen waiting to cross the second — so the map froze mid-fade. A name held
+  by the `:current` exemption is not cooling and must not keep the timer
+  alive either; it never crosses anything. What no timer here can see is the
+  disk: a file that comes back while no agent is working redraws on the next
+  event or on `g`, the way a dired buffer does.
 - **Redraw on a timer, not per event, once the view is bigger than a line.**
   The runner fires on every tool call. Rebuilding a whole listing that often
   moves point under whoever is reading it, thousands of times a task. The
