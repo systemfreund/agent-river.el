@@ -4944,7 +4944,7 @@ to say which of the two any given colour means.  This is also the thing
 most worth being able to scan a whole listing for."
   :type 'string)
 
-(defcustom agent-river-map-here-marker "▸"
+(defcustom agent-river-map-here-marker "⏿"
   "Marker for the entry holding an agent's most recent touch.
 Drawn only while that agent still exists: the marker is the map's one
 present-tense reading, and over a session that has ended it points at
@@ -4966,10 +4966,12 @@ fact about the line and is scanned the same way."
   "Marker for a node whose contributed rows are folded away.
 
 Deliberately not a sideways triangle, which is what a folded outline
-usually gets: `agent-river-map-here-marker' is already one, in the same
-gutter, and two triangles a column apart meaning unrelated things is how
-a reader stops trusting either.  An ellipsis says what a closed node has
-to say anyway -- there is more here that you are not being shown."
+usually gets: the gutter is three columns of unrelated facts, each read
+straight down the listing, and a shape that only means something once it
+has been held against `agent-river-map-open-marker' a column over is one
+a reader has to decode rather than scan.  An ellipsis says what a closed
+node has to say on its own -- there is more here that you are not being
+shown."
   :type 'string)
 
 (defcustom agent-river-map-vc t

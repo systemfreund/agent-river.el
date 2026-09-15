@@ -688,7 +688,7 @@ Four things about the map are load-bearing:
   applied in `agent-river--map-newest`). Both of the readings above are
   present tense, so for a session that has ended they claim a position on
   behalf of nobody — and the exemption made that permanent: an agent-shell
-  buffer killed, and its name and `▸` stayed pinned to one file for as long as
+  buffer killed, and its name and `⏿` stayed pinned to one file for as long as
   the registry held the state, since nothing decays past a floor it is exempt
   from. Left out of the `newest` hash, a gone party loses the marker at once
   and the name fades at the floor like any other. Three things to keep:
