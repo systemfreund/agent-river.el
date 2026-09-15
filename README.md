@@ -108,12 +108,12 @@ thing. Shown oldest-first here for reading; the buffer itself is newest-first.
 
 ```
 16:22:48 ◆ add a queue-position render field       ← task from the user
-16:22:59 ▸ Bash  Syntax-check the updated hook (✓  12ms)
+16:22:59 ▸ Bash  Syntax-check the updated hook ✓  12ms
                                                ↑ appended when the call returned;
                                                  the timestamp is when it started
 16:23:03 ◇ The mode sets truncate-lines, so a…     ← the agent's own reasoning
-16:23:03 ▸ Edit  supersonic-mpv.el (✗  2.1s)       ← interrupted, not a success
-16:23:09 ▸ Bash  Run the test suite (✗  340ms)     ← errored
+16:23:03 ▸ Edit  supersonic-mpv.el ✗  2.1s         ← interrupted, not a success
+16:23:09 ▸ Bash  Run the test suite ✗  340ms       ← errored
 16:23:12 ■ waiting for you                         ← idle
 ```
 
@@ -148,7 +148,7 @@ first**:
 * supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
 
 19:07:03 super<2> ▸ Edit  supersonic-mpv.el
-19:06:58 superson ▸ Read  Cask (✓  2ms)
+19:06:58 superson ▸ Read  Cask ✓  2ms
 19:06:55 superson ◆ fix the mpv bridge
 ```
 
@@ -395,7 +395,7 @@ doubles as the label, which reads better than a directory name:
 
 ```
 18:25:38 Explore  ▸ Read  Makefile
-18:25:36 superson ▸ Agent  Verify subagent tree folding (✓  7.8s)
+18:25:36 superson ▸ Agent  Verify subagent tree folding ✓  7.8s
 ```
 
 The parent still sees what it set in motion, aggregated on demand from the
