@@ -58,6 +58,38 @@ Hook wiring lives in a project `.claude/settings.json` or in the user's
 picked up by the running session's settings watcher — observed happening without
 a restart — but restart Claude Code if the hooks stay silent.
 
+## Asking the state things, from inside a session
+
+A session being observed can query its own fold through the `emacs` MCP
+server, as plain elisp. No tool is exposed for this and nothing advertises
+it, which is the only reason this section exists — see the README section of
+the same name for what the values mean.
+
+```elisp
+(agent-river-touching "agent-river.el")  ; which sessions have reached this file
+(agent-river-report)                     ; own state, as a plist
+(agent-river-set-intent "chasing why the spinner sticks after a kill")
+```
+
+`agent-river-touching` is the one that carries something you do not already
+have. Another session, in another worktree, editing the file you are about to
+rewrite leaves no trace in your own transcript; the registry is the only place
+that fact exists. Worth asking before a wide edit, and the answer is advisory
+— there is no lock behind it, and two agents backing off is as likely as one.
+
+The other two address a *session*, and cannot reliably tell which one you
+are. `agent-river-report` only defaults when the registry holds exactly one
+session, and `agent-river-set-intent` defaults to whichever session acted most
+recently — with several running, quite possibly not you, and the
+misattribution is silent. Pass the `session_id` from your own hook payload
+when you have it.
+
+`set-intent` is a claim rather than a measurement, and narrating on a schedule
+is what breaks it: `agent-river--intent-stale-p` can contradict the claim only
+because an agent stops narrating at precisely the moment it loses the thread.
+An intent refreshed out of habit never goes stale and stops saying anything.
+State one when the sub-goal actually changes, not per tool call.
+
 ## Architecture
 
 The data path, one hook event end to end:
