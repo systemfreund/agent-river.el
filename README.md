@@ -192,6 +192,65 @@ Newest-first means there is nothing to tail: the block and the latest event
 are both at the head of the buffer and never move, so neither can scroll out
 of view as the log grows. Trimming takes the oldest lines off the bottom.
 
+### Grouped by where the sessions are
+
+Five sessions is a list. Five sessions across three checkouts is a list that
+has to be read before it can be used, because the one thing that decides
+whether two of those lines are about the same work — where each session is —
+lived only in the label, and a label is a basename that says nothing about two
+checkouts of one project. So the block groups:
+
+```
+* ~/src/agent-river · 2 sessions
+** agent-river    · editing · 4m12s · 23 steps · agent-river.el (6 touches)
+** agent-river<2> · waiting · 2 steps
+* ~/src/agent-river/.claude/worktrees/customizable-act-glyph · 1 session
+** agent-river<3> · exploring · 9m32s · 17 steps
+```
+
+A heading appears only once there is more than one place to be. With every
+session in the same directory the heading would be a constant at the top of
+the block, which is the same noise the session column in the log declines to
+draw while only one agent is live — and the same trade the map makes when it
+lists one root with no section heading over it. `RET` on a heading opens the
+place: for a directory that is dired, already shaded if `agent-river-heat-mode`
+is on. `M-n` stops on headings as well as on sessions, the way it stops on the
+map's root sections.
+
+**The working directory is the default anchor, not the only one.** It is what
+the hooks happen to report, not something a session fundamentally has: this
+already folds sessions that touch no file, and a session with no disk at all
+is not thereby unplaceable — it is placed by something the fold does not know.
+So `agent-river-panel-place-functions` is a list of questions rather than a
+setting. Each is handed a state and answers either nil ("not mine") or where
+that session belongs:
+
+```elisp
+(add-to-list 'agent-river-panel-place-functions
+             (lambda (state)
+               (when-let* ((team (agent-river-state-label state)))
+                 (list :key (concat "team:" team)
+                       :name (concat "team " team)
+                       ;; Optional: what RET on the heading means.
+                       :visit (lambda () (browse-url "https://…"))))))
+```
+
+The first function to answer wins, so the list reads from the most specific
+question to the most general. A session nothing places is drawn as it always
+was, after the groups and with no heading over it: a heading naming the
+absence of a place would be the one line in the block that names nothing.
+
+Worktrees are deliberately *not* merged here, though the map merges them. The
+map is asking "is this the same file", and two checkouts of one repository
+answer yes; the block is asking "where is this agent working", and two
+worktrees are two branches of work — which is why the map, having merged them,
+has to put the tree back onto the party name.
+
+A place function is asked on every redraw, so it answers from what it already
+has, and one that throws is retired on the spot with a message — the same
+bargain an observer and a map contributor make, for the same reason: a block
+that died with it would be the worse outcome.
+
 ### The block keeps its own time
 
 Elapsed times are only correct at the moment the block is drawn, so drawing

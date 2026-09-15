@@ -497,6 +497,67 @@ follows is what is load-bearing.
   the loop.** What differs between these buffers is only where the text on a
   line starts.
 
+### Where a session belongs — the block, grouped
+
+The block groups its session lines under a heading per *place*
+(`agent-river--panel-places`), and the place is **asked for rather than read
+off the state** (`agent-river-panel-place-functions`, default
+`agent-river--place-cwd`). That is the load-bearing half. A working directory
+is what the hooks happen to report, not what a session fundamentally has:
+this already folds sessions that touch no file, and one with no disk at all
+is not unplaceable — it is placed by something the fold does not know, which
+is what the extension point is for. Each function answers nil ("not mine") or
+a plist of `:key` (identity, compared with `equal`), `:name` (what the heading
+shows) and an optional `:visit`; the first answer wins, and an answer without
+a `:key` is not one, or every session it described would sit in a place of its
+own.
+
+- **A heading appears only once there is more than one place to be.** With
+  every session in the same one — or with nothing able to place any of them —
+  the heading is a constant, and a constant is the noise
+  `agent-river--label-column` already declines to draw. It is also what the
+  map does one grain up: one root is listed with no section heading, because
+  the header names it already. The unplaced sessions count as a place to be
+  for this purpose, or with a heading over the placed ones and none over them
+  they would read as belonging to the group above.
+- **What nothing placed is drawn loose, never under "nowhere".** Those lines
+  stay where they always were, after the groups and at level 1. A heading
+  naming the absence of a place would be the one line in the block that names
+  nothing, and it would read as a group, which is the opposite of what it says.
+- **Worktrees are deliberately not merged here**, though
+  `agent-river--map-groups` merges them. That question is "is this the same
+  file" and two checkouts answer yes; this one is "where is this agent
+  working", and two worktrees are two branches of work — which is why the map,
+  having merged them, has to put the tree back onto the party name.
+- **A place function is retired on the first error**, like an observer and
+  like a map contributor, and says so with `message` rather than a log line:
+  this runs inside the block draw, and logging redraws the block. It is also
+  asked on every redraw, so it answers from what it has — the contributor
+  protocol's `:read`, never its `:refresh`.
+- **A heading is structure and a level, so everything under it moves down.**
+  `agent-river--star` and `agent-river--panel-details` take the level; the
+  spinner mark goes on the *last* star, the one next to the name, since the
+  leading ones are the line's depth and animating those would be an animation
+  about the structure. The buffer text stays literal stars either way.
+- **The heading is found again by what it names**, `(place . KEY)` under
+  `agent-river-block` — tagged, because a place key and a session id are both
+  strings and `agent-river--block-goto` compares them with `equal`.
+- **`:visit` is the package's second gesture that acts rather than watches**,
+  after `agent-river--respond` relays an answer. Same bargain: one gesture,
+  reversible, and what it *means* is decided by whoever knows — the session
+  for an approval, the place for a heading. A directory opens dired (already
+  shaded, where `agent-river-heat-mode` is on). The keymap goes on the line
+  whether or not the place said where it is, so RET explains itself instead
+  of falling through to `agent-river-visit-session` and reporting that a
+  heading is not a session; what is withheld without a `:visit` is the
+  `mouse-face` and the echo, because those are an offer to act and a line that
+  makes one has to keep it.
+- **The export follows the block's order and not its headings**
+  (`agent-river-markdown` flattens the same cells). The claim that it is a
+  snapshot of the block rather than a second opinion has to stay true; but a
+  document read in an issue is a list of sessions, and a group heading there
+  is structure nobody can fold.
+
 ### One set of motions, every buffer
 
 The HUD, the map and the approval queue take the same keys for the same three
@@ -505,7 +566,11 @@ nothing: `n`/`p` (plus `SPC`/`DEL` and the remapped arrows) walk every line
 worth stopping on, `M-n`/`M-p` walk the coarse structure, `>`/`<` walk the
 lines that want attention. A session line is a map entry is a queue heading; a
 detail heading is a map file line is an answer row; a log line has no analogue
-and rides the fine grain. `>` is `agent-river-notable-kinds` in the HUD, "some
+and rides the fine grain. A place heading is a map *section* heading, and it
+rides both the fine grain and the coarse one for the reason that one does:
+the coarse motion is about the block's own structure, not about sessions in
+particular, and a heading reachable only by walking every detail line under
+the session above it is a heading nobody navigates to. `>` is `agent-river-notable-kinds` in the HUD, "some
 agent is under this" on the map, and in the queue it coincides with `M-n` —
 bound all the same, because a reader arriving from either of the others
 presses it expecting the next thing that wants them, and getting it is the
