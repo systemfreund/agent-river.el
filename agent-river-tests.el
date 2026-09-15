@@ -2755,7 +2755,7 @@ first line from a survey."
       ;; The timestamp is the one the call started at, not the one it ended
       ;; at: the line answers "when did this begin", and the duration beside
       ;; it already says how long it then took.
-      (should (string-match-p "Bash  Run tests (✓  250ms)\\'" (car lines))))))
+      (should (string-match-p "Bash  Run tests ✓  250ms\\'" (car lines))))))
 
 (ert-deftest agent-river-test-a-failure-still-ends-its-own-line ()
   (agent-river-test--with-calls
@@ -2767,7 +2767,7 @@ first line from a survey."
                            :call "s1\0t1" :outcome "✗  13ms"))
     (let ((lines (agent-river-test--log-lines)))
       (should (= (length lines) 1))
-      (should (string-match-p "(✗  13ms)\\'" (car lines))))))
+      (should (string-match-p "✗  13ms\\'" (car lines))))))
 
 (ert-deftest agent-river-test-an-outcome-with-no-line-left-takes-one ()
   (agent-river-test--with-calls
@@ -2810,7 +2810,7 @@ first line from a survey."
       (should (= (length lines) 2))
       ;; Newest first, so the still-open second call is above the first.
       (should (string-match-p "Bash  second\\'" (nth 0 lines)))
-      (should (string-match-p "Bash  first (✓  9ms)\\'" (nth 1 lines))))))
+      (should (string-match-p "Bash  first ✓  9ms\\'" (nth 1 lines))))))
 
 (ert-deftest agent-river-test-one-call-is-answered-once ()
   (agent-river-test--with-calls
@@ -2825,7 +2825,7 @@ first line from a survey."
                              :call "s1\0t1" :outcome "✓  250ms")))
     (let ((lines (agent-river-test--log-lines)))
       (should (= (length lines) 2))
-      (should (string-match-p "Run tests (✓  250ms)\\'" (nth 1 lines))))))
+      (should (string-match-p "Run tests ✓  250ms\\'" (nth 1 lines))))))
 
 (ert-deftest agent-river-test-the-call-id-carries-its-session ()
   ;; `tool_use_id' is unique everywhere on Claude Code and only within its

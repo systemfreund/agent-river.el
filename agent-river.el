@@ -3087,7 +3087,7 @@ second verdict to a line that already carries its own."
                      (start (line-beginning-position))
                      (end (line-end-position)))
                 (goto-char end)
-                (insert (apply #'propertize (concat " (" outcome ")") props))
+                (insert (apply #'propertize (concat " " outcome) props))
                 (put-text-property start (line-end-position)
                                    'agent-river-call nil)
                 t))))))))
