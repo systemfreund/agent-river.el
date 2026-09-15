@@ -3931,6 +3931,27 @@ is how a test asks what the view looks like once the work has moved on."
     (agent-river--map-rows "/other" '((:path "/other/a.el")))
     (should (= calls 2))))
 
+(ert-deftest agent-river-test-a-refresh-by-hand-asks-again ()
+  ;; `g' drops the cached answer, so the column is empty until a new one
+  ;; lands -- and the throttle used to survive it, declining to read for as
+  ;; long as its TTL had left.  Nothing else asks in the meantime: the
+  ;; redraw timer retires while no agent is working, so the numbers came
+  ;; back seconds later or not at all.
+  (let* ((calls 0)
+         (agent-river--map-refreshed (make-hash-table :test 'equal))
+         (agent-river-map-contributors
+          (list (agent-river-test--contributor
+                 'slow nil
+                 :ttl 60
+                 :refresh (lambda (&rest _) (setq calls (1+ calls)))))))
+    (agent-river--map-rows "/repo" '((:path "/repo/a.el")))
+    (should (= calls 1))
+    ;; No map buffer, so the draw is a no-op and only the clearing is under
+    ;; test -- which is the half that was missing.
+    (agent-river-map-refresh)
+    (agent-river--map-rows "/repo" '((:path "/repo/a.el")))
+    (should (= calls 2))))
+
 (ert-deftest agent-river-test-a-contributed-row-cannot-restructure-the-map ()
   ;; The map is Markdown only because every token in it is ours, and a
   ;; contributor's text is the first text here that is not.  A row

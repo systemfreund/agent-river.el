@@ -5695,9 +5695,19 @@ The weights are recomputed on every draw anyway; the diffstat is cached
 for `agent-river-map-vc-ttl' seconds, so dropping it here is what makes
 this the authoritative reading.  Someone who asks for a refresh by hand
 is asking about now.  The read is still asynchronous, so the numbers land
-on the redraw after this one."
+on the draw its answer asks for, about sixty milliseconds later.
+
+Dropping the answer is only half of it: `agent-river--map-refreshed'
+decides whether a contributor is even *offered* the root, and a throttle
+left standing meant `g' threw the column away and then refused to read it
+back.  What the eye saw was a refresh that took seconds and sometimes did
+not finish at all -- the offer was declined until the throttle aged out,
+and the draw that would have made it again comes from the redraw timer,
+which retires while nothing is happening.  Asking again is what a refresh
+by hand means, so both tables go."
   (interactive)
   (agent-river--vc-forget)
+  (clrhash agent-river--map-refreshed)
   (agent-river--map-draw))
 
 (defun agent-river-map-toggle ()
