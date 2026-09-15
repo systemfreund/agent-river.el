@@ -361,6 +361,211 @@
                                     (substring-no-properties
                                      (agent-river--panel-block))))))))
 
+;;; Places -- the block, grouped
+
+(defmacro agent-river-test--with-places (&rest body)
+  "Run BODY over a fresh registry with the default place functions."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-auto-display nil)
+         (agent-river-panel-place-functions (list #'agent-river--place-cwd)))
+     ,@body))
+
+(defun agent-river-test--block-lines ()
+  "Return the state block as plain lines."
+  (split-string (substring-no-properties (agent-river--panel-block)) "\n" t))
+
+(ert-deftest agent-river-test-one-place-draws-no-heading ()
+  (agent-river-test--with-places
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    (agent-river-observe '(:kind "act" :session "s2" :label "repo"
+                                 :cwd "/repo" :detail "Read"))
+    ;; Both sessions are in the same place, so naming it would be a constant
+    ;; at the top of the block -- the noise `agent-river--label-column'
+    ;; declines to draw for the same reason, and the trade the map makes when
+    ;; it lists one root without a section heading over it.
+    (let ((lines (agent-river-test--block-lines)))
+      (should (= (length lines) 2))
+      (should (seq-every-p (lambda (l) (string-prefix-p "* repo" l)) lines)))))
+
+(ert-deftest agent-river-test-sessions-group-under-the-place-they-share ()
+  (agent-river-test--with-places
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    (agent-river-observe '(:kind "act" :session "s2" :label "repo"
+                                 :cwd "/repo" :detail "Read"))
+    (agent-river-observe '(:kind "act" :session "s3" :label "other"
+                                 :cwd "/other" :detail "Read"))
+    (let ((lines (agent-river-test--block-lines)))
+      ;; Places by name, sessions by label within one, and the heading says
+      ;; how many are under it -- what moves, which is the only thing a line
+      ;; redrawn every second and read once earns.
+      (should (equal (nth 0 lines) "* /other · 1 session"))
+      (should (string-prefix-p "** other" (nth 1 lines)))
+      (should (equal (nth 2 lines) "* /repo · 2 sessions"))
+      (should (string-prefix-p "** repo" (nth 3 lines)))
+      (should (string-prefix-p "** repo<2>" (nth 4 lines)))
+      (should (= (length lines) 5)))))
+
+(ert-deftest agent-river-test-a-session-nothing-places-keeps-its-line ()
+  (agent-river-test--with-places
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    ;; No cwd was ever reported for this one, which is a fact about the
+    ;; session and not a gap: it is drawn where it always was, after the
+    ;; groups and with no heading over it, because a heading naming the
+    ;; absence of a place would be the one line in the block naming nothing.
+    (agent-river-observe '(:kind "act" :session "s2" :label "nowhere"
+                                 :detail "Read"))
+    (let ((lines (agent-river-test--block-lines)))
+      (should (= (length lines) 3))
+      (should (equal (nth 0 lines) "* /repo · 1 session"))
+      (should (string-prefix-p "** repo" (nth 1 lines)))
+      (should (string-prefix-p "* nowhere" (nth 2 lines))))))
+
+(ert-deftest agent-river-test-a-place-need-not-be-a-directory ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        ;; What a session without file access is placed by is not something
+        ;; the fold knows -- which is the whole reason this is a list of
+        ;; questions rather than a reading of the cwd.
+        (agent-river-panel-place-functions
+         (list (lambda (state)
+                 (when (equal (agent-river-state-label state) "nowhere")
+                   (list :key "acp:remote" :name "remote")))
+               #'agent-river--place-cwd)))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    (agent-river-observe '(:kind "act" :session "s2" :label "nowhere"
+                                 :detail "Read"))
+    (let ((lines (agent-river-test--block-lines)))
+      (should (equal (nth 0 lines) "* /repo · 1 session"))
+      (should (equal (nth 2 lines) "* remote · 1 session"))
+      (should (string-prefix-p "** nowhere" (nth 3 lines))))))
+
+(ert-deftest agent-river-test-the-first-place-function-to-answer-wins ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        (agent-river-panel-place-functions
+         (list (lambda (_state) nil)
+               (lambda (state)
+                 (list :key (concat "team:" (agent-river-state-label state))
+                       :name (concat "team " (agent-river-state-label state))))
+               (lambda (_state) (list :key "never" :name "never")))))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    (agent-river-observe '(:kind "act" :session "s2" :label "other"
+                                 :cwd "/other" :detail "Read"))
+    ;; Asked most specific first, and a nil answer is "not mine" rather than
+    ;; "unplaceable" -- so the second function places both sessions, their
+    ;; directories do not, and the third is never reached.
+    (let ((lines (agent-river-test--block-lines)))
+      (should (= (length lines) 4))
+      (should (equal (nth 0 lines) "* team other · 1 session"))
+      (should (equal (nth 2 lines) "* team repo · 1 session"))
+      (should-not (seq-find (lambda (l) (string-match-p "never" l)) lines)))))
+
+(ert-deftest agent-river-test-an-answer-without-a-key-places-nothing ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        (agent-river-panel-place-functions
+         (list (lambda (_state) (list :name "nameless")))))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    ;; The key is what two sessions are compared on, so a plist without one
+    ;; would put every session it described in a place of its own.
+    (should-not (agent-river--place (gethash "s1" agent-river-registry)))
+    (should (equal (agent-river-test--block-lines) (list "* repo · 1 step")))))
+
+(ert-deftest agent-river-test-a-broken-place-function-is-retired ()
+  (let* ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-auto-display nil)
+         (broken (lambda (_state) (error "No")))
+         (agent-river-panel-place-functions (list broken #'agent-river--place-cwd)))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    ;; This runs on every redraw, so a broken one would break thousands of
+    ;; times -- and a block that died with it is the worse outcome.  The
+    ;; ones behind it go on answering.
+    (should (agent-river-test--block-lines))
+    (should-not (memq broken agent-river-panel-place-functions))
+    (should (memq #'agent-river--place-cwd agent-river-panel-place-functions))))
+
+(ert-deftest agent-river-test-a-place-heading-is-found-again-by-name ()
+  (agent-river-test--with-places
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    (agent-river-observe '(:kind "act" :session "s2" :label "other"
+                                 :cwd "/other" :detail "Read"))
+    (with-current-buffer (agent-river--buffer)
+      (goto-char (point-min))
+      ;; The block is torn down and rebuilt every second, so a place in it
+      ;; has to be named rather than remembered as a position -- and a place
+      ;; key and a session id are both strings, which is why the heading's
+      ;; name is tagged.
+      (should (equal (agent-river--block-here) '(place . "/other")))
+      (agent-river--redraw-block)
+      (should (equal (agent-river--block-here) '(place . "/other"))))))
+
+(ert-deftest agent-river-test-a-place-that-names-nowhere-says-so ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        (agent-river-panel-place-functions
+         (list (lambda (state)
+                 (list :key (concat "acp:" (agent-river-state-label state))
+                       :name (agent-river-state-label state))))))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    (agent-river-observe '(:kind "act" :session "s2" :label "other"
+                                 :cwd "/other" :detail "Read"))
+    (with-current-buffer (agent-river--buffer)
+      (goto-char (point-min))
+      ;; RET is bound on the heading whether or not the place said where it
+      ;; is, so it explains itself instead of falling through to
+      ;; `agent-river-visit-session' and reporting that a heading is not a
+      ;; session.  What is withheld is the offer to act.
+      (should (get-text-property (point) 'agent-river-place))
+      (should-not (get-text-property (point) 'mouse-face))
+      (should-error (agent-river-visit-place) :type 'user-error))))
+
+(ert-deftest agent-river-test-a-directory-is-somewhere-to-go ()
+  (agent-river-test--with-places
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    ;; The place decides what opening it means; the command only asks.
+    (let ((place (agent-river--place (gethash "s1" agent-river-registry))))
+      (should (equal (plist-get place :key) "/repo"))
+      (should (functionp (plist-get place :visit))))))
+
+(ert-deftest agent-river-test-a-grouped-session-spins-next-to-its-name ()
+  (agent-river-test--with-places
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    (let* ((state (gethash "s1" agent-river-registry))
+           (stars (agent-river--star state 2)))
+      ;; The buffer text stays literal stars, so the line goes on being an
+      ;; outline heading while it spins.  The frame goes on the star next to
+      ;; the name: the leading one is the line's depth, and animating that
+      ;; would be an animation about the structure.
+      (should (equal (substring-no-properties stars) "** "))
+      (should-not (get-text-property 0 'agent-river-spinner stars))
+      (should (get-text-property 1 'agent-river-spinner stars)))))
+
+(ert-deftest agent-river-test-the-export-takes-the-blocks-order ()
+  (agent-river-test--with-places
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :cwd "/repo" :detail "Edit"))
+    (agent-river-observe '(:kind "act" :session "s2" :label "other"
+                                 :cwd "/other" :detail "Read"))
+    (let ((markdown (agent-river-markdown)))
+      ;; A snapshot of the block, so the order is the block's -- place by
+      ;; place.  The headings are not: a document read in an issue is a list
+      ;; of sessions, and a group heading there is structure nobody can fold.
+      (should (< (string-match "other" markdown)
+                 (string-match "repo" markdown)))
+      (should-not (string-match-p "^## /other" markdown)))))
+
 (ert-deftest agent-river-test-hottest-needs-more-than-one-touch ()
   (agent-river-test--with-session state
     (agent-river-fold state '(:kind "act" :file "a.el"))
@@ -2821,9 +3026,12 @@ first line from a survey."
 (ert-deftest agent-river-test-hud-motion-walks-every-marked-line ()
   (agent-river-test--with-hud
     (let ((lines (agent-river-test--hud-lines #'agent-river--entry-line-p)))
-      ;; Sessions, their details and the log, in buffer order.
-      (should (seq-find (lambda (l) (string-prefix-p "* alpha" l)) lines))
-      (should (seq-find (lambda (l) (string-prefix-p "** files:" l)) lines))
+      ;; Places, sessions, their details and the log, in buffer order.  The
+      ;; two sessions are in two directories, so the block is grouped and
+      ;; everything under a heading has moved one level down with it.
+      (should (seq-find (lambda (l) (string-prefix-p "* /repo" l)) lines))
+      (should (seq-find (lambda (l) (string-prefix-p "** alpha" l)) lines))
+      (should (seq-find (lambda (l) (string-prefix-p "*** files:" l)) lines))
       (should (seq-find (lambda (l) (string-match-p "Edit a\\.el" l)) lines))
       ;; Log lines start with timestamps and are all fair game.
       )))
@@ -2831,12 +3039,17 @@ first line from a survey."
 (ert-deftest agent-river-test-hud-session-motion-is-the-selection ()
   (agent-river-test--with-hud
     (let ((lines (agent-river-test--hud-lines #'agent-river--session-line-p)))
-      ;; Only the session lines: this is the coarse grain, the one that
-      ;; changes which session RET would visit, and it has to reach across
-      ;; the whole log rather than stopping where the block does.
-      (should (= (length lines) 2))
-      (should (string-prefix-p "* alpha" (nth 0 lines)))
-      (should (string-prefix-p "* beta" (nth 1 lines))))))
+      ;; The block's own structure and nothing else -- the details under a
+      ;; session are the fine grain's, and this has to reach across the whole
+      ;; log rather than stopping where the block does.  A place heading is
+      ;; one of those entries, the way a root section is on the map: alone
+      ;; among the details of the session above it, it would otherwise be
+      ;; reachable only by walking every line of it.
+      (should (= (length lines) 4))
+      (should (string-prefix-p "* /other" (nth 0 lines)))
+      (should (string-prefix-p "** beta" (nth 1 lines)))
+      (should (string-prefix-p "* /repo" (nth 2 lines)))
+      (should (string-prefix-p "** alpha" (nth 3 lines))))))
 
 (ert-deftest agent-river-test-hud-notable-motion-finds-the-landmarks ()
   (agent-river-test--with-hud
@@ -2871,7 +3084,8 @@ first line from a survey."
     ;; visitable -- and the motion still has to stop on both.  Tying the two
     ;; together made `n' skip exactly the sessions RET could not open, which
     ;; is the case where looking is all there is.
-    (should (= (length (agent-river-test--hud-lines #'agent-river--session-line-p)) 2))
+    (let ((lines (agent-river-test--hud-lines #'agent-river--session-line-p)))
+      (should (= 2 (seq-count (lambda (l) (string-prefix-p "** " l)) lines))))
     (goto-char (point-min))
     (agent-river--scan 1 #'agent-river--session-line-p)
     (should-not (get-text-property (line-beginning-position) 'agent-river-session))))
@@ -2907,10 +3121,12 @@ first line from a survey."
     ;; inside it collapses to point-min when it goes -- so `save-excursion'
     ;; alone sent whoever had navigated into the block back to the top once
     ;; a second, for as long as an agent was working.
-    (agent-river-next-line 1)
+    ;; Onto a detail line, which is the finer of the two cases: it shares
+    ;; its session's id and is told apart by an index.
+    (agent-river-next-line 2)
     (let ((line (buffer-substring-no-properties (line-beginning-position)
                                                 (line-end-position))))
-      (should (string-prefix-p "** files:" line))
+      (should (string-prefix-p "*** files:" line))
       (agent-river--redraw-block)
       (should (equal (buffer-substring-no-properties (line-beginning-position)
                                                      (line-end-position))

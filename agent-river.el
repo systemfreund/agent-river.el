@@ -263,6 +263,15 @@ the line.  Distinct from `agent-river-idle', deliberately -- an agent
 that has finished its turn is waiting for whatever you want next, and an
 agent holding a permission request is waiting for one particular word.")
 
+(defface agent-river-place '((t :inherit font-lock-type-face))
+  "Face for the place a group of sessions shares.
+
+Its own face rather than `agent-river-session' reused: a place and a
+session are two identities, and one colour for both would leave a reader
+unable to say which of them a line was naming.  Inherited from the
+theme's, like every face here that does not need a shade of its own, so
+it means whatever the theme already means by a type name.")
+
 (defface agent-river-gone '((t :inherit agent-river-stale :strike-through t))
   "Face for a name the state knows and the disk does not.
 
@@ -3126,7 +3135,13 @@ two cannot drift."
 
 Every live root session, in the order and by the rule the state block
 shows them, so this is a snapshot of that block and not a second opinion
-about which sessions count.  ID narrows it to one."
+about which sessions count.  ID narrows it to one.
+
+The order is the block's own, place by place, taken from
+`agent-river--panel-places' rather than sorted again here -- but the
+headings are not: a document read in an issue is a list of sessions, and
+a group heading in it would be structure the reader cannot fold.  Each
+session's own section names it anyway."
   (let (states)
     (maphash (lambda (key state)
                (when (and (null (agent-river-state-parent state))
@@ -3135,9 +3150,8 @@ about which sessions count.  ID narrows it to one."
                  (push state states)))
              agent-river-registry)
     (when states
-      (setq states (sort states (lambda (a b)
-                                  (string< (or (agent-river-state-label a) "")
-                                           (or (agent-river-state-label b) "")))))
+      (setq states (apply #'append
+                          (mapcar #'cdr (agent-river--panel-places states))))
       (concat (format "## agent-river — %d session%s, %s\n\n"
                       (length states) (if (= (length states) 1) "" "s")
                       (format-time-string "%Y-%m-%d %H:%M"))
@@ -3213,19 +3227,24 @@ SCOPE is `session' for the whole session, nil for the current task."
       (maphash (lambda (name n) (push (cons name n) pairs)) totals)
       (sort pairs (lambda (a b) (> (cdr a) (cdr b)))))))
 
-(defun agent-river--panel-details (state)
+(defun agent-river--panel-details (state &optional level)
   "Return STATE's detail headings, one outline level below its block line.
 
 The header condenses the numbers -- one artifact, and only sometimes, as a
 parenthetical.  The `files' heading unfolds the same measurement at a finer
 grain, never a second tally, so an onlooker can see which files the step
 count is made of.  Most-touched first, so the header's parenthetical is
-simply the head of this list.  Empty while nothing has been touched."
+simply the head of this list.  Empty while nothing has been touched.
+
+LEVEL is how deep the heading sits, and defaults to 2: a session line is
+level 1 until a place heading is drawn over it, and then everything under
+it moves down with it."
   (let ((files (agent-river--artifact-list state)))
     (when files
       (let* ((limit agent-river-panel-detail-files)
              (shown (seq-take files limit)))
-        (list (format "** files: %s%s"
+        (list (format "%s files: %s%s"
+                      (make-string (or level 2) ?*)
                       (mapconcat (lambda (pair)
                                    (format "%s %d" (car pair) (cdr pair)))
                                  shown " · ")
@@ -3258,30 +3277,41 @@ Nil when the animation is off, which is what leaves the bare star."
       (nth (mod (floor (float-time (time-since since)) interval) (length frames))
            frames))))
 
-(defun agent-river--star (state)
-  "Return the outline marker opening STATE's block line.
+(defun agent-river--star (state &optional level)
+  "Return the outline marker opening STATE's block line, LEVEL deep.
 
-Always the literal `* ' -- `outline-regexp' is matched against the buffer
-text, so the animation is a `display' property over the star rather than
-a different character in its place.  The star is marked with
+Always literal stars -- `outline-regexp' is matched against the buffer
+text, so the animation is a `display' property over one of them rather
+than a different character in its place.  The star is marked with
 `agent-river-spinner' where it is built, and the mark is that session's
 phase: the frame timer finds the lines that are spinning and reads what
 each should be showing off the mark itself, without re-deriving which
-sessions are working or matching a regexp over the rendered text."
-  (let* ((since (and (agent-river--state-working-p state)
+sessions are working or matching a regexp over the rendered text.
+
+The mark goes on the *last* star, which is the one next to the name: the
+leading stars are the line's depth under a place heading and say where it
+sits, and a frame drawn over one of those would animate the structure
+rather than the session."
+  (let* ((level (or level 1))
+         (since (and (agent-river--state-working-p state)
                      (agent-river--spinning-since state)))
          (glyph (and since (agent-river--spinner-glyph since))))
-    (if glyph
-        (concat (propertize "*" 'agent-river-spinner since 'display glyph) " ")
-      "* ")))
+    (concat (make-string (1- level) ?*)
+            (if glyph
+                (propertize "*" 'agent-river-spinner since 'display glyph)
+              "*")
+            " ")))
 
-(defun agent-river--panel (state)
-  "Return the header-line summary of STATE.
+(defun agent-river--panel (state &optional level)
+  "Return the header-line summary of STATE, as an outline heading LEVEL deep.
 
 This is the view of the *state*, as opposed to the buffer below it, which
 is the view of the event stream.  A scrolling log shows activity; only
 this line answers what is being worked on right now, which is the
-question an onlooker actually has."
+question an onlooker actually has.
+
+LEVEL defaults to 1, which is where a session line sits until the block
+draws a place heading over it."
   (let* ((kids (agent-river-children (agent-river-state-id state)))
          (running (seq-count #'agent-river--active-p kids))
          (task (agent-river-state-task state))
@@ -3362,7 +3392,7 @@ question an onlooker actually has."
     ;; names for rows.
     (let ((header (propertize
                    (agent-river--make-visitable
-                    (concat (agent-river--star state)
+                    (concat (agent-river--star state level)
                             (mapconcat #'identity parts " · "))
                     (agent-river-state-id state))
                    'agent-river-line 'session
@@ -3374,7 +3404,8 @@ question an onlooker actually has."
                                        'agent-river-line 'detail
                                        'agent-river-block
                                        (cons (agent-river-state-id state) n)))
-                         (agent-river--panel-details state)))))
+                         (agent-river--panel-details
+                          state (1+ (or level 1)))))))
       (if details
           (concat header "\n" (mapconcat #'identity details "\n"))
         header))))
@@ -3407,8 +3438,17 @@ distinction this motion exists to make."
   (and (get-text-property (line-beginning-position) 'agent-river-line) t))
 
 (defun agent-river--session-line-p ()
-  "Return non-nil on a session line of the state block."
-  (eq (get-text-property (line-beginning-position) 'agent-river-line) 'session))
+  "Return non-nil on a session line or a place heading of the state block.
+
+The coarse grain is the block's own structure, which is one line per live
+session and -- once they fall into more than one place -- one heading per
+place.  Both, because that is what the map does with the same gesture: a
+root section there carries `agent-river-map-path' and no
+`agent-river-map-rel', so `agent-river-map-next-entry' stops on it, and a
+reader arriving from that buffer presses this expecting the same thing.
+The details under a session are what the fine grain is for."
+  (memq (get-text-property (line-beginning-position) 'agent-river-line)
+        '(session place)))
 
 (defun agent-river--notable-line-p ()
   "Return non-nil on a log line worth finding in a long log."
@@ -3463,13 +3503,13 @@ where the text starts."
   (agent-river-next-line (- (or n 1))))
 
 (defun agent-river-next-session (&optional n)
-  "Move to the Nth next session line, past its details and the log."
+  "Move to the Nth next session line or place heading, past details and log."
   (interactive "p")
   (or (agent-river--scan (or n 1) #'agent-river--session-line-p)
       (user-error "No further session")))
 
 (defun agent-river-previous-session (&optional n)
-  "Move to the Nth previous session line."
+  "Move to the Nth previous session line or place heading."
   (interactive "p")
   (agent-river-next-session (- (or n 1))))
 
@@ -3516,8 +3556,211 @@ EVENT is the mouse event, when invoked from one."
      ((null buffer) (user-error "Session %s is no longer hosted here" id))
      (t (pop-to-buffer buffer)))))
 
+;;; Where a session belongs -- the block, grouped
+;;
+;; Five sessions is a list; five sessions across three checkouts is a list
+;; that has to be read before it can be used, because the one thing deciding
+;; whether two of those lines are about the same work -- where each session
+;; is -- was only ever in the label, which is a basename and says nothing
+;; about two checkouts of one project.  So the block groups, and the heading
+;; carries the fact the lines cannot.
+;;
+;; The place is asked for rather than read off the state, and that is the
+;; load-bearing part.  A working directory is what the hooks happen to
+;; report, not what a session fundamentally has: agent-river can already
+;; fold a session that touches no file at all, and one is coming that has no
+;; disk to touch.  Such a session is not unplaceable -- it is placed by
+;; something the fold does not know, which is exactly what an extension
+;; point is for.  `agent-river-panel-place-functions' is a list of
+;; questions asked in order, the first answer wins, and the default asks
+;; only about the cwd.
+;;
+;; A place is not a view-only fact either.  It carries an optional `:visit',
+;; so RET on a heading goes there -- the second gesture in this package that
+;; acts rather than watches, after `agent-river--respond' relays an answer.
+;; The rule both keep to is the same: one gesture, reversible, and what it
+;; means is decided by whoever knows -- the session for an approval, the
+;; place for a heading.
+
+(defcustom agent-river-panel-place-functions '(agent-river--place-cwd)
+  "Functions deciding which place a session's block line is drawn under.
+
+Each is called with one `agent-river-state' and answers either nil -- \"I
+cannot place this one\" -- or a plist:
+
+  :key    what makes two sessions the same place, compared with `equal'
+  :name   what the heading shows, which may be shorter than the key and,
+          unlike it, need not tell two places apart on its own
+  :visit  optional; a function of no arguments that RET on the heading
+          calls, for a place there is somewhere to go to
+
+The first function to answer wins, so the list reads as questions from the
+most specific to the most general.  It is a list rather than a single
+setting because a session agent-river watches need not have a working
+directory at all -- and one that has none is not thereby unplaceable, it
+is placed by something only its host knows.
+
+Asked on every redraw, which is once a second while an agent is working,
+so an answer comes from what the function already has: the map
+contributor protocol's `:read', never its `:refresh'.  One that throws is
+retired on the spot, like an observer and like a contributor -- this runs
+often enough that a broken one would break thousands of times, and a
+block that dies with it is the worse outcome."
+  :type '(repeat function))
+
+(defun agent-river--place-cwd (state)
+  "Return the directory STATE was started in as the place it belongs to.
+
+Nil where the state has no cwd, which is a fact rather than a gap to
+paper over: a session folded entirely from events made inside Emacs never
+had a directory reported for it, and inventing one would put a line in a
+place no agent is.
+
+Worktrees are deliberately not merged the way `agent-river--map-groups'
+merges them.  That question is \"is this the same file\", and two
+checkouts of one repository answer yes; this one is \"where is this agent
+working\", and two worktrees are two branches of work -- which is why the
+map, having merged them, has to put the tree back onto the party name."
+  (let ((cwd (agent-river-state-cwd state)))
+    (when (and cwd (not (string-empty-p cwd)))
+      (let ((dir (directory-file-name cwd)))
+        (list :key dir
+              :name (abbreviate-file-name dir)
+              :visit (lambda () (dired dir)))))))
+
+(defun agent-river--place (state)
+  "Return where STATE belongs, or nil when nothing could place it.
+
+The first function in `agent-river-panel-place-functions' to answer, and
+an answer without a `:key' is not one: the key is what two sessions are
+compared on, so a plist missing it would put every session it described
+in a place of its own.
+
+A function that throws is dropped from the list and said so once, by
+`message' rather than by a log line -- this runs inside the block draw,
+and logging redraws the block."
+  (let ((left agent-river-panel-place-functions)
+        (place nil))
+    (while (and left (null place))
+      (let ((fn (car left)))
+        (setq left (cdr left))
+        (condition-case err
+            (setq place (funcall fn state))
+          (error
+           (setq agent-river-panel-place-functions
+                 (delq fn agent-river-panel-place-functions))
+           (message "agent-river: place function %s retired (%s)"
+                    fn (error-message-string err))))))
+    (and (plist-get place :key) place)))
+
+(defvar agent-river-place-line-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'agent-river-visit-place)
+    (define-key map [mouse-1] #'agent-river-visit-place)
+    map)
+  "Keymap active on a place heading in the state block.")
+
+;;;###autoload
+(defun agent-river-visit-place (&optional event)
+  "Open the place named on this line of the HUD.
+EVENT is the mouse event, when invoked from one.
+
+What opening means is the place's own answer, not this command's: a
+directory is a dired buffer -- already shaded with what has been happening
+in it, where `agent-river-heat-mode' is on -- and a place that is not on
+disk brings whatever standing in for it means there.  A place that named
+nowhere says so rather than doing something approximate."
+  (interactive (list last-nonmenu-event))
+  (let* ((pos (if (and event (listp event))
+                  (posn-point (event-end event))
+                (point)))
+         (place (get-text-property pos 'agent-river-place)))
+    (cond
+     ((null place) (user-error "No place on this line"))
+     ((plist-get place :visit) (funcall (plist-get place :visit)))
+     (t (user-error "%s is not somewhere to go"
+                    (or (plist-get place :name) (plist-get place :key)))))))
+
+(defun agent-river--make-place-visitable (line place)
+  "Return LINE carrying the means to open PLACE.
+
+The keymap goes on whether or not PLACE said where it is, so RET explains
+itself instead of falling through to `agent-river-visit-session' and
+reporting that a heading is not a session.  What is withheld is the
+promise: the mouse face and the echo are an offer to act, and a line that
+makes one has to keep it."
+  (let ((line (propertize line
+                          'agent-river-place place
+                          'keymap agent-river-place-line-map)))
+    (if (not (plist-get place :visit))
+        line
+      (propertize line
+                  'mouse-face 'highlight
+                  'help-echo "RET or mouse-1: open this place"))))
+
+(defun agent-river--panel-heading (place n)
+  "Return the outline heading opening the group of N sessions at PLACE.
+
+A name and a count, and nothing that is already on the lines below it:
+the same reading `agent-river--map-header' arrived at, for the same
+reason -- a heading is read once and redrawn every second, so what earns
+its place on one is what moves.  N counts the sessions drawn underneath;
+a subagent is counted on its own session's line, where it is happening."
+  (let ((name (or (plist-get place :name) (plist-get place :key))))
+    (propertize
+     (agent-river--make-place-visitable
+      (concat "* "
+              (propertize name 'face 'agent-river-place)
+              (format " · %d session%s" n (if (= n 1) "" "s")))
+      place)
+     ;; Both grains stop here, the way the map's root sections are stopped
+     ;; on by both of its: a heading is one of the block's own entries, and
+     ;; the coarse motion is about the block's structure rather than about
+     ;; sessions in particular.  `agent-river-block' is what a redraw finds
+     ;; the line by -- tagged, because a place key is a string and a
+     ;; session id is a string, and the two must not collide.
+     'agent-river-line 'place
+     'agent-river-block (cons 'place (plist-get place :key)))))
+
+(defun agent-river--panel-places (states)
+  "Return STATES as (PLACE . STATES) cells, the ones nothing placed last.
+
+PLACE is nil in that last cell, and it is not a place called \"nowhere\":
+those sessions are drawn as they always were, with no heading over them.
+A heading naming the absence of a place would be the one line in the
+block that names nothing, and it would read as a group -- which is the
+opposite of what it says.
+
+Places are ordered by name and the sessions within one by label: the same
+stable order the block has always had, one grain further out, so a line
+still does not move under the eye because another session acted."
+  (let ((seen (make-hash-table :test 'equal))
+        (cells nil)
+        (loose nil))
+    (dolist (state states)
+      (let ((place (agent-river--place state)))
+        (if (null place)
+            (push state loose)
+          (let* ((key (plist-get place :key))
+                 (cell (gethash key seen)))
+            (unless cell
+              (setq cell (cons place nil))
+              (puthash key cell seen)
+              (push cell cells))
+            (setcdr cell (cons state (cdr cell)))))))
+    (let ((by-label (lambda (a b)
+                      (string< (or (agent-river-state-label a) "")
+                               (or (agent-river-state-label b) "")))))
+      (dolist (cell cells)
+        (setcdr cell (sort (cdr cell) by-label)))
+      (append
+       (sort cells (lambda (a b)
+                     (string< (or (plist-get (car a) :name) "")
+                              (or (plist-get (car b) :name) ""))))
+       (when loose (list (cons nil (sort loose by-label))))))))
+
 (defun agent-river--panel-block ()
-  "Return one panel line per live session, and nothing else.
+  "Return one panel line per live session, under a heading per place.
 
 There is no heading closing the block off from the log below it.  One was
 tried -- `* -- eventlog', so the log was an outline subtree TAB could fold
@@ -3525,25 +3768,41 @@ away -- and removed: a divider that exists only to be a fold handle earns
 its line from nobody who is reading, and TAB now unfolds the session under
 point instead.
 
+A place heading appears only once the sessions fall into more than one
+place.  With all of them in the same one -- or with nothing able to place
+any of them, which is what a fold carrying no cwd looks like -- the
+heading would be a constant, and a constant is the noise
+`agent-river--label-column' declines to draw for exactly this reason.  It
+is also the trade the map makes at its own grain: one root is listed with
+no section heading over it, because the header already names it.
+
 Lives at the foot of the log rather than in the header line, because a
 header line is structurally single-line: with two sessions it could only
 show whichever acted last, and the step count would jump between them
 with nothing to say they were different agents."
-  (let (lines)
+  (let (states)
     (maphash (lambda (_key state)
                (when (and (null (agent-river-state-parent state))
                           (agent-river--active-p state))
-                 (push (cons (agent-river-state-label state)
-                             (agent-river--panel state))
-                       lines)))
+                 (push state states)))
              agent-river-registry)
-    (when lines
-      (concat
-       (mapconcat #'cdr
-                  ;; Stable order, so a line does not move under the eye
-                  ;; just because another session acted.
-                  (sort lines (lambda (a b) (string< (car a) (car b))))
-                  "\n")))))
+    (when states
+      (let* ((cells (agent-river--panel-places states))
+             ;; More than one cell is more than one place a session could
+             ;; be, counting the unplaced ones as a place to be: with a
+             ;; heading over the placed sessions and none over the rest,
+             ;; the rest would read as belonging to the group above them.
+             (split (cdr cells))
+             (lines nil))
+        (dolist (cell cells)
+          (let* ((place (car cell))
+                 (under (and split place)))
+            (when under
+              (push (agent-river--panel-heading place (length (cdr cell)))
+                    lines))
+            (dolist (state (cdr cell))
+              (push (agent-river--panel state (if under 2 1)) lines))))
+        (mapconcat #'identity (nreverse lines) "\n")))))
 
 (defun agent-river--update-panel (state)
   "Note STATE as the session that last acted, for `agent-river-set-intent'.
