@@ -1832,6 +1832,257 @@ ID names the request; RESPOND is what its `:respond' calls."
       (should-not (agent-river--offer-live-p (gethash "req-1" agent-river--offers))))))
 
 
+;;; The approval queue -- the questions, drawn to be answered by thumb
+;;
+;; The derivation, not the geometry: which questions are listed and in what
+;; order, what a block is made of, which rows a motion and a tap may land on,
+;; and that a redraw does not move an answer under a finger already on its
+;; way down.  How wide any of it looks is the window's business.
+
+(defun agent-river-test--offer (id session &optional at raw title)
+  "Return an offer for request ID of SESSION, as the two halves leave it.
+AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
+  (list :id id
+        :session session
+        :tool-call-id (concat "call-" id)
+        :title (or title "Run `git push`")
+        :kind "execute"
+        :raw-input raw
+        :options (list (list (cons :kind "allow_once")
+                             (cons :option "Allow")
+                             (cons :option-id "allow"))
+                       (list (cons :kind "allow_always")
+                             (cons :option "Allow always")
+                             (cons :option-id "always"))
+                       (list (cons :kind "reject_once")
+                             (cons :option "Reject")
+                             (cons :option-id "reject")))
+        :respond #'ignore
+        :at (or at (current-time))))
+
+(defmacro agent-river-test--with-queue (&rest body)
+  "Draw the queue into a buffer of its own and run BODY inside it."
+  (declare (indent 0))
+  `(let ((agent-river-approval-queue-buffer-name "*agent-river-test-approvals*"))
+     (unwind-protect
+         (with-current-buffer
+             (get-buffer-create agent-river-approval-queue-buffer-name)
+           (agent-river-approval-queue-mode)
+           (agent-river--approval-draw)
+           (goto-char (point-min))
+           ,@body)
+       (when-let* ((buffer (get-buffer "*agent-river-test-approvals*")))
+         (kill-buffer buffer)))))
+
+(defun agent-river-test--queue-rows (test)
+  "Return the rows of the current buffer TEST stops on, top down."
+  (goto-char (point-min))
+  (let (seen)
+    (when (funcall test)
+      (push (buffer-substring-no-properties (line-beginning-position)
+                                            (line-end-position))
+            seen))
+    (while (agent-river--approval-scan 1 test)
+      (push (buffer-substring-no-properties (line-beginning-position)
+                                            (line-end-position))
+            seen))
+    (nreverse seen)))
+
+(ert-deftest agent-river-test-the-queue-is-oldest-first ()
+  ;; A queue, where the HUD is a log: there the newest line is the news,
+  ;; here the question that has been held longest is the one holding a
+  ;; session up.
+  (let ((agent-river--offers (make-hash-table :test 'equal)))
+    (puthash "new" (agent-river-test--offer "new" "s2" (current-time))
+             agent-river--offers)
+    (puthash "old" (agent-river-test--offer
+                    "old" "s1" (time-subtract (current-time) 600))
+             agent-river--offers)
+    (should (equal (mapcar (lambda (offer) (plist-get offer :id))
+                           (agent-river--offers-waiting))
+                   '("old" "new")))))
+
+(ert-deftest agent-river-test-a-listing-drops-only-what-is-known-answered ()
+  ;; The listing asks the opposite question to the one the answering path
+  ;; asks, and the difference is the unseeable case: a command about to
+  ;; speak for a session refuses where it cannot see, and a view that did
+  ;; the same would go silent exactly where it exists to say something.
+  (agent-river-test--with-shell '(("*alpha*" "s1" client))
+    (let ((agent-river--offers (make-hash-table :test 'equal))
+          (offer (agent-river-test--offer "req-1" "s1")))
+      (puthash "req-1" offer agent-river--offers)
+      ;; Nothing known: agent-shell has no call recorded under that id.
+      (should-not (agent-river--offer-answered-p offer))
+      (should (agent-river--offers-waiting))
+      ;; Still pending: the call names the request.
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        (setq-local agent-shell--state
+                    (cons (cons :tool-calls
+                                (list (cons "call-req-1"
+                                            (list (cons :permission-request-id
+                                                        "req-1")))))
+                          agent-shell--state)))
+      (should-not (agent-river--offer-answered-p offer))
+      ;; Answered in the session buffer: the call is there and the id is
+      ;; gone, which `assoc' can tell apart from the call being absent and
+      ;; `alist-get' cannot.
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        (setq-local agent-shell--state
+                    (cons (cons :tool-calls (list (cons "call-req-1" nil)))
+                          agent-shell--state)))
+      (should (agent-river--offer-answered-p offer))
+      (should-not (agent-river--offers-waiting)))))
+
+(ert-deftest agent-river-test-a-question-carries-the-agents-own-words ()
+  ;; The title is agent-shell's summary and is what the panel has room for;
+  ;; the argument is what a decision is actually made on, and it is the
+  ;; reason a question here is a block rather than a line.
+  (let ((named (agent-river-test--offer
+                "req-1" "s1" nil '((command . "rm -rf build")
+                                   (description . "clean"))))
+        (unknown (agent-river-test--offer
+                  "req-2" "s1" nil '((depth . 3) (glob . "*.el"))))
+        (wordy (agent-river-test--offer
+                "req-3" "s1" nil '((command . "one\ntwo\nthree\nfour\nfive")))))
+    ;; One of the known keys is almost always *the* argument.
+    (should (equal (agent-river--offer-body named) '("rm -rf build")))
+    ;; A tool none of them fit is rendered whole: guessing which of an
+    ;; unknown tool's arguments matters is how a view hides the dangerous
+    ;; half of a request.
+    (should (equal (agent-river--offer-body unknown) '("depth: 3" "glob: *.el")))
+    ;; Several lines stay several lines -- the block is line-shaped.
+    (should (= (length (agent-river--offer-body wordy)) 5))))
+
+(ert-deftest agent-river-test-an-unopened-block-keeps-its-answers-on-screen ()
+  ;; The one failure this view cannot afford: a block whose options are
+  ;; below the fold is a block nobody can answer without scrolling first.
+  (let ((agent-river--offers (make-hash-table :test 'equal))
+        (agent-river-approval-body-lines 2))
+    (puthash "req-1" (agent-river-test--offer
+                      "req-1" "s1" nil '((command . "a\nb\nc\nd\ne")))
+             agent-river--offers)
+    (agent-river-test--with-queue
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (should (string-match-p "^  a$" text))
+        (should (string-match-p "^  b$" text))
+        (should-not (string-match-p "^  c$" text))
+        ;; What was left out is said, with the gesture that shows it.
+        (should (string-match-p "… 3 more lines (TAB)" text))
+        ;; And every answer is still drawn.
+        (should (string-match-p "→ Reject" text)))
+      ;; Opened from anywhere in the block, the rest is there.
+      (agent-river--approval-scan 1 #'agent-river--approval-line-p)
+      (agent-river-approval-queue-toggle)
+      (should (string-match-p "^  e$" (buffer-substring-no-properties
+                                       (point-min) (point-max)))))))
+
+(ert-deftest agent-river-test-a-block-shows-the-fold-behind-the-question ()
+  ;; `Run rm -rf build' reads differently under an agent that has been
+  ;; editing quietly and under one that has failed three times running, and
+  ;; in the session buffer that context is several screens up.
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river--offers (make-hash-table :test 'equal)))
+    (let ((state (agent-river-state "s1" "alpha")))
+      (dotimes (_ 3)
+        (agent-river-fold state '(:kind "fail" :tool "Bash" :detail "boom")))
+      (puthash "req-1" (agent-river-test--offer "req-1" "s1") agent-river--offers)
+      (agent-river-test--with-queue
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should (string-match-p "alpha" text))
+          (should (string-match-p "blocked" text))
+          (should (string-match-p "3 failing" text)))))))
+
+(ert-deftest agent-river-test-every-answer-is-a-row-and-the-whole-row ()
+  ;; A tap lands past the end of a short row about as often as on it, so
+  ;; the properties run through the newline -- a row that stops at its last
+  ;; character is a target that has to be hit rather than reached for.
+  (let ((agent-river--offers (make-hash-table :test 'equal)))
+    (puthash "req-1" (agent-river-test--offer "req-1" "s1") agent-river--offers)
+    (agent-river-test--with-queue
+      (goto-char (point-min))
+      (should (agent-river--approval-scan 1 #'agent-river--approval-line-p))
+      ;; Heading first, then one row per answer.
+      (should (agent-river--approval-offer-line-p))
+      (agent-river-approval-queue-next-line)
+      (should (equal (get-text-property (line-beginning-position)
+                                        'agent-river-approval-option)
+                     "allow"))
+      ;; The end of the row answers too.
+      (should (equal (get-text-property (line-end-position)
+                                        'agent-river-approval-option)
+                     "allow"))
+      (should (eq (get-text-property (line-end-position) 'keymap)
+                  agent-river-approval-option-map)))))
+
+(ert-deftest agent-river-test-queue-motion-has-the-same-three-grains ()
+  (let ((agent-river--offers (make-hash-table :test 'equal)))
+    (puthash "req-1" (agent-river-test--offer
+                      "req-1" "s1" (time-subtract (current-time) 60)
+                      '((command . "git push")))
+             agent-river--offers)
+    (puthash "req-2" (agent-river-test--offer "req-2" "s2") agent-river--offers)
+    (agent-river-test--with-queue
+      (let ((fine (agent-river-test--queue-rows #'agent-river--approval-line-p))
+            (coarse (agent-river-test--queue-rows
+                     #'agent-river--approval-offer-line-p)))
+        ;; The fine grain stops on the headings and the answers, and passes
+        ;; over what is only read: the title, the arguments, the context.
+        (should (= (length fine) 8))
+        (should-not (seq-find (lambda (row) (string-match-p "git push" row)) fine))
+        ;; The coarse grain is one stop per question.
+        (should (= (length coarse) 2))))))
+
+(ert-deftest agent-river-test-answering-a-row-relays-that-option ()
+  (agent-river-test--with-shell '(("*alpha*" "s1" client))
+    (let* ((answers nil)
+           (agent-river--offers (make-hash-table :test 'equal))
+           (offer (agent-river-test--offer "req-1" "s1")))
+      (setq offer (plist-put offer :respond (lambda (id) (push id answers))))
+      (puthash "req-1" offer agent-river--offers)
+      ;; Pending, as far as agent-shell is concerned.
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        (setq-local agent-shell--state
+                    (cons (cons :tool-calls
+                                (list (cons "call-req-1"
+                                            (list (cons :permission-request-id
+                                                        "req-1")))))
+                          agent-shell--state)))
+      (agent-river-test--with-queue
+        (goto-char (point-min))
+        (agent-river--approval-scan 1 #'agent-river--approval-line-p)
+        (agent-river-approval-queue-next-line)
+        (agent-river-approval-queue-answer)
+        (should (equal answers '("allow")))
+        ;; A standing permission is the one answer that asks first: the
+        ;; friction `agent-river-answer' spends a whole prompt on is worth
+        ;; keeping when the gesture becomes a single tap.
+        (should (agent-river--approval-confirm-p
+                 '((:kind . "allow_always") (:option-id . "always"))))
+        (should-not (agent-river--approval-confirm-p
+                     '((:kind . "reject_once") (:option-id . "reject"))))))))
+
+(ert-deftest agent-river-test-a-redraw-does-not-move-an-answer-under-a-finger ()
+  ;; The buffer is rebuilt every couple of seconds.  Found by position, a
+  ;; question answered above would slide a different question's `Allow'
+  ;; under a thumb already on its way down.
+  (let ((agent-river--offers (make-hash-table :test 'equal)))
+    (puthash "req-1" (agent-river-test--offer
+                      "req-1" "s1" (time-subtract (current-time) 60))
+             agent-river--offers)
+    (puthash "req-2" (agent-river-test--offer "req-2" "s2") agent-river--offers)
+    (agent-river-test--with-queue
+      ;; On the second question's "Reject".
+      (goto-char (point-min))
+      (search-forward "→ Reject")
+      (search-forward "→ Reject")
+      (let ((was (agent-river--approval-here)))
+        (should (equal was '("req-2" . "reject")))
+        ;; The first question is answered elsewhere and the queue redraws.
+        (remhash "req-1" agent-river--offers)
+        (agent-river--approval-draw)
+        (should (equal (agent-river--approval-here) was))))))
+
+
 ;;; Observers -- the side-effect contract
 ;;
 ;; What every consumer that reaches outside this package inherits from the

@@ -1771,6 +1771,15 @@ request must not be able to stop one being asked."
           (puthash id (list :id id
                             :title (alist-get :title call)
                             :kind (alist-get :kind call)
+                            ;; The arguments the agent proposes to run with.
+                            ;; The title is agent-shell's summary of them and
+                            ;; is all the panel has room for; deciding takes
+                            ;; the words themselves, which is what the queue
+                            ;; shows and the one place they can be had --
+                            ;; the `permission-request' event carries the
+                            ;; session and no input, this carries the input
+                            ;; and no session.
+                            :raw-input (alist-get :raw-input call)
                             :options (alist-get :options permission)
                             :respond (alist-get :respond permission)
                             :at (current-time))
@@ -1815,14 +1824,22 @@ most sessions in it."
            ;; log; that it is still open is not, and belongs in the panel,
            ;; which reads the table above.
            (agent-river-log "ask" (agent-river--offer-text offer)
-                            (agent-river--shell-label session)))))
+                            (agent-river--shell-label session))
+           ;; Drawn rather than marked dirty, which is the opposite of what
+           ;; the map does and for the opposite reason: that observer fires
+           ;; on every tool call, this fires when somebody is asked a
+           ;; question, and a queue that shows it a second or two later is a
+           ;; queue somebody is sitting in front of, waiting.
+           (agent-river--approval-refresh))))
       ('permission-response
        (when-let* ((id (alist-get :request-id data)))
          (remhash id agent-river--offers)
-         (agent-river--redraw-block)))
+         (agent-river--redraw-block)
+         (agent-river--approval-refresh)))
       ('clean-up
        (when (and session (agent-river--forget-offers session))
-         (agent-river--redraw-block))))))
+         (agent-river--redraw-block)
+         (agent-river--approval-refresh))))))
 
 ;;;###autoload
 (defun agent-river-attend-shell (&optional buffer)
@@ -1910,14 +1927,7 @@ agent's own words, which no fixed key could keep meaning."
      ((not agent-river-approvals-mode)
       (user-error "Permission requests are not watched; M-x agent-river-approvals-mode"))
      ((null offer) (user-error "This session is not waiting on a permission"))
-     ((not (agent-river--offer-live-p offer))
-      ;; Answered in the session buffer while this was on screen.  Dropped
-      ;; rather than reported as still open: the table is behind, not the
-      ;; session.
-      (remhash (plist-get offer :id) agent-river--offers)
-      (agent-river--redraw-block)
-      (user-error "That request has already been answered"))
-     ((not (and (plist-get offer :options) (functionp (plist-get offer :respond))))
+     ((not (plist-get offer :options))
       (user-error "The options for this request were never seen; answer it in the session"))
      (t
       (let* ((options (plist-get offer :options))
@@ -1927,11 +1937,687 @@ agent's own words, which no fixed key could keep meaning."
              (chosen (seq-find (lambda (option)
                                  (equal (alist-get :option option) pick))
                                options)))
-        (when chosen
-          (funcall (plist-get offer :respond) (alist-get :option-id chosen))
-          ;; The response event clears the table and redraws; this is only
-          ;; what the person pressing the key is owed in the meantime.
-          (message "agent-river: %s" pick)))))))
+        (when chosen (agent-river--respond offer chosen)))))))
+
+(defun agent-river--respond (offer option)
+  "Relay OPTION to the session OFFER names, as the answer to its question.
+
+The one place an answer is actually sent, so the prompt in the HUD and
+the rows of the approval queue cannot come to different conclusions about
+when a question may still be answered.  Which is the whole of what the
+guards here are: this table is the second account of a state agent-shell
+owns, and the one that can be behind -- a button pressed in the session
+buffer never reaches it."
+  (cond
+   ((not (agent-river--offer-live-p offer))
+    ;; Answered in the session buffer while this was on screen.  Dropped
+    ;; rather than reported as still open: the table is behind, not the
+    ;; session.
+    (remhash (plist-get offer :id) agent-river--offers)
+    (agent-river--redraw-block)
+    (agent-river--approval-refresh)
+    (user-error "That request has already been answered"))
+   ((not (functionp (plist-get offer :respond)))
+    (user-error "The options for this request were never seen; answer it in the session"))
+   (t
+    (funcall (plist-get offer :respond) (alist-get :option-id option))
+    ;; The response event clears the table and redraws; this is only what
+    ;; the person pressing the key is owed in the meantime.
+    (message "agent-river: %s" (alist-get :option option)))))
+
+
+;;; The approval queue -- the questions, on whatever screen is to hand
+;;
+;; The panel says which session is holding a door open.  This is the buffer
+;; the door is opened from, and it exists because of where that often has to
+;; happen: a phone, over emacsclient in a terminal emulator, held in one hand
+;; in portrait.  Nothing about the HUD survives that trip.  It is a
+;; 56-column side window whose bulk is the agent's prose, the questions are
+;; one clause on a line among many, and answering one is a `completing-read'
+;; behind a soft keyboard that covers the text you are reading to decide.
+;;
+;; So the shape is decided by the screen rather than by the state:
+;;
+;; - One question is a block, not a line.  Columns are what a narrow screen
+;;   does not have and lines are what it does: who is asking, what they are
+;;   asking, the agent's own words for what it wants to do, one line of
+;;   context out of the fold, then the answers.
+;; - Every answer is a line of its own, and the line is the target.  RET or
+;;   a tap on it answers -- which is exactly what `agent-river-answer'
+;;   refuses to do, and the reason does not survive the trip either: there a
+;;   prompt costs one keystroke and stops a typo granting `allow_always',
+;;   here it costs the screen.  The friction is kept where it still earns
+;;   its place -- the two `_always' kinds ask first, the ones that decide a
+;;   single call do not.
+;; - Wrapped, never measured.  The width is whatever the window is, so a
+;;   phone turned on its side is a window resized and nothing here has to
+;;   notice.  Counting columns would mean redrawing on every rotation to
+;;   arrive at what `word-wrap' does for free.
+;; - A row is propertised through its newline, so the whole width of the row
+;;   answers a tap and not just the glyphs on it.  A thumb is about as wide
+;;   as three characters of the text it is aiming at.
+;;
+;; Not Markdown, for the reason the HUD is not: the title and the raw input
+;; are the agent's words and a tool's arguments, and a view that renders
+;; them as structure hands that text the power to restructure the view.
+;;
+;; It is a view of `agent-river--offers', which is deliberately not folded,
+;; so it is not an observer either: it is drawn when a question arrives or
+;; is answered, and on a slow timer of its own for the two things that move
+;; while nothing happens -- how long a question has been waiting, and what
+;; the session has been doing since it asked.
+
+(defcustom agent-river-approval-queue-buffer-name "*agent-river-approvals*"
+  "Name of the buffer `agent-river-approval-queue' draws into."
+  :type 'string)
+
+(defcustom agent-river-approval-queue-interval 2
+  "Seconds between redraws of the approval queue.
+Only the waiting times and the session context change between events, and
+both are read rather than acted on: a second would be an animation, thirty
+would leave `waiting 1m' on screen for a question asked half an hour ago."
+  :type 'number)
+
+(defcustom agent-river-approval-body-lines 4
+  "How many lines of a request's own arguments an unopened block shows.
+TAB shows the rest.  Four is about what fits above the options on a phone,
+and the options staying on screen is the one thing this view cannot give
+up -- a block whose answers are below the fold is a block nobody can
+answer without scrolling first."
+  :type 'integer)
+
+(defcustom agent-river-approval-input-keys
+  '(command file_path path absolute_path filePath url pattern query prompt)
+  "Keys of a tool's raw input worth showing as the request's own words.
+
+The first one present is what the block shows, because one of them is
+almost always *the* argument -- the command for a shell call, the path for
+an edit.  A tool none of them fit is rendered key by key instead, which is
+verbose and never wrong; guessing which of an unknown tool's arguments
+matters is how a view ends up hiding the dangerous half of a request."
+  :type '(repeat symbol))
+
+(defconst agent-river--approval-line-max 300
+  "Longest a single line of a request's arguments is drawn.
+A guard rather than a setting: an argument is occasionally a whole file,
+and one line of that wrapped across a phone screen pushes the options off
+the bottom -- which is the one failure this view cannot afford.")
+
+(defvar agent-river--approval-timer nil
+  "Repeating timer redrawing the approval queue, or nil while none runs.")
+
+(defvar agent-river--approval-owns-mode nil
+  "Non-nil when the queue is what turned `agent-river-approvals-mode' on.
+
+Opening this buffer is a clear enough gesture to install the watcher --
+there is nothing to queue otherwise, since the options and the means to
+answer are only ever seen by the responder.  Turning it off again on the
+way out is the other half of that, and it is conditional for the same
+reason `agent-river--responder-before' is: a mode switched on by hand
+while this buffer happened to be open belongs to whoever switched it on.")
+
+(defvar-local agent-river--approval-expanded nil
+  "Request ids whose block is showing all of its arguments.
+
+Buffer-local and kept here rather than in overlays, for the reason the
+HUD's `agent-river--panel-expanded' is: the buffer is erased and rebuilt
+on every question and every tick, so a fold that lived in the text would
+spring open again a second later.")
+
+(defun agent-river--offer-answered-p (offer)
+  "Return non-nil when agent-shell's own account says OFFER is answered.
+
+Not the complement of `agent-river--offer-live-p', and the difference is
+the whole reason both exist.  That one answers \"still open\" and says no
+where nothing can be seen, which is the right way round for a command
+about to speak on a session's behalf.  This one answers \"agent-shell says
+it is over\" and says no in the same unseeable case, which is the right
+way round for a listing: a question dropped because its buffer could not
+be reached is silence exactly where this view exists to say something.
+
+`assoc' rather than `alist-get', because agent-shell leaves an answered
+call in the table with its request id removed -- and a call that is absent
+and a call that is present and empty are indistinguishable through a
+lookup that returns nil for both."
+  (when-let* ((session (plist-get offer :session))
+              (call-id (plist-get offer :tool-call-id))
+              (buffer (agent-river--shell-buffer session))
+              (state (buffer-local-value 'agent-shell--state buffer))
+              (cell (assoc call-id (alist-get :tool-calls state))))
+    (null (alist-get :permission-request-id (cdr cell)))))
+
+(defun agent-river--offers-waiting ()
+  "Return every permission request still waiting, the oldest first.
+
+Oldest first because this is a queue and the HUD is not: the log is
+newest-first, where the newest line is the news, and here the question
+that has been held longest is the one holding a session up."
+  (let (waiting)
+    (maphash (lambda (_id offer)
+               (unless (agent-river--offer-answered-p offer)
+                 (push offer waiting)))
+             agent-river--offers)
+    (sort waiting (lambda (a b) (time-less-p (plist-get a :at)
+                                             (plist-get b :at))))))
+
+(defun agent-river--offer-label (offer)
+  "Return the name to put on OFFER's heading.
+agent-shell's, where it hosts the session; the folded label where the
+registry has one; and the session id only as a last resort, which is the
+case where the queue is showing a question about a session nothing else
+here has heard of."
+  (let ((session (plist-get offer :session)))
+    (or (and session (agent-river--shell-label session))
+        (when-let* ((state (and session (gethash session agent-river-registry))))
+          (agent-river-state-label state))
+        session
+        "?")))
+
+(defun agent-river--approval-clean (text)
+  "Return TEXT with control characters replaced by spaces, capped in length.
+The buffer is line-based, so a stray control character makes one broken
+row rather than the two it looks like it should."
+  (let ((line (replace-regexp-in-string "[[:cntrl:]]" " " (or text ""))))
+    (truncate-string-to-width line agent-river--approval-line-max nil nil "…")))
+
+(defun agent-river--approval-value (value)
+  "Return raw-input VALUE as text, whatever shape the host gave it.
+A vector of words is how Codex passes a command, a nested alist is how a
+structured argument arrives, and neither may reach a string function
+unguarded -- see `agent-river--arg' for the same problem one layer down."
+  (cond
+   ((stringp value) value)
+   ((null value) "")
+   ((vectorp value) (mapconcat #'agent-river--approval-value value " "))
+   ((and (consp value) (consp (car value)))
+    (mapconcat (lambda (cell)
+                 (format "%s: %s" (car cell)
+                         (agent-river--approval-value (cdr cell))))
+               value "\n"))
+   (t (format "%s" value))))
+
+(defun agent-river--offer-body (offer)
+  "Return OFFER's arguments as lines -- the agent's own words for what it wants.
+
+The title is agent-shell's summary and is what the panel has room for;
+this is the thing a decision is actually made on, and the reason the queue
+is a block rather than a line."
+  (let* ((input (plist-get offer :raw-input))
+         (named (seq-some (lambda (key)
+                            (let ((value (and (consp input) (alist-get key input))))
+                              (and value (not (equal value ""))
+                                   (agent-river--approval-value value))))
+                          agent-river-approval-input-keys))
+         (text (or named (and input (agent-river--approval-value input)))))
+    (when (and text (not (string-empty-p text)))
+      (seq-remove #'string-empty-p
+                  (mapcar #'agent-river--approval-clean
+                          (split-string text "\n"))))))
+
+(defun agent-river--approval-context (state)
+  "Return one line of what STATE has been doing, or nil when it says nothing.
+
+The fold, on the block that is asking to interrupt it.  Which is the whole
+argument for putting it here: `Run rm -rf build` reads differently under
+an agent that has been editing quietly for twenty steps and under one that
+has failed three times running, and in the session buffer that context is
+several screens up."
+  (when state
+    (let* ((phase (agent-river--phase state))
+           (streak (agent-river-state-fail-streak state))
+           (steps (agent-river-state-steps state))
+           (parts (delq nil
+                        (list
+                         (when phase
+                           (propertize phase 'face
+                                       (cond ((equal phase "blocked") 'agent-river-fail)
+                                             ((equal phase "waiting") 'agent-river-idle)
+                                             (t 'agent-river-act))))
+                         (when (> steps 0)
+                           (propertize (format "%d step%s" steps
+                                               (if (= steps 1) "" "s"))
+                                       'face 'agent-river-time))
+                         (when (> streak 0)
+                           (propertize (format "%d failing" streak)
+                                       'face 'agent-river-fail))
+                         ;; The name without its count, which is the one
+                         ;; place this differs from the panel's reading of
+                         ;; the same table: there the parenthetical fits a
+                         ;; 56-column window, here it is the longest thing
+                         ;; on the line and the least of what a decision
+                         ;; turns on.  Read through `agent-river--artifact-list'
+                         ;; all the same, so the two cannot come to
+                         ;; different conclusions about which file it is.
+                         (when-let* ((hot (car (agent-river--artifact-list state))))
+                           (propertize (car hot) 'face 'agent-river-time))))))
+      (when parts (mapconcat #'identity parts " · ")))))
+
+(defvar agent-river-approval-option-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'agent-river-approval-queue-answer)
+    (define-key map [mouse-1] #'agent-river-approval-queue-answer)
+    map)
+  "Keymap active on one answer of a block in the approval queue.")
+
+(defun agent-river--approval-row (text id &optional kind extra)
+  "Return TEXT as one row of the block for request ID, newline included.
+
+The newline is inside the propertised string on purpose.  A tap lands past
+the end of a short row about as often as on it, and a row whose properties
+stop at its last character is a target that has to be hit rather than one
+that can be reached for.
+
+KIND marks the row for the motions as `agent-river-line' does in the HUD;
+rows without one are read and not stopped on.  EXTRA is any further
+properties, which is where a row becomes a button."
+  (apply #'propertize (concat text "\n")
+         (append (list 'agent-river-approval id)
+                 (when kind (list 'agent-river-line kind))
+                 extra)))
+
+(defun agent-river--approval-block (offer)
+  "Return OFFER drawn as a block of rows: who, what, on what, and the answers."
+  (let* ((id (plist-get offer :id))
+         (session (plist-get offer :session))
+         (state (and session (gethash session agent-river-registry)))
+         (open (and (member id agent-river--approval-expanded) t))
+         (body (agent-river--offer-body offer))
+         (shown (if open body (seq-take body agent-river-approval-body-lines)))
+         (hidden (- (length body) (length shown)))
+         (options (plist-get offer :options))
+         (rows nil))
+    ;; Who, and for how long.  The heading is also the one row that visits
+    ;; the session, for the question this view cannot answer: what led here.
+    ;; Made visitable *around* the row rather than inside it, so the
+    ;; keymap reaches the newline as well and a tap past the end of a short
+    ;; heading opens the session like a tap on it.
+    (push (agent-river--make-visitable
+           (agent-river--approval-row
+            (concat (propertize "? " 'face 'agent-river-ask)
+                    (mapconcat
+                     #'identity
+                     (delq nil
+                           (list (propertize (agent-river--offer-label offer)
+                                             'face 'agent-river-session)
+                                 (when-let* ((kind (plist-get offer :kind)))
+                                   (propertize kind 'face 'agent-river-time))
+                                 (propertize (concat "waiting "
+                                                     (agent-river--ago
+                                                      (plist-get offer :at)))
+                                             'face 'agent-river-ask)))
+                     " · "))
+            id 'offer)
+           session)
+          rows)
+    ;; What is being asked, in agent-shell's words for it.
+    (push (agent-river--approval-row
+           (concat "  " (agent-river--approval-clean
+                         (or (plist-get offer :title) "?")))
+           id)
+          rows)
+    ;; And in the agent's own.
+    (dolist (line shown)
+      (push (agent-river--approval-row
+             (concat "  " (propertize line 'face 'agent-river-act))
+             id)
+            rows))
+    (when (> hidden 0)
+      (push (agent-river--approval-row
+             (propertize (format "  … %d more line%s (TAB)" hidden
+                                 (if (= hidden 1) "" "s"))
+                         'face 'agent-river-stale)
+             id)
+            rows))
+    (when-let* ((context (agent-river--approval-context state)))
+      (push (agent-river--approval-row (concat "  " context) id) rows))
+    (if options
+        (dolist (option options)
+          (push (agent-river--approval-row
+                 (concat "  " (propertize
+                               (concat "→ " (agent-river--approval-clean
+                                             (alist-get :option option)))
+                               'face 'agent-river-prompt))
+                 id 'option
+                 (list 'agent-river-approval-option (alist-get :option-id option)
+                       'keymap agent-river-approval-option-map
+                       'mouse-face 'highlight
+                       'help-echo "RET or tap: answer with this"))
+                rows))
+      ;; The responder never ran, so the options and the means to answer
+      ;; were never seen.  Said out loud rather than drawn as a block with
+      ;; nothing under it: the question is real and the session is the
+      ;; place it can still be answered.
+      (push (agent-river--approval-row
+             (propertize "  (answerable only in the session)"
+                         'face 'agent-river-stale)
+             id)
+            rows))
+    (apply #'concat (nreverse rows))))
+
+(defun agent-river--approval-working ()
+  "Return how many sessions are mid-turn right now."
+  (let ((n 0))
+    (maphash (lambda (_key state)
+               (when (and (null (agent-river-state-parent state))
+                          (agent-river--state-working-p state))
+                 (setq n (1+ n))))
+             agent-river-registry)
+    n))
+
+(defun agent-river--approval-header (offers)
+  "Return the queue's header line, given the OFFERS it is about to draw.
+
+A count and a count, in the map's sense: what moves and nothing else.  How
+many questions are waiting is why the buffer is open, and how many agents
+are working is what says whether an empty queue means quiet or means the
+watcher is not running -- which is the third part, and only appears in the
+case where it is true."
+  (concat
+   (propertize (if offers
+                   (format "%d waiting" (length offers))
+                 "nothing waiting")
+               'face (if offers 'agent-river-ask 'agent-river-idle))
+   (let ((working (agent-river--approval-working)))
+     (when (> working 0)
+       (propertize (format " · %d working" working) 'face 'agent-river-time)))
+   (unless agent-river-approvals-mode
+     (propertize " · not watching (M-x agent-river-approvals-mode)"
+                 'face 'agent-river-fail))))
+
+(defun agent-river--approval-here ()
+  "Return what the line at point names, for a redraw to find again.
+A cons of the request id and the answer on the line, or nil for either."
+  (let ((id (get-text-property (line-beginning-position) 'agent-river-approval)))
+    (when id
+      (cons id (get-text-property (line-beginning-position)
+                                  'agent-river-approval-option)))))
+
+(defun agent-river--approval-find (id option)
+  "Return the position of the row naming ID and OPTION, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (let (found)
+      (while (and (not found) (not (eobp)))
+        (if (and (equal id (get-text-property (line-beginning-position)
+                                              'agent-river-approval))
+                 (equal option (get-text-property (line-beginning-position)
+                                                  'agent-river-approval-option)))
+            (setq found (line-beginning-position))
+          (forward-line 1)))
+      found)))
+
+(defun agent-river--approval-goto (here)
+  "Put point back on the row HERE named, or on the first row there is.
+
+By name rather than by position, the way the HUD's block and the map's
+listing both do it: the buffer is rebuilt under whoever is reading it, and
+a question answered somewhere above would otherwise slide a different
+question's `allow' under a finger already on its way down."
+  (let ((pos (and here (or (agent-river--approval-find (car here) (cdr here))
+                           ;; The answers are gone but the block is still
+                           ;; there: its heading is where that reader was.
+                           (agent-river--approval-find (car here) nil)))))
+    (goto-char (or pos (point-min)))
+    (unless pos
+      (unless (agent-river--approval-line-p)
+        (agent-river--approval-scan 1 #'agent-river--approval-line-p)))
+    (agent-river--approval-beginning-of-row)))
+
+(defun agent-river--approval-draw ()
+  "Redraw the approval queue, if it is open."
+  (when-let* ((buffer (get-buffer agent-river-approval-queue-buffer-name)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t)
+            (here (agent-river--approval-here))
+            (offers (agent-river--offers-waiting)))
+        (erase-buffer)
+        (insert (agent-river--approval-header offers) "\n\n")
+        (dolist (offer offers)
+          (insert (agent-river--approval-block offer) "\n"))
+        (agent-river--approval-goto here)))))
+
+(defun agent-river--approval-refresh ()
+  "Draw the approval queue now and keep its timer running, if it is open.
+
+Drawn inline rather than marked dirty, which is the opposite of what the
+map's observer does and for the opposite reason: that one fires on every
+tool call and would redraw a listing thousands of times a task, this one
+fires when somebody has been asked a question and is waiting."
+  (when (get-buffer agent-river-approval-queue-buffer-name)
+    (agent-river--approval-draw)
+    (agent-river--ensure-approval-timer)))
+
+;;; Moving about the queue
+;;
+;; The same keys as the HUD and the map, for the same three grains -- but
+;; here the coarse grain and the attention grain are the same motion, because
+;; every block in this buffer is a question waiting on somebody.  Bound all
+;; the same rather than left out: a reader arriving from either of the other
+;; two buffers presses `>' expecting the next thing that wants them, and
+;; getting it is the point of the keys being shared at all.
+
+(defun agent-river--approval-line-p ()
+  "Return non-nil on a row any motion may stop on."
+  (and (get-text-property (line-beginning-position) 'agent-river-line) t))
+
+(defun agent-river--approval-offer-line-p ()
+  "Return non-nil on the heading row of a block."
+  (eq (get-text-property (line-beginning-position) 'agent-river-line) 'offer))
+
+(defun agent-river--approval-beginning-of-row ()
+  "Put point on the first character of the row's own text.
+Column zero is the indent and the marker, and a cursor parked there reads
+as though the punctuation were the content."
+  (goto-char (line-beginning-position))
+  (skip-chars-forward " ")
+  (when (looking-at "[?→] ")
+    (goto-char (match-end 0))))
+
+(defun agent-river--approval-scan (count test)
+  "Move to the COUNTth row satisfying TEST, forward when COUNT is positive."
+  (agent-river--scan count test #'agent-river--approval-beginning-of-row))
+
+(defun agent-river-approval-queue-next-line (&optional n)
+  "Move to the Nth next row worth stopping on."
+  (interactive "p")
+  (or (agent-river--approval-scan (or n 1) #'agent-river--approval-line-p)
+      (user-error "No further row")))
+
+(defun agent-river-approval-queue-previous-line (&optional n)
+  "Move to the Nth previous row worth stopping on."
+  (interactive "p")
+  (agent-river-approval-queue-next-line (- (or n 1))))
+
+(defun agent-river-approval-queue-next-offer (&optional n)
+  "Move to the Nth next question, past the answers of this one."
+  (interactive "p")
+  (or (agent-river--approval-scan (or n 1) #'agent-river--approval-offer-line-p)
+      (user-error "No further question")))
+
+(defun agent-river-approval-queue-previous-offer (&optional n)
+  "Move to the Nth previous question."
+  (interactive "p")
+  (agent-river-approval-queue-next-offer (- (or n 1))))
+
+(defun agent-river--approval-at (&optional event)
+  "Return the offer the row at point -- or at EVENT -- is part of, and its answer.
+A cons of the offer and the option alist, either of which may be nil."
+  (let* ((pos (if (and event (listp event))
+                  (or (posn-point (event-end event)) (point))
+                (point)))
+         (start (save-excursion (goto-char pos) (line-beginning-position)))
+         (id (get-text-property start 'agent-river-approval))
+         (option-id (get-text-property start 'agent-river-approval-option))
+         (offer (and id (gethash id agent-river--offers))))
+    (cons offer
+          (and offer option-id
+               (seq-find (lambda (option)
+                           (equal (alist-get :option-id option) option-id))
+                         (plist-get offer :options))))))
+
+(defun agent-river--approval-confirm-p (option)
+  "Return non-nil when OPTION is one that should be asked about twice.
+
+The `_always' kinds, and only those.  What `agent-river-answer' spends a
+prompt on is stopping a slip from granting a standing permission, and that
+much is worth keeping when the gesture becomes a single tap; making every
+answer ask would put a second gesture between a reader and the
+`reject_once' they came here to press."
+  (member (alist-get :kind option) '("allow_always" "reject_always")))
+
+(defun agent-river-approval-queue-answer (&optional event)
+  "Answer the question on this row with the option it names.
+EVENT is the mouse event, when invoked from one."
+  (interactive (list last-nonmenu-event))
+  (pcase-let ((`(,offer . ,option) (agent-river--approval-at event)))
+    (cond
+     ((null offer) (user-error "No question on this line"))
+     ((null option)
+      (user-error "Nothing to answer here; RET on one of the → rows"))
+     ;; `y-or-n-p', not `yes-or-no-p': the point of asking is that a standing
+     ;; permission should not come of one slip, and that is served by a
+     ;; second gesture -- spelling out "yes" on a soft keyboard is a third.
+     ((and (agent-river--approval-confirm-p option)
+           (not (y-or-n-p (format "%s — %s? "
+                                  (plist-get offer :title)
+                                  (alist-get :option option)))))
+      (message "agent-river: left unanswered"))
+     (t (agent-river--respond offer option)))))
+
+(defun agent-river-approval-queue-toggle ()
+  "Show or hide the rest of this question's arguments."
+  (interactive)
+  (let ((id (get-text-property (line-beginning-position) 'agent-river-approval)))
+    (unless id (user-error "No question on this line"))
+    (setq agent-river--approval-expanded
+          (if (member id agent-river--approval-expanded)
+              (delete id agent-river--approval-expanded)
+            (cons id agent-river--approval-expanded)))
+    (agent-river--approval-draw)))
+
+(defun agent-river-approval-queue-refresh ()
+  "Redraw the queue now, and ask agent-shell again what is still open."
+  (interactive)
+  (agent-river--approval-draw))
+
+(define-derived-mode agent-river-approval-queue-mode special-mode "Agent-Ask"
+  "Major mode for the queue of questions the sessions are waiting on.
+
+A view of a state written elsewhere, so read-only; and wrapped rather than
+truncated, because the width here is whatever screen this was opened on
+and the arguments are the thing being read."
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t)
+  ;; A wrapped argument reads as part of the row it came from rather than as
+  ;; a row of its own, which on a narrow screen is most of them.
+  (setq-local wrap-prefix "    ")
+  (setq-local header-line-format nil)
+  ;; Unlike the HUD, this buffer never pins its point anywhere: every row is
+  ;; somewhere a reader chose to be, and on a touch screen the highlight is
+  ;; the only thing saying which one a tap would act on.
+  (when (fboundp 'hl-line-mode) (hl-line-mode 1))
+  (buffer-disable-undo))
+
+(let ((map agent-river-approval-queue-mode-map))
+  (define-key map (kbd "RET") #'agent-river-approval-queue-answer)
+  (define-key map (kbd "TAB") #'agent-river-approval-queue-toggle)
+  (define-key map (kbd "g") #'agent-river-approval-queue-refresh)
+  (define-key map (kbd "n") #'agent-river-approval-queue-next-line)
+  (define-key map (kbd "p") #'agent-river-approval-queue-previous-line)
+  (define-key map (kbd "SPC") #'agent-river-approval-queue-next-line)
+  (define-key map (kbd "DEL") #'agent-river-approval-queue-previous-line)
+  (define-key map [remap next-line] #'agent-river-approval-queue-next-line)
+  (define-key map [remap previous-line] #'agent-river-approval-queue-previous-line)
+  (define-key map (kbd "M-n") #'agent-river-approval-queue-next-offer)
+  (define-key map (kbd "M-p") #'agent-river-approval-queue-previous-offer)
+  ;; The same motion as M-n/M-p here, and bound anyway: in the other two
+  ;; buffers this is "the next line that wants you", and in this one every
+  ;; block is one.  A reader who arrives pressing it should not have to
+  ;; learn that this is the buffer where it does nothing.
+  (define-key map (kbd ">") #'agent-river-approval-queue-next-offer)
+  (define-key map (kbd "<") #'agent-river-approval-queue-previous-offer))
+
+(defun agent-river--stop-approval-timer ()
+  "Stop the approval queue's redraw timer."
+  (when (timerp agent-river--approval-timer)
+    (cancel-timer agent-river--approval-timer))
+  (setq agent-river--approval-timer nil))
+
+(defun agent-river--approval-changing-p ()
+  "Return non-nil while a redraw would still show something different.
+
+Two things move without an event of their own: how long a question has
+been waiting, and what the session asking has done since.  So a queue with
+a question in it is always changing, and an empty one is changing while
+any agent is still working -- because the next thing that happens may be
+it asking."
+  (or (agent-river--offers-waiting)
+      (> (agent-river--approval-working) 0)))
+
+(defun agent-river--approval-tick ()
+  "Redraw the queue, or retire once nothing it shows can change."
+  (condition-case err
+      (cond
+       ((null (get-buffer agent-river-approval-queue-buffer-name))
+        (agent-river--approval-teardown))
+       ((agent-river--approval-changing-p) (agent-river--approval-draw))
+       (t
+        ;; Drawn once on the way out, or the last question answered would
+        ;; leave its own block on screen until somebody pressed `g'.
+        (agent-river--approval-draw)
+        (agent-river--stop-approval-timer)))
+    ;; The same bargain the other timers make: a redraw that throws every
+    ;; couple of seconds would bury Emacs in messages, so it retires rather
+    ;; than repeats -- and says so rather than going quiet.
+    (error (agent-river--stop-approval-timer)
+           (message "agent-river: approval queue stopped (%s)"
+                    (error-message-string err)))))
+
+(defun agent-river--ensure-approval-timer ()
+  "Start the queue's redraw timer if the queue is open and none runs."
+  (when (and (null agent-river--approval-timer)
+             (get-buffer agent-river-approval-queue-buffer-name))
+    (setq agent-river--approval-timer
+          (run-at-time agent-river-approval-queue-interval
+                       agent-river-approval-queue-interval
+                       #'agent-river--approval-tick))))
+
+(defun agent-river--approval-teardown ()
+  "Stop the queue's timer, and give back the mode if the queue took it."
+  (agent-river--stop-approval-timer)
+  (when (and agent-river--approval-owns-mode agent-river-approvals-mode)
+    (agent-river-approvals-mode -1))
+  (setq agent-river--approval-owns-mode nil))
+
+;;;###autoload
+(defun agent-river-approval-queue ()
+  "Show every question the sessions are waiting on, and answer them here.
+
+One block per question -- who is asking, what for, in whose words, and
+what the session has been doing -- and one row per answer, which RET or a
+tap gives.  Built for the screen it is most often needed on: a phone over
+emacsclient, in portrait, answered with a thumb.
+
+Turns `agent-river-approvals-mode' on if it is off, because there is
+nothing to show otherwise: the options and the means to answer are only
+ever seen by the responder that mode installs.  Killing this buffer turns
+it back off again, unless it was already on when this was opened."
+  (interactive)
+  (let ((buffer (get-buffer-create agent-river-approval-queue-buffer-name)))
+    (unless agent-river-approvals-mode
+      (agent-river-approvals-mode 1)
+      (setq agent-river--approval-owns-mode t))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'agent-river-approval-queue-mode)
+        (agent-river-approval-queue-mode))
+      (add-hook 'kill-buffer-hook #'agent-river--approval-teardown nil t))
+    (agent-river--approval-draw)
+    (agent-river--ensure-approval-timer)
+    ;; Reuse a window showing it, else take this one.  A phone has one
+    ;; window and this is what it is for; a desktop has several and a view
+    ;; that deletes them to make room is a view nobody opens twice.
+    (pop-to-buffer buffer '((display-buffer-reuse-window
+                             display-buffer-same-window)))))
 
 
 ;;; Entry points -- how state gets in
@@ -2737,11 +3423,17 @@ are structure, and a cursor parked on one says nothing about the line."
   (when (looking-at "\\*+ ")
     (goto-char (match-end 0))))
 
-(defun agent-river--scan (count test)
+(defun agent-river--scan (count test &optional settle)
   "Move to the COUNTth line satisfying TEST, forward when COUNT is positive.
 Returns nil and leaves point alone when there is none -- the same bargain
 `agent-river--map-scan' makes, for the same reason: a motion that lands
-somewhere near is one the next RET acts on by mistake."
+somewhere near is one the next RET acts on by mistake.
+
+SETTLE decides where on the line point comes to rest, and defaults to
+`agent-river--beginning-of-entry'.  It is an argument rather than a third
+copy of the loop above: the approval queue walks lines of its own, drawn
+with its own marker, and what differs between the two buffers is only
+where the text starts."
   (let ((found nil)
         (step (if (> count 0) 1 -1))
         (left (abs count)))
@@ -2756,7 +3448,7 @@ somewhere near is one the next RET acts on by mistake."
               (throw 'done nil))))))
     (when found
       (goto-char found)
-      (agent-river--beginning-of-entry)
+      (funcall (or settle #'agent-river--beginning-of-entry))
       t)))
 
 (defun agent-river-next-line (&optional n)
