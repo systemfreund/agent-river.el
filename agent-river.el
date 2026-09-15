@@ -3956,12 +3956,23 @@ having no main branch, which costs the marker and nothing else."
   "Return the total weight across PARTIES."
   (apply #'+ (mapcar (lambda (party) (plist-get party :weight)) parties)))
 
-(defun agent-river--map-writes (parties)
+(defun agent-river--map-writes (parties &optional tree)
   "Return how many of PARTIES\=' touches changed the file rather than read it.
 Unweighted, where the heat is weighted: this is not a reading about how
 recent the work was but about whether there was any, and a write does not
-stop having happened because it was a while ago."
-  (apply #'+ (mapcar (lambda (party) (or (plist-get party :writes) 0)) parties)))
+stop having happened because it was a while ago.
+
+TREE counts only the parties working in that worktree.  Asked of the
+whole line, a merged repository reported a landing in every tree the
+moment an agent wrote the file in any of them -- `src/foo.el' is
+untouched in the main checkout whether or not somebody rewrote it on a
+branch, and saying so on the strength of that somebody is a sentence
+about one tree resting on a fact about another."
+  (apply #'+ (mapcar (lambda (party)
+                       (if (or (null tree) (equal (plist-get party :tree) tree))
+                           (or (plist-get party :writes) 0)
+                         0))
+                     parties)))
 
 (defun agent-river--map-later (a b)
   "Return the later of times A and B, either of which may be nil."
@@ -4054,6 +4065,241 @@ party off the map entirely is the worse of the two readings."
              (>= (plist-get entry :weight) agent-river-map-party-floor)
              (equal abs (plist-get (gethash (plist-get entry :party) newest) :abs))))))
 
+;;; Worktrees
+;;
+;; Two checkouts of one repository are two directory trees and one piece of
+;; work.  The *identity* of a file across them was never in question --
+;; artifact keys are relative to the session cwd, so `src/foo.el' in a
+;; worktree and in the main checkout are the same key, and
+;; `agent-river-touching' has always answered for them together.  It is the
+;; placement that splits them, in exactly two places: a root is a session's
+;; cwd, and `agent-river--map-reach' relativises against one prefix.  What
+;; follows puts them back together for the map, and nothing else: every
+;; identity question in the package was already answered the merged way.
+
+(defcustom agent-river-map-worktrees t
+  "Whether the map draws a repository's worktrees as one tree.
+
+An agent started in a worktree beside the main checkout is, to the state,
+a session with a different cwd, so its files head a section of their own
+and the same name edited in both trees is drawn twice with nothing saying
+it is one file.  Merged, a repository is one listing, headed by its main
+worktree, and each party is named with the tree it is working in -- which
+is the fact the merge would otherwise take away, and the one a worktree
+workflow is actually asking about.
+
+Merging is refused unless there is something to merge: two trees of one
+repository, both with agents in them.  A session started in a
+subdirectory of a repository goes on heading its own section, the way it
+always has, because widening that to the whole checkout is a different
+change wearing this one's clothes.
+
+Nil draws every tree apart, which is the honest placement answer and what
+\\[agent-river-map-toggle-worktrees] goes back to for one buffer: the two
+files really are two files, on two branches, and a merge is where they
+meet."
+  :type 'boolean)
+
+(defvar agent-river--worktree-cache (make-hash-table :test 'equal)
+  "Absolute root to what git said about the tree it sits in.
+
+Each value is a plist: `:top' the worktree holding the root, `:repo' the
+git directory every worktree of one repository shares, `:main' the main
+worktree, and `:out' while the read is still running.  A `:repo' of
+`none' is a real answer -- not a repository, or no git -- and is kept, so
+a directory that is neither is asked once rather than on every draw.
+
+No TTL, unlike the diffstat: which worktree a directory is in changes
+about as often as the directory does, a worktree added later is a new
+root and is asked on its first draw, and `g' drops the table, which is
+where a tree that has been moved or pruned is noticed.")
+
+(defun agent-river--worktree-parse (output root)
+  "Return what `rev-parse' OUTPUT says about ROOT, or nil when it says nothing.
+
+Two lines in the order they were asked for: the worktree holding ROOT,
+and the git directory it shares with its siblings.  The second is the
+identity the grouping is built on -- every worktree of one repository
+prints the same path for it -- and it is printed relative to the
+process's directory, which is ROOT.
+
+The main worktree is that directory's parent, because a repository's own
+`.git' sits inside it, and nil for anything else: a bare repository has
+no main worktree, and neither has a linked one whose checkout has since
+been moved away.  Nil there costs the section its heading and nothing
+more; the grouping falls back to the busiest tree."
+  (let* ((lines (split-string output "\n" t))
+         (top (nth 0 lines))
+         (repo (and (nth 1 lines)
+                    (directory-file-name (expand-file-name (nth 1 lines) root))))
+         (main (and repo (equal (file-name-nondirectory repo) ".git")
+                    (directory-file-name (file-name-directory repo)))))
+    (when (and top repo)
+      (list :top (directory-file-name (expand-file-name top))
+            :repo repo
+            :main (and main (file-directory-p main) main)))))
+
+(defun agent-river--worktree-store (root cell)
+  "Record CELL as the tree ROOT is in, and let the map draw it merged.
+
+Nil is stored as no repository rather than left unset: unset means \"not
+asked\", which would have every draw start the read again for a directory
+that is never going to be one.  The map is marked dirty the way a
+diffstat answer marks it, because the first draw of a root shows the
+trees apart and this is what puts them together."
+  (puthash root (or cell (list :repo 'none)) agent-river--worktree-cache)
+  (agent-river-map-contribute))
+
+(defun agent-river--worktree-read (root)
+  "Ask git which tree ROOT is in, asynchronously.
+The cell is written before the process starts, so a draw that lands while
+the read is out sees an answer in progress rather than no answer, and does
+not start a second one."
+  (puthash root (list :out t) agent-river--worktree-cache)
+  (agent-river--git-run
+   root '("rev-parse" "--show-toplevel" "--git-common-dir")
+   (lambda (output)
+     (agent-river--worktree-store root (agent-river--worktree-parse output root)))
+   (lambda () (agent-river--worktree-store root nil))))
+
+(defun agent-river--worktree-of (root)
+  "Return the tree ROOT is in as a plist, or nil while that is not known.
+
+Not known covers three things a caller has no reason to tell apart: the
+read has not come back, the read failed, and ROOT is not in a repository
+at all.  All three mean the same for the grouping -- this root stands
+alone -- which is also what a draw does before any answer has landed."
+  (when agent-river-map-worktrees
+    (let ((cell (gethash root agent-river--worktree-cache)))
+      (unless cell
+        (agent-river--worktree-read root)
+        (setq cell (gethash root agent-river--worktree-cache)))
+      (and (stringp (plist-get cell :repo)) cell))))
+
+(defun agent-river--worktree-forget ()
+  "Drop what git said about every tree, so the next draw asks again."
+  (clrhash agent-river--worktree-cache))
+
+(defun agent-river--map-tree-name (tree)
+  "Return the short name TREE is known by, for naming a party's worktree."
+  (file-name-nondirectory (directory-file-name tree)))
+
+(defun agent-river--map-by-last (cells)
+  "Return CELLS -- each (NAME . TIME) -- most recent first.
+A cell with no time sorts last: it has never been touched, which is what
+a merged section's heading is when no agent is in the main worktree."
+  (sort cells (lambda (a b)
+                (let ((a-time (cdr a))
+                      (b-time (cdr b)))
+                  (if (and a-time b-time)
+                      (time-less-p b-time a-time)
+                    (and a-time (not b-time)))))))
+
+(defun agent-river--map-add-later (cells key last)
+  "Return CELLS with KEY carrying the later of LAST and whatever it had."
+  (let ((cell (assoc key cells)))
+    (if cell
+        (progn (setcdr cell (agent-river--map-later (cdr cell) last)) cells)
+      (cons (cons key last) cells))))
+
+(defvar agent-river--map-member-trees (make-hash-table :test 'equal)
+  "Canonical root to the trees drawn under it, as the last grouping left it.
+
+Filled by `agent-river--map-groups' at the top of a draw and read by
+everything below it, rather than each reader asking git again: the
+listing, the reached paths, the changed paths and the diffstat all have
+to agree about which trees a section is showing, and a second derivation
+is a second place for them to fall out of step.  Empty is the ordinary
+answer -- one tree per section, which is what a repository with no second
+worktree has, and what every draw shows before the first read lands.")
+
+(defun agent-river--map-members (path)
+  "Return the trees PATH stands for: itself, or the worktrees merged into it.
+
+PATH is a section root or anything below one -- descending into `src' of
+a merged repository asks about `src' in each of its worktrees -- so the
+part below the root is carried onto every member.  A member that has no
+such directory costs nothing: it lists nothing and no path lies under it."
+  (or (gethash path agent-river--map-member-trees)
+      (let (found)
+        (maphash (lambda (canonical members)
+                   (let ((prefix (file-name-as-directory canonical)))
+                     (when (and (not found) (string-prefix-p prefix path))
+                       (let ((rel (substring path (length prefix))))
+                         (setq found (mapcar (lambda (member)
+                                               (directory-file-name
+                                                (expand-file-name rel member)))
+                                             members))))))
+                 agent-river--map-member-trees)
+        found)
+      (list path)))
+
+(defun agent-river--map-dir-p (root name)
+  "Return non-nil when NAME is a directory in any tree ROOT stands for."
+  (seq-some (lambda (member) (file-directory-p (expand-file-name name member)))
+            (agent-river--map-members root)))
+
+(defun agent-river--map-groups (&optional scope)
+  "Return every tree the map draws, newest first, worktrees merged into one.
+
+The one step above `agent-river--map-all-roots', which goes on being the
+state's own reading of where the agents are: two of those roots that are
+worktrees of one repository are one place to whoever is reading the map,
+and drawn apart they put one file in two sections with nothing saying it
+is the same work.
+
+Merging is conditional on there being two trees to merge.  A group with
+one tree in it is emitted exactly as it arrived -- a session started in a
+subdirectory heads its section at that subdirectory, the way it always
+has -- because the alternative widens every section to its checkout,
+which is a change nobody asked for.
+
+A merged section is headed by the main worktree even when no agent is in
+it.  That is not a tree becoming a section for being dirty, which the
+listing refuses: it is the repository the worked trees belong to, and
+naming the section after whichever sibling is busiest would make one
+worktree look like the parent of the others.
+
+Fills `agent-river--map-member-trees' on the way through, which is how
+the rest of the draw learns what a section is showing."
+  (let ((groups (make-hash-table :test 'equal))
+        (order nil)
+        (result nil))
+    (clrhash agent-river--map-member-trees)
+    (dolist (cell (agent-river--map-all-roots scope))
+      (let* ((root (car cell))
+             (last (cdr cell))
+             (tree (agent-river--worktree-of root))
+             (key (or (and tree (plist-get tree :repo)) root))
+             (top (or (and tree (plist-get tree :top)) root))
+             (group (gethash key groups)))
+        (unless group
+          (setq group (list :main (and tree (plist-get tree :main))))
+          (push key order))
+        (setq group (plist-put group :tops
+                               (agent-river--map-add-later
+                                (plist-get group :tops) top last)))
+        (setq group (plist-put group :roots
+                               (agent-river--map-add-later
+                                (plist-get group :roots) root last)))
+        (puthash key group groups)))
+    (dolist (key (nreverse order))
+      (let* ((group (gethash key groups))
+             (tops (agent-river--map-by-last (plist-get group :tops))))
+        (if (null (cdr tops))
+            ;; One tree: every root in it stands as the state reported it.
+            (dolist (root (plist-get group :roots)) (push root result))
+          (let* ((main (plist-get group :main))
+                 (canonical (or main (car (car tops))))
+                 (last (seq-reduce (lambda (acc cell)
+                                     (agent-river--map-later acc (cdr cell)))
+                                   tops nil)))
+            (puthash canonical
+                     (delete-dups (cons canonical (mapcar #'car tops)))
+                     agent-river--map-member-trees)
+            (push (cons canonical last) result)))))
+    (agent-river--map-by-last result)))
+
 (defun agent-river--map-all-roots (&optional scope)
   "Return every directory tree the agents have touched, newest first.
 
@@ -4080,12 +4326,7 @@ Roots are sorted by the most recent touch within them."
       (maphash (lambda (root last-time)
                  (push (cons root last-time) result))
                roots)
-      (sort result (lambda (a b)
-                     (let ((a-time (cdr a))
-                           (b-time (cdr b)))
-                       (if (and a-time b-time)
-                           (time-less-p b-time a-time)
-                         (and a-time (not b-time)))))))))
+      (agent-river--map-by-last result))))
 
 (defun agent-river--map-reach (root &optional scope)
   "Return what the agents have reached inside ROOT, deepest detail kept.
@@ -4100,22 +4341,39 @@ been -- and is therefore nil throughout for a party that no longer
 exists.  Computed across everything the party reached, not just what fell
 inside ROOT, so descending into a subdirectory cannot invent a second
 \"most recent\" file that only looks like one because the real one was out
-of view."
-  (let* ((prefix (file-name-as-directory (expand-file-name root)))
+of view.
+
+ROOT may stand for several trees (`agent-river--map-members'), which is
+what merges a repository's worktrees into one listing: a path is matched
+against every member and relativised against the one that holds it, so
+`src/foo.el' reached in two worktrees is one node with two parties on it.
+Each party then carries the `:tree' it was reached from, because a merged
+line that did not say which worktree an agent is in would have answered
+the question by deleting it."
+  (let* ((members (agent-river--map-members root))
+         (merged (cdr members))
+         (prefixes (mapcar (lambda (member)
+                             (cons (file-name-as-directory
+                                    (expand-file-name member))
+                                   (and merged
+                                        (agent-river--map-tree-name member))))
+                           members))
          (by-rel (make-hash-table :test 'equal))
          (entries (agent-river--heat-entries scope))
          (newest (agent-river--map-newest entries)))
     (dolist (entry entries)
-      (let ((abs (agent-river--heat-absolute entry))
-            (party (plist-get entry :party))
-            (last (plist-get entry :last)))
+      (let* ((abs (agent-river--heat-absolute entry))
+             (party (plist-get entry :party))
+             (last (plist-get entry :last))
+             (hit (and abs (seq-find (lambda (cell)
+                                       (string-prefix-p (car cell) abs))
+                                     prefixes))))
         ;; A touch too cold to name is not reached any more, so the node it
         ;; would have made is never built: an entry left with no parties
         ;; would otherwise be listed with an empty annotation, which reads
         ;; as an agent whose name failed to render.
-        (when (and abs (string-prefix-p prefix abs)
-                   (agent-river--map-live-p entry newest))
-          (let* ((rel (substring abs (length prefix)))
+        (when (and hit (agent-river--map-live-p entry newest))
+          (let* ((rel (substring abs (length (car hit))))
                  (parties (or (gethash rel by-rel)
                               (puthash rel (make-hash-table :test 'equal) by-rel)))
                  (cell (gethash party parties)))
@@ -4125,6 +4383,15 @@ of view."
                            :writes (+ (or (plist-get cell :writes) 0)
                                       (or (plist-get entry :writes) 0))
                            :last (agent-river--map-later (plist-get cell :last) last)
+                           ;; The tree of the later touch, for the rare party
+                           ;; that reached one name from two of them: a party
+                           ;; is a session and a session has one cwd, so this
+                           ;; is a tie-break rather than a merge.
+                           :tree (if (or (null cell)
+                                         (eq last (agent-river--map-later
+                                                   (plist-get cell :last) last)))
+                                     (cdr hit)
+                                   (plist-get cell :tree))
                            ;; The absolute name, so `:current' is decided by
                            ;; identity rather than by a path that two roots
                            ;; could both produce.
@@ -4139,6 +4406,7 @@ of view."
                                   :weight (plist-get cell :weight)
                                   :writes (plist-get cell :writes)
                                   :last (plist-get cell :last)
+                                  :tree (plist-get cell :tree)
                                   :current (equal (plist-get cell :abs)
                                                   (plist-get (gethash party newest) :abs)))
                             plists))
@@ -4157,19 +4425,28 @@ of view."
   "Return the parties of NODES summed into one list, heaviest first.
 How a directory's reading is made: it is the aggregate of what lies
 beneath it and never a tally of its own, so the entry and the files under
-it can never disagree about who has been where."
+it can never disagree about who has been where.
+
+A party's `:tree' comes from its most recent touch, the same tie-break
+`agent-river--map-reach' makes one grain down: an agent that has moved
+from one worktree to another is named with the one it is in now."
   (let ((table (make-hash-table :test 'equal)))
     (dolist (node nodes)
       (dolist (party (plist-get node :parties))
-        (let ((cell (gethash (plist-get party :party) table)))
+        (let* ((cell (gethash (plist-get party :party) table))
+               (last (agent-river--map-later (plist-get cell :last)
+                                             (plist-get party :last))))
           (puthash (plist-get party :party)
                    (list :party (plist-get party :party)
                          :weight (+ (or (plist-get cell :weight) 0)
                                     (plist-get party :weight))
                          :writes (+ (or (plist-get cell :writes) 0)
                                     (or (plist-get party :writes) 0))
-                         :last (agent-river--map-later (plist-get cell :last)
-                                                       (plist-get party :last))
+                         :last last
+                         :tree (if (or (null cell)
+                                       (eq last (plist-get party :last)))
+                                   (plist-get party :tree)
+                                 (plist-get cell :tree))
                          :current (or (plist-get cell :current)
                                       (plist-get party :current)))
                    table))))
@@ -4181,15 +4458,25 @@ it can never disagree about who has been where."
   "Return ROOT's own directory entries, directories first, ignores dropped.
 Unreadable or missing, the answer is no entries rather than an error: the
 map still has the reached paths to show, and a root that went away should
-not take the view with it."
-  (let (dirs files)
-    (dolist (name (ignore-errors (directory-files root nil nil t)))
-      (unless (or (member name '("." ".."))
-                  (seq-some (lambda (re) (string-match-p re name))
-                            agent-river-map-ignore))
-        (if (file-directory-p (expand-file-name name root))
-            (push name dirs)
-          (push name files))))
+not take the view with it.
+
+The union across the trees ROOT stands for, where it stands for several.
+A file that exists only on the worktree's branch is on the disk of one
+member and not of the others, and listing the head member alone would
+have drawn it as `:missing' -- a deletion the map made up, over a file
+that is right there."
+  (let ((seen (make-hash-table :test 'equal))
+        dirs files)
+    (dolist (member (agent-river--map-members root))
+      (dolist (name (ignore-errors (directory-files member nil nil t)))
+        (unless (or (member name '("." ".."))
+                    (gethash name seen)
+                    (seq-some (lambda (re) (string-match-p re name))
+                              agent-river-map-ignore))
+          (puthash name t seen)
+          (if (file-directory-p (expand-file-name name member))
+              (push name dirs)
+            (push name files)))))
     (append (sort dirs #'string<) (sort files #'string<))))
 
 (defun agent-river--map-changed (root)
@@ -4222,21 +4509,26 @@ does not show is the one thing it exists not to do; a name only git has
 an opinion about is not activity, and without the filter every editor
 backup a repository happens not to ignore would earn a line."
   (when agent-river-map-dirty
-    (let ((table (agent-river--vc-cached root))
-          (prefix (file-name-as-directory (expand-file-name root)))
-          paths)
-      (when table
-        (maphash
-         (lambda (abs _stat)
-           (when (string-prefix-p prefix abs)
-             (let* ((rel (substring abs (length prefix)))
-                    (slash (string-search "/" rel))
-                    (top (if slash (substring rel 0 slash) rel)))
-               (unless (seq-some (lambda (re) (string-match-p re top))
-                                 agent-river-map-ignore)
-                 (push rel paths)))))
-         table))
-      (sort paths #'string<))))
+    (let (paths)
+      ;; Each tree ROOT stands for has a working tree of its own, on a
+      ;; branch of its own, so each is read against its own table and
+      ;; relativised against itself.  A path changed in two worktrees is
+      ;; one line here, the same as a path reached in two.
+      (dolist (member (agent-river--map-members root))
+        (let ((table (agent-river--vc-cached member))
+              (prefix (file-name-as-directory (expand-file-name member))))
+          (when table
+            (maphash
+             (lambda (abs _stat)
+               (when (string-prefix-p prefix abs)
+                 (let* ((rel (substring abs (length prefix)))
+                        (slash (string-search "/" rel))
+                        (top (if slash (substring rel 0 slash) rel)))
+                   (unless (seq-some (lambda (re) (string-match-p re top))
+                                     agent-river-map-ignore)
+                     (push rel paths)))))
+             table))))
+      (sort (delete-dups paths) #'string<))))
 
 (defun agent-river--map-entries (root &optional scope)
   "Return ROOT's listing, annotated with what the agents have done in it.
@@ -4255,6 +4547,10 @@ working tree says has changed.  It is filtered to the last two unless
 kept by the third alone, which is a line with no parties on it: git
 cannot say who changed a file, so that is the whole of what is known
 about it and the column beside it says the rest.
+
+All three readings are taken across every tree ROOT stands for
+\(`agent-river--map-members'), so a merged repository is one listing and
+not the head worktree's listing with the others' work laid over it.
 
 `:missing' marks an entry the disk does not have -- deleted, renamed, or
 reached through an anchor this root has nothing to do with.  Showing it
@@ -4294,7 +4590,7 @@ the entries that matter."
           (push (list :rel under :parties nil) (gethash top grouped)))))
     (dolist (name names)
       (let* ((under (nreverse (gethash name grouped)))
-             (dir (file-directory-p (expand-file-name name root))))
+             (dir (agent-river--map-dir-p root name)))
         (remhash name grouped)
         (push (list :name name
                     :dir dir
@@ -4453,15 +4749,17 @@ different answer from an empty table: empty says every path this branch
 touched is in the main branch, nil says we do not know, and nothing is
 marked landed on a nil.")
 
-(defun agent-river--vc-claim (root process)
-  "Count one more read in flight for ROOT, or one fewer when PROCESS is nil.
+(defun agent-river--vc-claim (root starting)
+  "Count one more read in flight for ROOT, or one fewer when STARTING is nil.
 
 A count rather than the process itself, since the reads run beside each
 other now: holding the last one started would let the first to finish
 clear the flag while its sibling was still running, and the next redraw
-would start the whole thing again underneath it."
+would start the whole thing again underneath it.  Which also means the
+process is no use here beyond saying that there is one, so it is not
+asked for."
   (let* ((cell (gethash root agent-river--vc-cache))
-         (out (max 0 (+ (or (plist-get cell :out) 0) (if process 1 -1)))))
+         (out (max 0 (+ (or (plist-get cell :out) 0) (if starting 1 -1)))))
     (puthash root (list :at (or (plist-get cell :at) 0)
                         :table (plist-get cell :table)
                         :ahead (plist-get cell :ahead)
@@ -4491,7 +4789,32 @@ not having read it."
   (agent-river-map-contribute))
 
 (defun agent-river--vc-run (root args callback &optional on-fail)
+  "Run git with ARGS in ROOT and pass its output to CALLBACK, counted in flight.
+
+`agent-river--git-run' with the diffstat's bookkeeping around it: the read
+is counted while it runs, and the count is released before the callback,
+because a callback that starts the next command claims the slot again.
+The worktree read next door wants the process and not the counter, which
+is why the two are separate functions -- borrowing this one would have a
+`rev-parse' hold the diffstat's TTL open for a tree it is not reading."
+  (agent-river--vc-claim root t)
+  ;; Claimed before the process exists rather than after, and released
+  ;; again if it never comes to exist: a count that is only ever
+  ;; incremented on success would be stuck above zero for as long as Emacs
+  ;; runs, and a root whose count never falls is a root that is never read
+  ;; again.
+  (condition-case err
+      (agent-river--git-run root args callback
+                            (or on-fail (lambda () (agent-river--vc-store root nil)))
+                            (lambda () (agent-river--vc-claim root nil)))
+    (error (agent-river--vc-claim root nil)
+           (signal (car err) (cdr err)))))
+
+(defun agent-river--git-run (root args callback &optional on-fail on-exit)
   "Run git with ARGS in ROOT and pass its output to CALLBACK.
+
+ON-EXIT runs first whatever happened, for a caller with bookkeeping to
+undo before either branch gets to start a command of its own.
 
 Asynchronous, and that is the whole point.  The map redraws every few
 seconds while an agent works, and a diff on a large repository takes long
@@ -4503,37 +4826,30 @@ it already make.
 A non-zero exit is not an error to report but an answer to record: a
 directory that is not a repository is an ordinary thing for the map to be
 pointed at, and it must cost a line its column and nothing else.  ON-FAIL
-says what recording it means for this command; without it the root is
-stored as no repository, which is right for the read that decides that and
-wrong for every read chained after it -- one of those failing must not
-take the answers already in hand down with it."
-  (let* ((buffer (generate-new-buffer " *agent-river-vc*" t))
-         (process
-          (make-process
-           :name "agent-river-vc"
-           :buffer buffer
-           :noquery t
-           :connection-type 'pipe
-           :coding 'utf-8-unix
-           :command (append (list agent-river-vc-program "-C" root) args)
-           :sentinel
-           (lambda (process _event)
-             (unless (process-live-p process)
-               (let ((output (with-current-buffer buffer (buffer-string)))
-                     (ok (eq (process-exit-status process) 0)))
-                 (kill-buffer buffer)
-                 ;; Released before the callback runs, because a callback
-                 ;; that starts the next command claims the slot again.
-                 (agent-river--vc-claim root nil)
-                 (condition-case nil
-                     (if ok
-                         (funcall callback output)
-                       (funcall (or on-fail
-                                    (lambda () (agent-river--vc-store root nil)))))
-                   (error (funcall (or on-fail
-                                       (lambda ()
-                                         (agent-river--vc-store root nil))))))))))))
-    (agent-river--vc-claim root process)))
+says what recording it means for this command; without it the failure is
+dropped, which is right for a caller with nothing to record and wrong for
+every read chained after another -- one of those failing must not take
+the answers already in hand down with it."
+  (let ((buffer (generate-new-buffer " *agent-river-vc*" t)))
+    (make-process
+     :name "agent-river-vc"
+     :buffer buffer
+     :noquery t
+     :connection-type 'pipe
+     :coding 'utf-8-unix
+     :command (append (list agent-river-vc-program "-C" root) args)
+     :sentinel
+     (lambda (process _event)
+       (unless (process-live-p process)
+         (let ((output (with-current-buffer buffer (buffer-string)))
+               (ok (eq (process-exit-status process) 0)))
+           (kill-buffer buffer)
+           (when on-exit (funcall on-exit))
+           (condition-case nil
+               (if ok
+                   (funcall callback output)
+                 (when on-fail (funcall on-fail)))
+             (error (when on-fail (funcall on-fail))))))))))
 
 (defun agent-river--vc-parse (output root table)
   "Fold git's NUL-separated numstat OUTPUT into TABLE, keyed under ROOT.
@@ -4771,8 +5087,13 @@ is in there now."
   "Ask git about ROOT, if the last answer is old enough.
 The throttle is `agent-river--vc-stats\=' own -- the map offers a refresh on
 the contributor\='s `:ttl\=', and this one keeps the TTL it always had, so a
-map redraw and a dired shading cannot start two reads of the same tree."
-  (agent-river--vc-stats root))
+map redraw and a dired shading cannot start two reads of the same tree.
+
+Every tree ROOT stands for is read, each against its own HEAD: two
+worktrees are two working trees on two branches, and one of them read
+twice would say nothing about the other."
+  (dolist (member (agent-river--map-members root))
+    (agent-river--vc-stats member)))
 
 (defun agent-river--rows-vc (root nodes)
   "Return what git has to say about each of NODES under ROOT.
@@ -4786,39 +5107,83 @@ the contributor that knows whether its readings aggregate.
 
 The row spells out what the column abbreviates.  That is the relation the
 whole design rests on: the line is a projection of the rows, so the two
-cannot disagree about what git said."
-  (let ((table (agent-river--vc-cached root))
-        (out (make-hash-table :test 'equal)))
+cannot disagree about what git said.
+
+Where ROOT stands for several worktrees there is a row per tree, named
+with it, because each has its own HEAD and its own branch: `src/foo.el'
+may be ten lines further on in one and untouched in the other, and those
+are two facts rather than one fact read twice.  What the line does with
+them is `agent-river--vc-summary\=' business."
+  (let* ((members (agent-river--map-members root))
+         (merged (cdr members))
+         (prefix (file-name-as-directory (expand-file-name root)))
+         (out (make-hash-table :test 'equal)))
     (dolist (node nodes)
       (let* ((path (plist-get node :path))
-             (stat (agent-river--vc-under table path))
-             (writes (agent-river--map-writes (plist-get node :parties)))
-             (landed (and (> writes 0) (agent-river--vc-landed-p root path))))
-        (cond
-         (stat
-          (puthash path
-                   (list (list :key "vc"
-                               :column (agent-river--vc-column stat)
-                               :text (concat
-                                      (or (agent-river--vc-column-plain stat)
-                                          "changed")
-                                      " vs HEAD"
-                                      (if (and (plist-get node :dir)
-                                               (> (nth 3 stat) 1))
-                                          (format " in %d files" (nth 3 stat))
-                                        "")
-                                      (if (nth 2 stat)
-                                          ", untracked by git" ""))))
-                   out))
-         (landed
-          (puthash path
-                   (list (list :key "vc"
-                               :face 'agent-river-landed
-                               :column (agent-river--map-mark
-                                        agent-river-map-landed-marker
-                                        'agent-river-landed)
-                               :text "in the main branch"))
-                   out)))))
+             (rel (and (string-prefix-p prefix path)
+                       (substring path (length prefix))))
+             (parties (plist-get node :parties))
+             (writes (lambda (tree) (agent-river--map-writes parties tree)))
+             rows)
+        ;; A node the head tree cannot place is asked of that tree alone:
+        ;; without a path below the root there is nothing to carry onto the
+        ;; members, and asking each of them about the same absolute name
+        ;; would answer the same thing once per member.
+        (dolist (member (if rel members (list root)))
+          (let* ((mpath (if rel (expand-file-name rel member) path))
+                 (stat (agent-river--vc-under (agent-river--vc-cached member) mpath))
+                 (tree (and merged (agent-river--map-tree-name member)))
+                 ;; Whether this tree is one the line's agents are in, which
+                 ;; is what lets the column pick between two answers below.
+                 (mine (> (funcall writes tree) 0))
+                 (landed (and mine (agent-river--vc-landed-p member mpath)))
+                 (key (if tree (concat "vc/" tree) "vc"))
+                 (said (if tree (concat tree ": ") "")))
+            (cond
+             (stat
+              (push (list :key key
+                          :mine mine
+                          :rank 2
+                          ;; What the column cannot hold: which of several
+                          ;; trees this is, and how many files a directory's
+                          ;; total is spread over.  With neither, the row is
+                          ;; the column spelled out -- `+529 -122' up there
+                          ;; and `+529 -122 vs HEAD' underneath -- so it
+                          ;; says so and is drawn only where the line is not
+                          ;; carrying it.  The frame is the one thing it
+                          ;; adds, and a fact that never changes belongs in
+                          ;; the documentation rather than on every line.
+                          :summarised (not (or tree
+                                               (and (plist-get node :dir)
+                                                    (> (nth 3 stat) 1))))
+                          :column (agent-river--vc-column stat)
+                          :text (concat
+                                 said
+                                 (or (agent-river--vc-column-plain stat)
+                                     "changed")
+                                 " vs HEAD"
+                                 (if (and (plist-get node :dir)
+                                          (> (nth 3 stat) 1))
+                                     (format " in %d files" (nth 3 stat))
+                                   "")
+                                 (if (nth 2 stat)
+                                     ", untracked by git" "")))
+                    rows))
+             (landed
+              (push (list :key key
+                          :mine mine
+                          :rank 2
+                          ;; The marker in the column and the row say the
+                          ;; same sentence, and only one of them is in a
+                          ;; place a reader can scan.
+                          :summarised (not tree)
+                          :face 'agent-river-landed
+                          :column (agent-river--map-mark
+                                   agent-river-map-landed-marker
+                                   'agent-river-landed)
+                          :text (concat said "in the main branch"))
+                    rows)))))
+        (when rows (puthash path (nreverse rows) out))))
     out))
 
 (defun agent-river--vc-summary (rows)
@@ -4828,8 +5193,25 @@ Carried on the row rather than computed again from the tables, so the
 column and the row it summarises cannot come to different conclusions --
 which is the whole claim the line makes about the rows beneath it.  A
 contributor may keep its own keys on a row; the map reads the ones it
-knows and leaves the rest alone."
-  (plist-get (car rows) :column))
+knows and leaves the rest alone.
+
+Where several trees answered, the column follows the work.  A merged
+section is several working trees on several branches, and the column is
+one fixed-width reading: summing them would state a number true of no
+tree.  So one answer is the column, as it always was; and where there are
+two, the one from the tree this line's agents are actually in wins --
+which is the tie-break the whole view is already built on, since a map of
+where the agents are has no business showing a checkout's unrelated
+changes in preference to theirs.
+
+Given up only where that leaves it ambiguous still: agents in two of the
+trees, both with something pending.  The rows say it per tree and the
+line says nothing, which is the bargain the line and the rows have always
+had -- the line carries what can be read down the listing and hands back
+what cannot."
+  (let ((mine (seq-filter (lambda (row) (plist-get row :mine)) rows)))
+    (cond ((null (cdr rows)) (plist-get (car rows) :column))
+          ((and mine (null (cdr mine))) (plist-get (car mine) :column)))))
 
 (defun agent-river--vc-column-plain (stat)
   "Return STAT as unmarked text, for a row rather than for the column.
@@ -4896,6 +5278,17 @@ A row is a plist of `:text\=' (one line, which the map escapes), `:face\='
 \(a symbol, never a face on the text -- tree-sitter owns `face\=' in this
 buffer), `:key\=' (stable across redraws, or the point lands on the wrong
 row after one) and an optional `:visit\=' thunk for RET.
+
+Two more say where it belongs rather than what it says.  `:rank\=' is a
+number, low first, and it orders the rows of *all* the contributors
+against each other -- ties keep this list's order, so a contributor that
+sets none goes on being placed by where it was registered.  It is also
+what `agent-river-map-detail-rows\=' cuts from: the tail is the least worth
+keeping rather than whoever came last.  `:summarised\=' is the row saying
+its whole content is in the reading `:summary\=' put on the line, so the map
+draws it only where the line is not carrying it -- see
+`agent-river--map-said-p\=', which is deliberately per contributor rather
+than per row.
 
 NODES are the lines about to be drawn, each `:path\=', `:dir\=' and
 `:parties\=', so a contributor can answer for a directory as well as a file
@@ -5027,6 +5420,51 @@ and a view that dies with it is the worse outcome.  The same bargain
   "Return the rows of CONTRIBUTED, flattened in contributor order."
   (apply #'append (mapcar #'cdr contributed)))
 
+(defun agent-river--map-said-p (pair column)
+  "Return non-nil when the line already says everything PAIR has to say.
+
+PAIR is one (CONTRIBUTOR . ROWS).  Three conditions, and all three are
+needed.  COLUMN, because with nothing holding the width open there is no
+line reading and the rows are the whole answer.  A `:summary' that
+actually produced one, since a contributor that earned no column on this
+node has said nothing up there.  And `:summarised' on *every* row, which
+is the contributor's own declaration that the row adds nothing the column
+does not carry -- the map cannot tell `+2 -1 vs HEAD' from `+2 -1 vs HEAD
+in 12 files' by looking, and should not learn to.
+
+Per contributor rather than per row, because a set with one row taken out
+of it reads as the line's reading belonging to whichever rows are left:
+two worktrees answer, the column takes one of them, and dropping that row
+alone would leave the other sitting under a number that is not its own."
+  (let ((summary (plist-get (car pair) :summary)))
+    (and column summary
+         (funcall summary (cdr pair))
+         (seq-every-p (lambda (row) (plist-get row :summarised)) (cdr pair))
+         t)))
+
+(defun agent-river--map-shown-rows (contributed column)
+  "Return CONTRIBUTED as the rows to draw, most urgent first.
+
+Two decisions, both declared by the rows themselves rather than judged
+here.  What the line already says is dropped (`agent-river--map-said-p'):
+`- +529 -122 vs HEAD' under a line reading `+529 -122' is the line's own
+reading written out a second time, in the one place this design says
+there must not be a second account of anything.  Dropping it is not a
+break in that rule but the rule applied: the row still produced the
+column, which is why it is still asked for it here.
+
+Then `:rank', low first and stable, so a contributor's own order survives
+inside its rank and the order between two contributors does not rest on
+which of them somebody registered first.  It also decides what
+`agent-river-map-detail-rows' cuts: the tail is the least worth keeping
+now, rather than whoever was registered last."
+  (let (rows)
+    (dolist (pair contributed)
+      (unless (agent-river--map-said-p pair column)
+        (setq rows (append rows (cdr pair)))))
+    (sort rows (lambda (a b) (< (or (plist-get a :rank) 0)
+                                (or (plist-get b :rank) 0))))))
+
 (defun agent-river--map-summarised-p (rows)
   "Return non-nil when anything in ROWS would put a reading on a line."
   (let (found)
@@ -5066,7 +5504,13 @@ changed the file rather than read it.
 
 Ordered by the parties themselves, which `agent-river--map-reach\=' has
 already sorted heaviest first, so the row order is the same reading as the
-shading and cannot contradict it."
+shading and cannot contradict it.
+
+A party reached through a merged repository is named with its worktree,
+`alpha@feature-x\='.  Merging the trees answers \"is this the same file\"
+and would otherwise have deleted \"where is this agent working\", which in
+a worktree workflow is the more pressing of the two; the name is where it
+goes, because it is a fact about the party rather than about the file."
   (let ((table (make-hash-table :test 'equal)))
     (dolist (node nodes)
       (let ((rows
@@ -5075,11 +5519,18 @@ shading and cannot contradict it."
                 (let ((writes (or (plist-get party :writes) 0))
                       (last (plist-get party :last)))
                   (list :key (concat "party/" (plist-get party :party))
+                        ;; Between the step above and the diffstat below:
+                        ;; who has been here outlasts what is happening this
+                        ;; second, and answers the question the map is
+                        ;; opened with before the state of the tree does.
+                        :rank 1
                         :face (if (plist-get party :current)
                                   'agent-river-prompt
                                 'agent-river-stale)
                         :text (concat
                                (plist-get party :party)
+                               (if (plist-get party :tree)
+                                   (concat "@" (plist-get party :tree)) "")
                                (if (plist-get party :current)
                                    (concat " " agent-river-map-here-marker) "")
                                (if (> writes 0)
@@ -5119,6 +5570,11 @@ come back yet."
                (puthash abs
                         (append (gethash abs table)
                                 (list (list :key (concat "step/" (agent-river-state-id state))
+                                            ;; Ahead of the rest: it is the
+                                            ;; only row about now, and it is
+                                            ;; also the one that stops being
+                                            ;; true while you read it.
+                                            :rank 0
                                             :face 'agent-river-act
                                             :text (format "%s: %s since %s"
                                                           (agent-river--party-label state)
@@ -5217,8 +5673,13 @@ drawn once and then quietly gone."
     (concat (if nested "  - " "- ")
             (if face (agent-river--map-mark text face) text))))
 
-(defun agent-river--map-rows-insert (contributed path &optional nested)
-  "Insert CONTRIBUTED rows for PATH, capped and marked for motion.
+(defun agent-river--map-rows-insert (rows path &optional nested)
+  "Insert ROWS under PATH, capped and marked for motion.
+
+ROWS is what `agent-river--map-shown-rows' left, not what the
+contributors said: the same list decides the fold marker on the line
+above, so a node whose only row the line already carries shows no twisty
+rather than one that opens onto nothing.
 
 Each row carries its node\='s path, so RET on a row acts on the thing the
 row is about; a row with a `:visit\=' of its own overrides that.  It carries
@@ -5226,8 +5687,7 @@ its `:key\=' as well, which is what keeps point on the right row across a
 redraw -- `agent-river--map-goto\=' finds a line again by what it names, and
 a row that named only its parent would inherit its parent\='s identity and
 land point a line or two off after every draw."
-  (let* ((rows (agent-river--map-row-list contributed))
-         (shown (seq-take rows agent-river-map-detail-rows)))
+  (let ((shown (seq-take rows agent-river-map-detail-rows)))
     (dolist (row shown)
       (insert (propertize
                (concat (agent-river--map-row-line row nested) "\n")
@@ -5315,8 +5775,14 @@ as though it were still there, which is the one thing this number is for.
 ROOT is nil in the overview, which spans ROOTS trees and has no one path
 to be named after.  Titling it with any of them -- the most recent, say --
 is what this replaced: the heading then read as though that tree were the
-project and the others were somewhere inside it."
+project and the others were somewhere inside it.
+
+A merged repository says how many worktrees it is showing, which is the
+one thing about a merged section that cannot be read off any of its
+lines: the names below carry their own trees, but a reader who has not
+noticed one yet would take the listing for a single checkout."
   (let* ((gone (agent-river--gone-parties))
+         (trees (and root (length (agent-river--map-members root))))
          (parties (seq-remove
                    (lambda (party) (gethash (plist-get party :party) gone))
                    (agent-river--map-merge-parties
@@ -5329,6 +5795,9 @@ project and the others were somewhere inside it."
                                         (abbreviate-file-name root))
                                      (format "%d roots" (or roots 0)))
                                    'agent-river-prompt)
+            (if (and trees (> trees 1))
+                (format "  ·  %d worktrees" trees)
+              "")
             (if parties
                 (format "  ·  %d agent%s" (length parties)
                         (if (= (length parties) 1) "" "s"))
@@ -5389,9 +5858,12 @@ nothing."
       (with-current-buffer buffer
         (let* ((here (agent-river--map-here))
                (inhibit-read-only t)
+               ;; Asked whether or not the map is zoomed: the grouping is
+               ;; what tells everything below which trees a section stands
+               ;; for, and a zoomed map is looking at one of those sections.
+               (groups (agent-river--map-groups agent-river-map-scope))
                (roots (or (and agent-river--map-root (list agent-river--map-root))
-                          (mapcar #'car (agent-river--map-all-roots
-                                         agent-river-map-scope))
+                          (mapcar #'car groups)
                           ;; Nothing folded yet.  Showing where this Emacs
                           ;; happens to be beats an empty buffer: the listing
                           ;; is still a listing before any agent has reached
@@ -5455,14 +5927,19 @@ nothing."
                        (dir (plist-get entry :dir))
                        (path (expand-file-name name root))
                        (mine (gethash path rows))
-                       (open (agent-river--map-open-p entry root mine)))
+                       ;; Filtered before the marker is decided, not after:
+                       ;; the twisty is a promise that there is something
+                       ;; under the line, and a node whose only row the line
+                       ;; is already carrying has nothing to open onto.
+                       (shown (agent-river--map-shown-rows mine column))
+                       (open (agent-river--map-open-p entry root shown)))
                   (insert (propertize
                            (concat (agent-river--map-line
                                     level (concat name (if dir "/" ""))
                                     (plist-get entry :parties)
                                     (plist-get entry :missing)
                                     (agent-river--map-summary mine column)
-                                    (and mine (if open 'open 'closed)))
+                                    (and shown (if open 'open 'closed)))
                                    "\n")
                            'agent-river-map-name name
                            'agent-river-map-path path
@@ -5477,13 +5954,14 @@ nothing."
                            ;; apart if the line is ever formatted differently.
                            'agent-river-map-active (and (plist-get entry :parties) t)))
                   (when open
-                    (agent-river--map-rows-insert mine path)
+                    (agent-river--map-rows-insert shown path)
                     (let* ((files (plist-get entry :files))
                            (shown (seq-take files agent-river-map-detail-files)))
                       (dolist (file shown)
                         (let* ((fpath (expand-file-name (plist-get file :rel) path))
                                (frows (gethash fpath rows))
-                               (fopen (agent-river--map-folded-p fpath (and frows t))))
+                               (fshown (agent-river--map-shown-rows frows column))
+                               (fopen (agent-river--map-folded-p fpath (and fshown t))))
                         (insert (propertize
                                  (concat (agent-river--map-line
                                           'file (plist-get file :rel)
@@ -5498,7 +5976,7 @@ nothing."
                                           ;; all.
                                           (not (file-exists-p fpath))
                                           (agent-river--map-summary frows column)
-                                          (and frows (if fopen 'open 'closed)))
+                                          (and fshown (if fopen 'open 'closed)))
                                          "\n")
                                  'agent-river-map-name name
                                  'agent-river-map-rel (plist-get file :rel)
@@ -5507,7 +5985,7 @@ nothing."
                                  'agent-river-map-active
                                  (and (plist-get file :parties) t)))
                         (when fopen
-                          (agent-river--map-rows-insert frows fpath t))))
+                          (agent-river--map-rows-insert fshown fpath t))))
                       (when (> (length files) (length shown))
                         (insert (propertize
                                  (concat (agent-river--map-marker 'file) "…\n")
@@ -5704,9 +6182,12 @@ back.  What the eye saw was a refresh that took seconds and sometimes did
 not finish at all -- the offer was declined until the throttle aged out,
 and the draw that would have made it again comes from the redraw timer,
 which retires while nothing is happening.  Asking again is what a refresh
-by hand means, so both tables go."
+by hand means, so both tables go.  What git said about the worktrees goes
+with them: it has no TTL of its own, so this is the one place a tree that
+has been added, moved or pruned is noticed."
   (interactive)
   (agent-river--vc-forget)
+  (agent-river--worktree-forget)
   (clrhash agent-river--map-refreshed)
   (agent-river--map-draw))
 
@@ -5747,6 +6228,25 @@ goes on being what a fresh map opens with."
                "listing everything"
              "listing only what agents have reached")))
 
+(defun agent-river-map-toggle-worktrees ()
+  "Draw a repository's worktrees as one tree or as several, in this buffer.
+
+Buffer-local, like \\[agent-river-map-toggle-untouched] and for the same
+reason: the gesture is undone by the same gesture and
+`agent-river-map-worktrees' goes on being what a fresh map opens with.
+
+Splitting them again is not a fallback but the other honest reading: a
+file reached in two worktrees is one name on two branches, and which of
+those you mean depends on whether you are asking what the agents are
+working on or what is on your disk."
+  (interactive)
+  (setq-local agent-river-map-worktrees (not agent-river-map-worktrees))
+  (agent-river--map-draw)
+  (message "map: %s"
+           (if agent-river-map-worktrees
+               "worktrees merged into their repository"
+             "every worktree its own tree")))
+
 (defun agent-river-map-visit ()
   "Descend into the directory at point, or open the file at point.
 The lens is moved rather than widened: one directory is always listed in
@@ -5786,7 +6286,7 @@ emptier the further up it goes, with the other trees still out of view."
   (let ((root agent-river--map-root))
     (cond
      ((null root) (user-error "Already showing every root"))
-     ((member root (mapcar #'car (agent-river--map-all-roots agent-river-map-scope)))
+     ((member root (mapcar #'car (agent-river--map-groups agent-river-map-scope)))
       (setq agent-river--map-root nil)
       (agent-river--map-draw))
      (t
@@ -5877,6 +6377,7 @@ makes this a degradation rather than a second view to keep in step."
   (define-key map (kbd "RET") #'agent-river-map-visit)
   (define-key map (kbd "^") #'agent-river-map-up)
   (define-key map (kbd "a") #'agent-river-map-toggle-untouched)
+  (define-key map (kbd "w") #'agent-river-map-toggle-worktrees)
   ;; The one forgetting command that belongs on a key here: it drops only
   ;; what is about a file that is already gone, where
   ;; `agent-river-forget-artifacts' drops the record of the work itself and

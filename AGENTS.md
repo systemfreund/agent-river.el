@@ -442,6 +442,47 @@ Four things about the map are load-bearing:
   number, so that pushing entries down a level for the root headings cannot
   push files into being headings too. Folds are keyed on absolute paths for
   the same reason: `src` under one root is not `src` under another.
+- **A repository's worktrees are one tree, and only the map ever thought
+  otherwise** (`agent-river-map-worktrees`, default on; `w` splits them for
+  one buffer). Artifact keys are relative to the session cwd, so `src/foo.el`
+  in a worktree and in the main checkout is the same key and
+  `agent-river-touching` has always answered for both at once; it is
+  *placement* that split them, in the two places placement is decided — a
+  root is a session's cwd, and `agent-river--map-reach` relativised against
+  one prefix. `agent-river--map-groups` sits above `agent-river--map-all-roots`,
+  which stays the state's own reading, and merges roots that git says share a
+  `--git-common-dir`; `agent-river--map-member-trees` is what the rest of the
+  draw reads, so the listing, the reached paths, the changed paths and the
+  diffstat cannot come to different conclusions about what a section is
+  showing. Six things it owes. **Merging only where there is something to
+  merge** — two *trees* of one repository, both in the state: grouping
+  unconditionally would widen a session started in `repo/backend` to the whole
+  checkout, which is a different change wearing this one's clothes. **The
+  section is headed by the main worktree even when no agent is in it**, which
+  is not a tree becoming a section for being dirty but the repository the
+  worked trees belong to — naming it after the busiest sibling makes one
+  worktree look like the parent of the others. **The party carries its tree**
+  (`alpha@feature-x`): merging answers "is this the same file" and would
+  otherwise delete "where is this agent working", which is the more pressing
+  of the two once worktrees are in play. **The listing is the union** — a file
+  living only on one branch is on one member's disk, and listing the head
+  worktree alone drew it struck through, a deletion the map made up. **The
+  diffstat is per tree** and therefore a row apiece: two worktrees are two
+  working trees on two branches, and summing them states a number true of no
+  tree. The column then follows the work — one answer is the column as ever,
+  two answers go to the tree this line's agents are in, and it is given up only
+  where even that is ambiguous. Which is also why a landing is counted with
+  `agent-river--map-writes` *per tree*: asked of the whole line, every merged
+  file was "in the main branch" in the checkout on the strength of somebody
+  having rewritten it on a branch. And **what git says is cached without a
+  TTL** (`agent-river--worktree-cache`) — which worktree a directory is in
+  changes about as often as the directory does, a worktree added later is a
+  new root and asked on its first draw, and `g` is where a tree that has been
+  moved or pruned is noticed. The read is asynchronous like every other, so
+  the first draw shows the trees apart and the answer merges them a moment
+  later; `agent-river--git-run` is the process without the diffstat's
+  in-flight counting around it, because a `rev-parse` holding that counter
+  open would stop a tree being read for a question it was not asking.
 - **Depth only where there is activity.** A whole tree unfolded is unreadable
   in a monorepo, so RET descends (`agent-river-map-descend`) rather than
   widening, and a file five directories down is shown under the one entry the
@@ -573,6 +614,29 @@ Four things about the map are load-bearing:
   (`agent-river--map-here`), and a row that named only its node would inherit
   its node's identity and land point a line or two off after every draw. Its
   `:face` is **named, never set** — tree-sitter owns `face` here.
+- **A row the line already carries is not drawn under it**
+  (`:summarised`, `agent-river--map-said-p`). `- +529 -122 vs HEAD` beneath
+  a line reading `+529 -122` is the line's own reading written out a second
+  time — the thing the projection rule exists to prevent, arrived at from
+  the other side. Dropping it is that rule applied rather than broken: the
+  row still *produces* the column, which is why it is still asked for it,
+  and only the repetition goes. Three things hold it: the map never judges
+  redundancy by looking, because `+2 -1 vs HEAD` and `+2 -1 vs HEAD in 12
+  files` differ by a fact no column can hold, so the **contributor declares
+  it** per row; it applies only where the **column is actually reserved**,
+  since with nothing holding the width open the row is the whole answer;
+  and it is decided **per contributor, not per row** — a set with one row
+  taken out of it reads as the line's number belonging to whichever rows
+  are left, which in a merged repository is the wrong worktree. The filter
+  runs before the fold marker is chosen, so a node whose only row the line
+  carries shows no twisty rather than one that opens onto nothing.
+- **Order is declared, not positional** (`:rank`, low first, ties keeping
+  the order of `agent-river-map-contributors`). Which contributor was
+  registered first is not a statement about which of their rows is worth
+  reading: what is happening in the file *now* (`step`, rank 0) outranks
+  who has been in it (`parties`, 1), which outranks the state of the tree
+  (`vc`, 2). It is also what `agent-river-map-detail-rows` cuts from — the
+  tail is the least worth keeping rather than whoever was registered last.
 - **Rows ride the fine grain only.** `n`/`p` stop on them; `M-n`/`M-p` skip
   them (`agent-river--map-row-line-p`, since a row inherits its node's path
   and cannot be told apart by the path alone); `>`/`<` pass over them because
