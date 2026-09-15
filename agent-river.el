@@ -4944,7 +4944,7 @@ to say which of the two any given colour means.  This is also the thing
 most worth being able to scan a whole listing for."
   :type 'string)
 
-(defcustom agent-river-map-here-marker "⏿"
+(defcustom agent-river-map-here-marker "👁️‍🗨️"
   "Marker for the entry holding an agent's most recent touch.
 Drawn only while that agent still exists: the marker is the map's one
 present-tense reading, and over a session that has ended it points at
