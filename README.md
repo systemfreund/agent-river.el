@@ -475,6 +475,105 @@ Three constraints hold this together, and each is load-bearing:
   mechanism is corrupted — an agent can lower it by avoiding the *measure*
   rather than the problem.
 
+## What a session is waiting to be allowed
+
+The one thing that travels the other way. `agent-river-approvals-mode` (off
+by default) watches agent-shell's permission requests: it chains onto
+`agent-shell-permission-responder-function` — a slot, not a hook, where
+returning non-nil means "handled, skip the dialog", so this hands back
+whatever function it replaced returns and never swallows a question — and
+subscribes to each session's `permission-request` events. The two halves
+share a request id and neither has both: the responder is given the options
+and the means to answer and is not told whose session it is, the event is
+dispatched in the session's buffer and carries no options.
+
+A pending question is a *current-state* fact, so it is not folded. It stops
+being true the moment somebody answers it — including with a button in the
+session buffer, which nothing here would hear — so it lives in a side table
+the views query where they are read, the way `buffer-modified-p` is asked
+rather than remembered. What *is* point-in-time is that the question was
+put, and that gets a log line (`?`).
+
+With the mode on, the session's panel line grows a `asks: …` clause and `a`
+answers it with a prompt. That is the desk version.
+
+### The approval queue
+
+`M-x agent-river-approval-queue` is the same questions as a buffer you can
+answer from with a thumb. It exists because of where an approval most often
+catches you: a phone, over emacsclient in a terminal emulator, held in
+portrait. Nothing about the HUD survives that trip — it is a 56-column side
+window whose bulk is the agent's prose, and answering one question there is
+a `completing-read` behind a soft keyboard that covers the text you are
+reading to decide.
+
+```
+2 waiting · 2 working
+
+? agent-river · execute · waiting 2m14s
+  Run `git push --force-with-lease`
+  git push --force-with-lease origin approval-queue
+  editing · 3 steps · 1 failing · agent-river.el
+  → Allow
+  → Allow always
+  → Reject
+
+? dotfiles · edit · waiting 0s
+  Write ~/.zshrc
+  /home/oemer/.zshrc
+  → Allow
+  → Reject
+```
+
+So the shape is decided by the screen rather than by the state:
+
+- **One question is a block, not a line.** Columns are what a narrow screen
+  has none of and lines are what it has: who is asking and for how long,
+  what agent-shell summarises the request as, the agent's *own* words for
+  what it wants to do — the raw arguments, which is what a decision is
+  actually made on — one line of context out of the fold, then the answers.
+- **Every answer is a row, and the row is the target.** RET or a tap on it
+  answers. That is exactly what `agent-river-answer` refuses to do, and the
+  reason does not survive the trip: at a desk a prompt costs one keystroke
+  and stops a slip granting `allow_always`, on a phone it costs the screen.
+  The friction is kept where it still earns its place — the two `_always`
+  kinds ask `y or n` first, the ones that decide a single call do not.
+- **A row is propertised through its newline**, so the whole width of it
+  answers a tap and not just the glyphs on it. A thumb is about as wide as
+  three characters of what it is aiming at.
+- **Wrapped, never measured.** The width is whatever the window is, so
+  turning the phone is a window resized and nothing here has to notice.
+  Counting columns would mean redrawing on every rotation to arrive at what
+  `word-wrap` does for free.
+- **The fold, on the block that wants to interrupt it.** `Run rm -rf build`
+  reads differently under an agent that has been editing quietly for twenty
+  steps and under one that has failed three times running — and in the
+  session buffer that context is several screens up.
+- **Oldest first.** It is a queue where the HUD is a log: there the newest
+  line is the news, here the question held longest is the one holding a
+  session up.
+
+The keys are the other two buffers': `n`/`p` (plus `SPC`/`DEL` and the
+arrows) walk every row worth stopping on, `M-n`/`M-p` and `>`/`<` walk one
+question at a time, `TAB` shows the rest of a long argument, `RET` on a
+heading opens the session, `g` redraws, `q` buries. `>` and `M-n` are the
+same motion here and are bound anyway — in the other views `>` means "the
+next line that wants you", and in this one every block is one.
+
+Two things it is careful about. It **lists what is not known to be
+answered**, which is the opposite of what the answering path asks: a command
+about to speak for a session refuses where it cannot see, and a view doing
+the same would go silent exactly where it exists to say something. And a
+redraw **finds a row again by what it names** — the buffer is rebuilt every
+couple of seconds, and found by position a question answered above would
+slide a different question's `Allow` under a thumb already on its way down.
+
+Opening the buffer turns `agent-river-approvals-mode` on, because there is
+nothing to queue otherwise: the options and the means to answer are only
+ever seen by the responder that mode installs. Killing the buffer turns it
+back off — unless it was already on when you opened it, the same way the
+responder slot is only given back while it is still ours.
+
 ## Tests
 
 The fold and the payload parsing are the parts that are logic rather than

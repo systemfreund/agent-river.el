@@ -111,9 +111,12 @@ agent-shell hosts that have no hooks; it translates into the payload shape the
 hooks report rather than building events of its own, so everything from
 `agent-river--event` down is shared. Only the hooks can answer the agent —
 nothing this package *observes* is ever put back on the stream. The one
-thing that travels the other way is not ours: `agent-river-answer` relays a
+thing that travels the other way is not ours: `agent-river--respond` relays a
 permission choice the user made, to the session the line names, and only
-while `agent-river-approvals-mode` is on (see **Approvals** below).
+while `agent-river-approvals-mode` is on (see **Approvals** below). Both
+gestures that can make that call — `agent-river-answer` in the HUD and a row
+of the approval queue — go through that one function, so they cannot come to
+different conclusions about when a question may still be answered.
 
 `kind` (`prompt` `act` `think` `fail` `done` `idle`) is passed as an argv from
 settings.json, not read out of the payload, so the hook-event → fold-event mapping
@@ -425,15 +428,88 @@ them is waiting and for what is the question the HUD exists to answer.
   counted twice; a session the hooks own would otherwise have its open
   questions go unseen, which is the case with the most sessions in it.
 
-### One set of motions, both buffers
+### The approval queue — the same questions, for a screen held in one hand
 
-The HUD and the map take the same keys for the same three grains, because
-they are two views of one state and learning each separately buys nothing:
-`n`/`p` (plus `SPC`/`DEL` and the remapped arrows) walk every line worth
-stopping on, `M-n`/`M-p` walk the coarse structure, `>`/`<` walk the lines
-that want attention. A session line is a map entry; a detail heading is a map
-file line; a log line has no analogue and rides the fine grain. `>` is
-`agent-river-notable-kinds` here and "some agent is under this" there.
+`agent-river-approval-queue` (`*agent-river-approvals*`) is the second view
+of `agent-river--offers`, and the shape is decided by the screen rather than
+by the state: a phone, over emacsclient in a terminal emulator, in portrait,
+answered with a thumb. The panel says *which* session is waiting; this is
+where the door is opened. Read the section comment before changing it — what
+follows is what is load-bearing.
+
+- **One question is a block, not a line, and every answer is a row.** A
+  narrow screen has lines and no columns. `RET` or a tap on the row answers
+  it, which is exactly what `agent-river-answer` refuses to do — and the
+  reason does not survive the trip: at a desk a prompt costs one keystroke
+  and stops a slip granting `allow_always`, here it costs the screen the
+  arguments are being read on. The friction is kept where it still earns its
+  place (`agent-river--approval-confirm-p`): the two `_always` kinds ask
+  `y-or-n-p`, the ones that decide a single call do not, and spelling out
+  "yes" would be a third gesture rather than a second.
+- **A row is propertised through its newline** (`agent-river--approval-row`).
+  A tap lands past the end of a short row about as often as on it, so a row
+  whose properties stop at its last character is a target that has to be hit
+  rather than reached for. The heading is wrapped in
+  `agent-river--make-visitable` *around* the row for the same reason, which
+  is also why the queue does not name `agent-river-session-line-map` itself.
+- **Wrapped, never measured.** The width is the window's, so a rotation is a
+  resize and nothing here notices. Counting columns would mean redrawing on
+  every rotation to arrive at what `word-wrap` does for free — and it is why
+  there is no `-width` setting to keep in step with anything.
+- **Listing and answering ask opposite questions about the same fact.**
+  `agent-river--offer-live-p` answers "still open" and says no where nothing
+  can be seen, which is right for a command about to speak on a session's
+  behalf (`agent-river--respond`, the one place an answer is sent, shared
+  with the HUD's prompt so the two cannot drift).
+  `agent-river--offer-answered-p` answers "agent-shell says it is over" and
+  says no in that same unseeable case, which is right for a listing: a
+  question dropped because its buffer could not be reached is silence exactly
+  where this view exists to speak. It uses `assoc`, not `alist-get` — an
+  answered call stays in `:tool-calls` with its request id removed, and a
+  lookup returning nil cannot tell that from the call being absent.
+- **A redraw finds a row by what it names** (`agent-river--approval-here`,
+  `--approval-find`). The buffer is rebuilt every couple of seconds; found by
+  position, a question answered above would slide a different question's
+  `Allow` under a thumb already on its way down. Same rule as
+  `agent-river--block-goto` and `agent-river--map-here`, and the reason the
+  rows carry `agent-river-approval` and `agent-river-approval-option`.
+- **Drawn inline, not marked dirty** (`agent-river--approval-refresh`), which
+  is the opposite of the map and for the opposite reason: that observer fires
+  on every tool call, this fires when somebody has been asked a question and
+  is waiting. The timer is only for what moves with no event of its own — how
+  long a question has waited, and what the session has done since — and
+  retires after one last draw once nothing can change
+  (`agent-river--approval-changing-p`), or the question just answered would
+  sit on screen until somebody pressed `g`.
+- **Opening it takes the mode and gives it back only while it is still ours**
+  (`agent-river--approval-owns-mode`). There is nothing to queue without
+  `agent-river-approvals-mode` — the options and `:respond` are only ever
+  seen by the responder it installs — so opening the buffer is the gesture,
+  the way opening the map is. Killing it turns the mode back off unless it
+  was already on, which is `agent-river--responder-before`'s rule one level
+  up.
+- **The context line is the panel's reading, one field shorter.** It goes
+  through `agent-river--artifact-list` rather than `agent-river--hottest` so
+  the two cannot disagree about which file it is; the `(N touches)`
+  parenthetical is dropped because it is the longest thing on the line and
+  the least of what a decision turns on.
+- `agent-river--scan` **grew a SETTLE argument rather than a third copy of
+  the loop.** What differs between these buffers is only where the text on a
+  line starts.
+
+### One set of motions, every buffer
+
+The HUD, the map and the approval queue take the same keys for the same three
+grains, because they are views of one state and learning each separately buys
+nothing: `n`/`p` (plus `SPC`/`DEL` and the remapped arrows) walk every line
+worth stopping on, `M-n`/`M-p` walk the coarse structure, `>`/`<` walk the
+lines that want attention. A session line is a map entry is a queue heading; a
+detail heading is a map file line is an answer row; a log line has no analogue
+and rides the fine grain. `>` is `agent-river-notable-kinds` in the HUD, "some
+agent is under this" on the map, and in the queue it coincides with `M-n` —
+bound all the same, because a reader arriving from either of the others
+presses it expecting the next thing that wants them, and getting it is the
+whole point of the keys being shared.
 
 Three rules, shared by `agent-river--scan` and `agent-river--map-scan`:
 
