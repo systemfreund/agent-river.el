@@ -167,13 +167,29 @@ like more than bad luck."
   :type 'integer)
 
 (defcustom agent-river-phase-buckets
-  '(("exploring" . ("Read" "Grep" "Glob" "WebFetch" "WebSearch" "Agent" "LSP"))
-    ("editing"   . ("Edit" "Write" "NotebookEdit")))
-  "Tools that place a step in a phase, keyed by phase name."
+  '(("exploring" . ("Read" "Grep" "Glob" "WebFetch" "WebSearch" "Agent" "LSP"
+                    "read" "search" "fetch"))
+    ("editing"   . ("Edit" "Write" "NotebookEdit"
+                    "edit" "delete" "move")))
+  "Tools that place a step in a phase, keyed by phase name.
+
+Two dialects in one list, because a step is matched by name and the two
+ways in do not name a tool alike.  The hooks report the host's own tool
+name; an agent-shell session has none to report, so
+`agent-river--shell-payload' stands the ACP call `kind' in for it --
+lower-case and coarser.  Listing only the first left a hooks-less session
+matching nothing at all: no phase ever, and -- since
+`agent-river--writing-p' reads this table -- no write ever, so the map's
+landed marker lost the half of its question only the fold can answer.
+
+ACP `think' and `other' are deliberately absent.  The phase abstains
+rather than guess, the same way a shell call does."
   :type '(alist :key-type string :value-type (repeat string)))
 
-(defcustom agent-river-shell-tools '("Bash" "BashOutput")
-  "Tools whose step text is searched for `agent-river-verify-regexp'."
+(defcustom agent-river-shell-tools '("Bash" "BashOutput" "execute")
+  "Tools whose step text is searched for `agent-river-verify-regexp'.
+`execute' is the ACP kind a shell call arrives as; see
+`agent-river-phase-buckets' for why both dialects are listed."
   :type '(repeat string))
 
 (defcustom agent-river-verify-regexp

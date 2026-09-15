@@ -1656,6 +1656,35 @@ CALL overrides fields of the tool call record."
                               :detail)
                    "read  Read a.el"))))
 
+(ert-deftest agent-river-test-the-palettes-know-the-streams-dialect ()
+  (agent-river-test--with-watch
+    ;; A hooks-less session names its tools with the ACP kind, and while the
+    ;; tables held Claude Code's names alone it matched none of them: no
+    ;; phase ever, and no write ever -- which is the half of the landed
+    ;; marker that only the fold can answer.
+    (should (agent-river--writing-p "edit"))
+    (should (equal (agent-river--bucket "edit" nil) "editing"))
+    (should (equal (agent-river--bucket "read" nil) "exploring"))
+    ;; The verify pattern reaches a shell call under either name.
+    (should (equal (agent-river--bucket "execute" "make test") "verifying"))
+    ;; Still abstaining where the kind says nothing about the work.
+    (should-not (agent-river--bucket "think" nil))
+    (should-not (agent-river--bucket "other" nil))))
+
+(ert-deftest agent-river-test-a-streamed-edit-counts-as-a-write ()
+  (agent-river-test--with-watch
+    ;; End to end, since the palette is only useful if the kind survives the
+    ;; adapter with the case it arrived in.
+    (dolist (event (agent-river--shell-events
+                    (agent-river-test--tool-call
+                     "c1" "pending" '(:kind . "edit")
+                     '(:raw-input . ((filePath . "/repo/a.el"))))
+                    "s1" "/repo"))
+      (agent-river-observe event))
+    (let ((entry (gethash "a.el" (agent-river-state-task-artifacts
+                                  (gethash "s1" agent-river-registry)))))
+      (should (= (plist-get entry :writes) 1)))))
+
 (ert-deftest agent-river-test-a-turn-ends-the-calls-it-started ()
   (agent-river-test--with-watch
     (agent-river--shell-events (agent-river-test--tool-call "c1" "pending") "s1" "/repo")
