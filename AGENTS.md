@@ -505,7 +505,11 @@ Four things about the map are load-bearing:
   here" — was a rendering problem, and it is fixed where it was: struck
   through, the line says the agent's last move was into a file that has since
   gone, which is true and worth knowing. Everything else about them is
-  ordinary: they fade at the floor like any other name.
+  ordinary: they fade at the floor like any other name. The strike is asked
+  of a file line too, not only of a top-level entry — a deletion three
+  directories down used to draw as an ordinary line, which stopped being a
+  corner case once `agent-river-map-dirty` began reaching deletions through
+  git, where one is a change like any other.
 - **A node's rows are contributed; the line is their summary**
   (`agent-river-map-contributors`, `agent-river--map-rows`). The line carries
   what can be read *down* the listing — shading, the two markers, one
@@ -611,21 +615,51 @@ Four things about the map are load-bearing:
   reached, not just what falls under the map root, or descending would invent a
   second "most recent" file that only looks like one because the real one is
   out of view.
-- **The listing is filtered to what has been reached**
-  (`agent-river-map-untouched` nil, the default; `a` toggles it for one
-  buffer). Agents spread over several roots turn the full listing into mostly
-  context — every sibling of every tree anyone started a session in, with the
-  handful of lines that carry an agent somewhere among them. What the filter
-  gives up is breadth: a view of only the touched paths says where without
-  saying where that is *relative to* anything, which is what the full listing
-  was for, and non-nil buys it back as the union of disk and state.
-  **Activity the map does not show is the one thing it exists not to do**, so
-  the filter drops an entry for having no parties and never for being absent
-  from disk — `:missing`, an entry only the state knows about (deleted,
-  renamed, or reached through an anchor this root has nothing to do with), is
-  precisely what a disk-shaped filter would have swallowed. An empty listing
-  says which kind of empty it is: a filtered tree full of files nobody has
-  been near would otherwise read as a map that had lost them.
+- **The listing is filtered to what is known about, which is no longer only
+  what was reached** (`agent-river-map-untouched` nil, the default; `a`
+  toggles it for one buffer). Agents spread over several roots turn the full
+  listing into mostly context — every sibling of every tree anyone started a
+  session in, with the handful of lines that carry an agent somewhere among
+  them. What the filter gives up is breadth: a view of only the touched paths
+  says where without saying where that is *relative to* anything, which is
+  what the full listing was for, and non-nil buys it back as the union of
+  disk and state. **Activity the map does not show is the one thing it exists
+  not to do**, so the filter drops an entry for having nothing known about it
+  and never for being absent from disk — `:missing`, an entry the disk does
+  not have (deleted, renamed, or reached through an anchor this root has
+  nothing to do with), is precisely what a disk-shaped filter would have
+  swallowed. An empty listing says which kind of empty it is: a filtered tree
+  full of files nobody has been near would otherwise read as a map that had
+  lost them.
+- **The working tree is the listing's second source, because the fold has a
+  blind spot it can never close** (`agent-river-map-dirty`, default on,
+  `agent-river--map-changed`). A file is counted when a tool *names* one, and
+  a shell command names none: `sed -i`, `rm`, a formatter, a codemod, a `git
+  checkout` all change files through a call whose only argument is a string of
+  shell. No amount of teaching `agent-river--tool-file` new keys reaches
+  those. Git can, so an entry earns a line for differing from HEAD — staged
+  and unstaged alike, plus what git has never seen — and it is the same table
+  the diffstat column is already read from, so this costs no further
+  subprocesses. Four things it owes. Such a line has **no parties, and that is
+  the whole truth of it rather than a gap**: git cannot say who changed a
+  file, which is the same reason the diffstat is not an attribution, so the
+  brackets stay empty and the column says what is different. It follows that
+  a changed name **is not activity** — `>`/`<` pass over it (no
+  `agent-river-map-active`, which is read off the parties), and it is what
+  `agent-river-map-ignore` is allowed to drop, where a *reached* name is
+  listed whatever it matches. It **reads the cache and starts nothing**
+  (`agent-river--vc-cached`), because the read is the contributor's to
+  schedule on its own TTL and a second caller would race it; the first draw of
+  a root therefore shows what was reached and the answer lands a moment later,
+  which is what `agent-river--vc-store` marking the map dirty is for. And it
+  brings a **different tense** onto the map: a reached name fades out through
+  `agent-river-map-party-floor`, a changed one stays until it is committed or
+  thrown away, which is git's answer and not this package's — in a tree with a
+  great deal of uncommitted work that is most of the listing, and the reason
+  this is a setting at all. Roots stay state-derived (`agent-river--map-all-roots`
+  reads `agent-river--heat-entries` alone): a tree nobody has worked in does
+  not become a section for being dirty, or the map would be a second
+  `magit-status` rather than a view of where the agents are.
 
 - **The diffstat is the one fact on a line the fold cannot produce**
   (`agent-river-map-vc`, default on). Weight says how heavily a name was

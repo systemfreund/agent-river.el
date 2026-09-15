@@ -4018,6 +4018,127 @@ is how a test asks what the view looks like once the work has moved on."
     (should (gethash "/tmp" agent-river--vc-cache))
     (should-not (plist-get (gethash "/tmp" agent-river--vc-cache) :proc))))
 
+(defun agent-river-test--changed (root output)
+  "Record OUTPUT as the diffstat git last reported for ROOT."
+  (puthash root (list :at (current-time)
+                      :table (agent-river--vc-parse
+                              output root (make-hash-table :test 'equal))
+                      :proc nil)
+           agent-river--vc-cache))
+
+(ert-deftest agent-river-test-a-changed-file-is-listed-with-nobody-on-it ()
+  ;; The class of change the fold cannot see at all: `sed -i', a formatter, a
+  ;; codemod, a `git checkout' -- every one of them a tool call whose only
+  ;; argument is a string of shell, so no file is ever named and no touch is
+  ;; ever recorded.  A map showing only what the hooks named would be quietly
+  ;; wrong about all of it.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil)
+        (agent-river--vc-cache (make-hash-table :test 'equal)))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root
+                                      :file "dialog/src/main/foo.el"))
+        (agent-river-test--changed root "3\t1\tcommon/c.el\0")
+        (let ((entries (agent-river--map-entries root)))
+          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
+                         '("common" "dialog")))
+          (let ((common (car entries)))
+            ;; No parties, and that is the whole truth of it rather than a
+            ;; gap: git cannot say who changed a file, so the brackets stay
+            ;; empty and the column beside them says what is different.
+            (should-not (plist-get common :parties))
+            (should (plist-get common :changed))
+            (should (equal (mapcar (lambda (f) (plist-get f :rel))
+                                   (plist-get common :files))
+                           '("c.el")))))))))
+
+(ert-deftest agent-river-test-a-reached-file-is-not-listed-twice ()
+  ;; Both readings name the same path, and the reached one is the one with
+  ;; anything to say.  Listed again from the working tree it would appear a
+  ;; second time with no parties on it, which reads as two files.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil)
+        (agent-river--vc-cache (make-hash-table :test 'equal)))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-test--changed
+         root (concat "3\t1\tcommon/c.el\0" "2\t0\tcommon/o.el\0"))
+        (let* ((common (car (agent-river--map-entries root)))
+               (files (plist-get common :files)))
+          (should (equal (mapcar (lambda (f) (plist-get f :rel)) files)
+                         ;; And the work comes first: `agent-river-map-detail-files'
+                         ;; cuts from the tail, so what was reached must not be
+                         ;; the half that falls off it.
+                         '("c.el" "o.el")))
+          (should (plist-get (car files) :parties))
+          (should-not (plist-get (cadr files) :parties)))))))
+
+(ert-deftest agent-river-test-the-listing-s-ignore-patterns-hold-git-back ()
+  ;; The patterns do not apply to a reached path, because activity the map
+  ;; does not show is the one thing it exists not to do.  A name only git has
+  ;; an opinion about is not activity, and without the filter every editor
+  ;; backup a repository happens not to ignore would earn a line.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil)
+        (agent-river--vc-cache (make-hash-table :test 'equal)))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-test--changed
+         root (concat "1\t0\t.DS_Store\0" "1\t0\tnotes.org~\0"))
+        (should (equal (mapcar (lambda (e) (plist-get e :name))
+                               (agent-river--map-entries root))
+                       '("common")))))))
+
+(ert-deftest agent-river-test-the-second-source-can-be-turned-off ()
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil)
+        (agent-river-map-dirty nil)
+        (agent-river--vc-cache (make-hash-table :test 'equal)))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-test--changed root "9\t9\tdocs/d.md\0")
+        ;; A tree with a large amount of uncommitted work in it is most of
+        ;; the listing otherwise, and only the reader knows whether that is
+        ;; the view they wanted.
+        (should (equal (mapcar (lambda (e) (plist-get e :name))
+                               (agent-river--map-entries root))
+                       '("common")))))))
+
+(ert-deftest agent-river-test-the-listing-starts-no-read-of-its-own ()
+  ;; The read is the contributor's to schedule, on its own TTL.  A listing
+  ;; that started one as well would be a second caller racing it for the
+  ;; same tree -- and would put a subprocess behind every derivation of the
+  ;; entries, including the ones no buffer is waiting on.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river--vc-cache (make-hash-table :test 'equal)))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river--map-entries root)
+        (should (zerop (hash-table-count agent-river--vc-cache)))))))
+
+(ert-deftest agent-river-test-a-changed-file-that-is-gone-still-has-a-line ()
+  ;; A deletion is a change like any other to git, which is how the listing
+  ;; reaches one at all now.  Drawn as missing rather than dropped: the
+  ;; deletion is the news, and a line that quietly vanished would be the map
+  ;; hiding exactly the thing it was opened to find.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil)
+        (agent-river--vc-cache (make-hash-table :test 'equal)))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
+        (agent-river-test--changed root "0\t7\tgone/g.el\0")
+        (let ((entry (seq-find (lambda (e) (equal (plist-get e :name) "gone"))
+                               (agent-river--map-entries root))))
+          (should entry)
+          (should (plist-get entry :missing))
+          (should (plist-get entry :changed)))))))
+
 (ert-deftest agent-river-test-the-map-header-is-a-name-and-a-count ()
   ;; It used to caption the view as well -- which frame the numbers came
   ;; from, and that the diffstat came from HEAD rather than a frame.  Both

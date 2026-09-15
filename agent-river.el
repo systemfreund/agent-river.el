@@ -3807,6 +3807,34 @@ to get that back, or press \\[agent-river-map-toggle-untouched] in the map,
 which sets it for that buffer alone."
   :type 'boolean)
 
+(defcustom agent-river-map-dirty t
+  "Whether the map also lists what the working tree says has changed.
+
+The fold counts a file when a tool names one, and a shell command names
+none: `sed -i', `rm', a formatter, a codemod, a `git checkout' all change
+files through a call whose only argument is a string of shell.  Those
+changes are invisible to `agent-river--map-reach' and always will be --
+which is why the map asks git as well, and lists a changed file even
+where no agent has been seen in it.
+
+Staged and unstaged alike, plus what git has never seen: the reading is
+the table `agent-river-map-vc' already fills, so this puts no further
+commands behind a redraw and is nil in effect wherever that is nil.
+
+Such a line is drawn with no parties, and that is the whole truth of it
+rather than a gap: git cannot say *who* changed a file, so the brackets
+stay empty and the column says what is different.  It follows that these
+lines are not activity -- \\[agent-river-map-next-active] passes over
+them, and they are what the ignore patterns are allowed to drop.
+
+They also keep a different tense from everything else here.  A reached
+name fades out of the listing through `agent-river-map-party-floor'; a
+changed one stays until it is committed or thrown away, which is git's
+answer and not this package's.  In a tree with a large amount of
+uncommitted work that is most of the listing, which is the case for
+setting this nil."
+  :type 'boolean)
+
 (defcustom agent-river-map-refresh-interval 3
   "Seconds between map redraws while anything is still moving.
 
@@ -4164,26 +4192,81 @@ not take the view with it."
           (push name files))))
     (append (sort dirs #'string<) (sort files #'string<))))
 
+(defun agent-river--map-changed (root)
+  "Return the paths under ROOT git reports as changed, relative to ROOT.
+
+Staged and unstaged at once -- `agent-river--vc-refresh' reads `diff
+HEAD', which is both halves of the index -- plus the names git has never
+seen.  Nil when `agent-river-map-dirty' is off, when the diffstat is off,
+or when the first read has yet to come back; the listing is then what it
+always was, which is why this degrades rather than waits.
+
+It reads the cache and starts nothing, which is the same bargain
+`agent-river--rows-vc' keeps and for the same reason: the read is the
+contributor's to schedule, on its own TTL, and a listing that started one
+of its own would be a second caller racing it for a tree neither of them
+owns.  So the first draw of a root shows what was reached and the answer
+lands a moment later, which is what `agent-river--vc-store' marking the
+map dirty is for.
+
+The second source the listing has, and the reason there is one: a file
+changed by a shell command is changed by a tool call that named no file,
+so the fold never saw it and `agent-river--map-reach' has nothing to
+report.  The working tree does, and this is the same table the diffstat
+column is read from -- what is new is only that it may put a line on the
+map rather than only annotate one.
+
+The ignore patterns apply here and deliberately not to the reached paths.
+A touched name is listed whatever it matches, because activity the map
+does not show is the one thing it exists not to do; a name only git has
+an opinion about is not activity, and without the filter every editor
+backup a repository happens not to ignore would earn a line."
+  (when agent-river-map-dirty
+    (let ((table (agent-river--vc-cached root))
+          (prefix (file-name-as-directory (expand-file-name root)))
+          paths)
+      (when table
+        (maphash
+         (lambda (abs _stat)
+           (when (string-prefix-p prefix abs)
+             (let* ((rel (substring abs (length prefix)))
+                    (slash (string-search "/" rel))
+                    (top (if slash (substring rel 0 slash) rel)))
+               (unless (seq-some (lambda (re) (string-match-p re top))
+                                 agent-river-map-ignore)
+                 (push rel paths)))))
+         table))
+      (sort paths #'string<))))
+
 (defun agent-river--map-entries (root &optional scope)
   "Return ROOT's listing, annotated with what the agents have done in it.
 
 One plist per entry in listing order -- directories first -- carrying
-`:name', `:dir', `:parties', `:files' and `:missing'.  `:parties' is the
-aggregate beneath the entry; `:files' are the reached paths under it, each
-`:rel' relative to the entry, heaviest first.  A file entry has no
-`:files' and carries its own parties.
+`:name', `:dir', `:parties', `:files', `:missing' and `:changed'.
+`:parties' is the aggregate beneath the entry; `:files' are the paths
+under it, each `:rel' relative to the entry, reached ones first and
+heaviest first among those.  A file entry has no `:files' and carries its
+own parties.
 
-The listing is the union of what is on disk and what has been reached,
-filtered to the reached half unless `agent-river-map-untouched' says
-otherwise.  `:missing' marks an entry only the state knows about --
-deleted, renamed, or reached through an anchor this root has nothing to do
-with.  Showing it anyway is the point: an artifact whose top component is
-gone would otherwise be activity the map silently drops, and that is also
-why the filter is written as \"has no parties\" rather than \"is not on
+The listing is the union of three readings: what is on disk, what has
+been reached, and -- through `agent-river--map-changed' -- what the
+working tree says has changed.  It is filtered to the last two unless
+`agent-river-map-untouched' says otherwise.  `:changed' marks an entry
+kept by the third alone, which is a line with no parties on it: git
+cannot say who changed a file, so that is the whole of what is known
+about it and the column beside it says the rest.
+
+`:missing' marks an entry the disk does not have -- deleted, renamed, or
+reached through an anchor this root has nothing to do with.  Showing it
+anyway is the point: an artifact whose top component is gone would
+otherwise be activity the map silently drops, and that is also why the
+filter is written as \"nothing known about it\" rather than \"is not on
 disk\" -- the two coincide for an inert entry and come apart for exactly
 the entries that matter."
   (let* ((reach (agent-river--map-reach root scope))
          (grouped (make-hash-table :test 'equal))
+         (reached (make-hash-table :test 'equal))
+         (changed (make-hash-table :test 'equal))
          (names (agent-river--map-listing root))
          entries)
     ;; Group the reached paths by the entry the listing has a line for --
@@ -4194,8 +4277,21 @@ the entries that matter."
              (slash (string-search "/" rel))
              (top (if slash (substring rel 0 slash) rel))
              (under (if slash (substring rel (1+ slash)) nil)))
+        (puthash rel t reached)
         (push (list :rel under :parties (plist-get node :parties))
               (gethash top grouped))))
+    ;; And then the ones only git knows about, after the reached ones so
+    ;; that an unfolded directory lists the work before the rest: `:files'
+    ;; keeps this order, and `agent-river-map-detail-files' cuts from the
+    ;; tail.  A path that was reached as well is already here with its
+    ;; parties on it and must not be listed a second time without them.
+    (dolist (rel (agent-river--map-changed root))
+      (unless (gethash rel reached)
+        (let* ((slash (string-search "/" rel))
+               (top (if slash (substring rel 0 slash) rel))
+               (under (if slash (substring rel (1+ slash)) nil)))
+          (puthash top t changed)
+          (push (list :rel under :parties nil) (gethash top grouped)))))
     (dolist (name names)
       (let* ((under (nreverse (gethash name grouped)))
              (dir (file-directory-p (expand-file-name name root))))
@@ -4205,7 +4301,8 @@ the entries that matter."
                     :parties (agent-river--map-merge-parties under)
                     ;; A file entry's own node comes through the grouping
                     ;; with a nil `:rel'; there is nothing to unfold under it.
-                    :files (and dir under))
+                    :files (and dir under)
+                    :changed (gethash name changed))
               entries)))
     (let (orphans)
       (maphash (lambda (name under)
@@ -4215,6 +4312,7 @@ the entries that matter."
                              :parties (agent-river--map-merge-parties under)
                              :files (and (seq-some (lambda (n) (plist-get n :rel)) under)
                                          under)
+                             :changed (gethash name changed)
                              :missing t)
                        orphans))
                grouped)
@@ -4224,7 +4322,10 @@ the entries that matter."
                                                   (plist-get b :name)))))))
         (if agent-river-map-untouched
             all
-          (seq-filter (lambda (entry) (plist-get entry :parties)) all))))))
+          (seq-filter (lambda (entry)
+                        (or (plist-get entry :parties)
+                            (plist-get entry :changed)))
+                      all))))))
 
 (defcustom agent-river-map-detail-files 8
   "How many reached files an unfolded map entry lists.
@@ -4577,6 +4678,15 @@ the main branch."
    ;; only the marker goes unanswered.
    (lambda () (agent-river--vc-store root table nil 'none))))
 
+(defun agent-river--vc-cached (root)
+  "Return ROOT's diffstat table as it stands, without reading anything.
+
+What every reader on the drawing side wants: the answer that is in, or
+nil where none is yet.  Starting a read belongs to `:refresh', which has
+the TTL, so the readers cannot race it or each other for the same tree."
+  (and agent-river-map-vc
+       (plist-get (gethash root agent-river--vc-cache) :table)))
+
 (defun agent-river--vc-stats (root)
   "Return ROOT's diffstat table, starting a fresh read when this one is old.
 
@@ -4677,8 +4787,7 @@ the contributor that knows whether its readings aggregate.
 The row spells out what the column abbreviates.  That is the relation the
 whole design rests on: the line is a projection of the rows, so the two
 cannot disagree about what git said."
-  (let ((table (and agent-river-map-vc
-                    (plist-get (gethash root agent-river--vc-cache) :table)))
+  (let ((table (agent-river--vc-cached root))
         (out (make-hash-table :test 'equal)))
     (dolist (node nodes)
       (let* ((path (plist-get node :path))
@@ -5379,7 +5488,15 @@ nothing."
                                  (concat (agent-river--map-line
                                           'file (plist-get file :rel)
                                           (plist-get file :parties)
-                                          nil
+                                          ;; The entry above says this for
+                                          ;; itself; a file under it used to
+                                          ;; say nothing, so a deletion three
+                                          ;; directories down was drawn as an
+                                          ;; ordinary line.  Git reports one as
+                                          ;; a change like any other, which is
+                                          ;; how the listing now reaches it at
+                                          ;; all.
+                                          (not (file-exists-p fpath))
                                           (agent-river--map-summary frows column)
                                           (and frows (if fopen 'open 'closed)))
                                          "\n")
