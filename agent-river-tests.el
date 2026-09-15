@@ -1720,6 +1720,118 @@ CALL overrides fields of the tool call record."
     (should (string-match-p "hooks reach this session" (agent-river-test--hud)))))
 
 
+;;; Approvals -- what a session is waiting to be told
+;;
+;; The offer is read in two halves that share a request id: the responder
+;; function has the options and does not know whose they are, the event knows
+;; whose and has no options.  Neither is folded -- an open question stops
+;; being true when it is answered, and answering can happen in the session
+;; buffer where nothing here would hear it.
+
+(defun agent-river-test--permission (&optional id respond)
+  "Return a permission alist shaped like the one agent-shell hands a responder.
+ID names the request; RESPOND is what its `:respond' calls."
+  (list (cons :tool-call (list (cons :title "Run `git push`")
+                               (cons :kind "execute")
+                               (cons :permission-request-id (or id "req-1"))))
+        (cons :options (list (list (cons :kind "allow_once")
+                                   (cons :option "Allow")
+                                   (cons :option-id "allow"))
+                             (list (cons :kind "reject_once")
+                                   (cons :option "Reject")
+                                   (cons :option-id "reject"))))
+        (cons :respond (or respond #'ignore))))
+
+(defun agent-river-test--ask (id &optional call-id)
+  "Return the `permission-request' event agent-shell emits for ID."
+  (list (cons :event 'permission-request)
+        (cons :data (list (cons :request-id id)
+                          (cons :tool-call-id (or call-id "call-1"))
+                          (cons :tool-call (list (cons :title "Run `git push`")))))))
+
+(ert-deftest agent-river-test-noting-an-offer-does-not-answer-it ()
+  ;; Non-nil from the responder means agent-shell skips its own dialog, so
+  ;; watching a question go past must never be what swallows it.
+  (let ((agent-river--offers (make-hash-table :test 'equal))
+        (agent-river--responder-before nil))
+    (should-not (agent-river--responder (agent-river-test--permission)))
+    (let ((offer (gethash "req-1" agent-river--offers)))
+      (should offer)
+      (should (equal (mapcar (lambda (option) (alist-get :option-id option))
+                             (plist-get offer :options))
+                     '("allow" "reject"))))))
+
+(ert-deftest agent-river-test-a-responder-already-there-still-decides ()
+  ;; The slot holds one function, so taking it means carrying whoever was in
+  ;; it -- otherwise turning the HUD on silently retires somebody's
+  ;; auto-approval.
+  (let* ((asked nil)
+         (agent-river--offers (make-hash-table :test 'equal))
+         (agent-river--responder-before (lambda (_permission)
+                                          (setq asked t)
+                                          'handled)))
+    (should (eq (agent-river--responder (agent-river-test--permission)) 'handled))
+    (should asked)
+    ;; And it was still seen on the way past.
+    (should (gethash "req-1" agent-river--offers))))
+
+(ert-deftest agent-river-test-an-open-question-reaches-the-panel ()
+  (agent-river-test--with-shell '(("*alpha*" "s1" client))
+    (let ((agent-river-registry (make-hash-table :test 'equal))
+          (agent-river--offers (make-hash-table :test 'equal))
+          (agent-river--responder-before nil))
+      (let ((state (agent-river-state "s1" "alpha")))
+        (agent-river--responder (agent-river-test--permission))
+        (with-current-buffer (agent-river--shell-buffer "s1")
+          (agent-river--attend (agent-river-test--ask "req-1")))
+        ;; The two halves met: the responder's options, under the event's
+        ;; session.
+        (should (equal (plist-get (gethash "req-1" agent-river--offers) :session)
+                       "s1"))
+        (should (string-match-p "asks: Run `git push` (Allow · Reject)"
+                                (substring-no-properties
+                                 (agent-river--panel state))))
+        ;; And that it was asked is in the log, which is the half of this
+        ;; that is point-in-time.
+        (should (string-match-p "asks: Run" (agent-river-test--hud)))
+        ;; Answered, it leaves both.
+        (with-current-buffer (agent-river--shell-buffer "s1")
+          (agent-river--attend
+           (list (cons :event 'permission-response)
+                 (cons :data (list (cons :request-id "req-1")
+                                   (cons :option-id "allow"))))))
+        (should-not (agent-river--offer "s1"))
+        (should-not (string-match-p "asks:" (substring-no-properties
+                                             (agent-river--panel state))))))))
+
+(ert-deftest agent-river-test-an-answered-request-is-not-answered-again ()
+  ;; agent-shell's own buttons stay live, so the table here is always the
+  ;; account that can be behind.  It clears `:permission-request-id' when it
+  ;; answers, expressly so consumers can tell the two apart.
+  (agent-river-test--with-shell '(("*alpha*" "s1" client))
+    (let ((agent-river--offers (make-hash-table :test 'equal))
+          (agent-river--responder-before nil)
+          (answers nil))
+      (agent-river--responder
+       (agent-river-test--permission "req-1" (lambda (id) (push id answers))))
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        (agent-river--attend (agent-river-test--ask "req-1" "call-1"))
+        ;; Pending: the tool call still names the request.
+        (setq-local agent-shell--state
+                    (cons (cons :tool-calls
+                                (list (cons "call-1"
+                                            (list (cons :permission-request-id
+                                                        "req-1")))))
+                          agent-shell--state)))
+      (should (agent-river--offer-live-p (gethash "req-1" agent-river--offers)))
+      ;; Answered in the session buffer: agent-shell drops the id.
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        (setq-local agent-shell--state
+                    (cons (cons :tool-calls (list (cons "call-1" nil)))
+                          agent-shell--state)))
+      (should-not (agent-river--offer-live-p (gethash "req-1" agent-river--offers))))))
+
+
 ;;; Observers -- the side-effect contract
 ;;
 ;; What every consumer that reaches outside this package inherits from the

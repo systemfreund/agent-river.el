@@ -254,6 +254,15 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
 (defface agent-river-note '((t :inherit font-lock-builtin-face))
   "Face for something observed outside the hook stream.")
 
+(defface agent-river-ask '((t :inherit warning))
+  "Face for a session holding a door open, waiting to be told whether to go on.
+
+`warning' inherited rather than a shade of its own: it is what the user's
+theme already means by \"this wants you\", which is the whole content of
+the line.  Distinct from `agent-river-idle', deliberately -- an agent
+that has finished its turn is waiting for whatever you want next, and an
+agent holding a permission request is waiting for one particular word.")
+
 (defface agent-river-gone '((t :inherit agent-river-stale :strike-through t))
   "Face for a name the state knows and the disk does not.
 
@@ -271,6 +280,7 @@ map's shading already travels as an overlay because tree-sitter owns
     ("reason" "◇" agent-river-reason)
     ("intent" "◈" agent-river-intent)
     ("fail"   "✗" agent-river-fail)
+    ("ask"    "?" agent-river-ask)
     ("note"   "◉" agent-river-note)
     ("signal" "!" agent-river-signal)
     ("done"   "□" agent-river-idle)
@@ -360,6 +370,12 @@ this needs no locking.")
 ;;
 ;; All of it degrades to the old behaviour when agent-shell is absent.
 
+;; Declared so the byte-compiler sees a special variable rather than a free
+;; one: agent-shell owns it, and this sets it only while
+;; `agent-river-approvals-mode' is on.
+(defvar agent-shell-permission-responder-function)
+(declare-function agent-shell-subscribe-to "agent-shell" (&rest args))
+(declare-function agent-shell-unsubscribe "agent-shell" (&rest args))
 (declare-function agent-shell--project-name "agent-shell-project" ())
 (declare-function agent-shell--format-buffer-name "agent-shell" (agent-name project-name))
 
@@ -1571,6 +1587,13 @@ before its session does."
 (defvar-local agent-river--watching nil
   "This buffer's agent-shell subscription token, while it is watched.")
 
+(defvar-local agent-river--attending nil
+  "This buffer's subscription token for permission requests, while it has one.
+A second token rather than more work on the first: the two are turned on
+by different gestures and for different reasons -- folding a session the
+hooks cannot reach, and seeing what any session is waiting for -- and a
+subscription shared between them would end when either did.")
+
 ;;;###autoload
 (defun agent-river-watch-shell (&optional buffer)
   "Fold BUFFER's agent-shell session from the stream agent-shell reads.
@@ -1626,6 +1649,289 @@ ever supplies the sessions the first way in cannot reach."
         (mapc #'agent-river-watch-shell (buffer-list)))
     (remove-hook 'agent-shell-mode-hook #'agent-river-watch-shell)
     (mapc #'agent-river-unwatch-shell (buffer-list))))
+
+
+;;; Approvals -- the one place this speaks, and whose words it uses
+;;
+;; agent-shell asks before a tool call the agent may not make on its own, and
+;; renders the question in the session buffer.  With five sessions, which of
+;; them is waiting and what for is exactly the question the HUD exists to
+;; answer, and today it cannot see the question at all: the `waiting' phase
+;; is `idle', the end of a turn, not "is holding a door open for you".
+;;
+;; Three things shape what follows.
+;;
+;; The offer is read through `agent-shell-permission-responder-function', a
+;; documented variable carrying the tool call, the options and a function
+;; that answers.  It is a *slot* rather than a hook: returning non-nil means
+;; "handled, skip the UI".  So this chains to whatever was there and hands
+;; back that function's answer -- agent-river never claims the request, it
+;; watches one go past, and a responder somebody else installed goes on
+;; deciding.
+;;
+;; A pending approval is a *current-state* fact, in the sense the producers
+;; below are careful about: true now, false the moment it is answered.  So
+;; it is not folded and there is no slot for it -- it lives in a side table
+;; and the panel queries it where it is read, the way `buffer-modified-p' is
+;; asked rather than noted.  What *is* point-in-time is that the question
+;; was put, and that gets a log line.
+;;
+;; And answering is this package speaking on a stream it otherwise only
+;; listens to.  The rule that says it must not is about agent-river's own
+;; observations reaching the agent's context; a permission answer is not
+;; ours, it is a keystroke of the user's relayed to the session it names.
+;; It stays behind its own gesture all the same: a global mode that is off
+;; by default, because installing yourself in another package's decision
+;; path is not something a HUD does unasked.
+
+(defvar agent-river--offers (make-hash-table :test 'equal)
+  "Permission request id -> the choice a session is waiting to be given.
+
+Each value is a plist: `:id' the request, `:session' whose it is,
+`:tool-call-id' what it is about, `:title', `:kind', `:options' as
+`agent-shell' enriched them, `:respond' the function that answers, and
+`:at' when it arrived.
+
+Two halves fill it, because neither source has both: the responder
+function is handed the options and is not told whose session they belong
+to, and the `permission-request' event is dispatched in the session's own
+buffer but carries no options.  They share the request id, and the
+responder runs first.
+
+Deliberately not a struct slot and deliberately not folded.  A question
+that is open right now stops being true the moment it is answered --
+including by a button pressed in the shell buffer, which nothing here
+would hear -- so it is kept where a stale entry costs a redraw rather
+than a false state.")
+
+(defvar agent-river--responder-before 'unset
+  "What `agent-shell-permission-responder-function' held before this mode.
+`unset' while the mode has never been on, so turning it off cannot install
+a nil over somebody's function by mistake.")
+
+(defun agent-river--offer (session)
+  "Return the permission request SESSION is waiting on, or nil.
+The newest, in the vanishing case where an agent has two open at once:
+the panel has room for one, and the one just asked is the one on screen
+in the session buffer."
+  (let (found)
+    (maphash (lambda (_id offer)
+               (when (and (equal (plist-get offer :session) session)
+                          (or (null found)
+                              (time-less-p (plist-get found :at)
+                                           (plist-get offer :at))))
+                 (setq found offer)))
+             agent-river--offers)
+    found))
+
+(defun agent-river--offer-live-p (offer)
+  "Return non-nil while OFFER is still a question waiting for an answer.
+
+Asked of agent-shell rather than remembered here.  It clears
+`:permission-request-id' from the tool call when it answers and says so in
+as many words -- \"so consumers can distinguish between a pending
+permission request and one already answered\" -- whereas this package's
+own table is a second account of that, and the one that cannot see a
+button pressed in the session buffer."
+  (when-let* ((session (plist-get offer :session))
+              (call-id (plist-get offer :tool-call-id))
+              (buffer (agent-river--shell-buffer session))
+              (state (buffer-local-value 'agent-shell--state buffer))
+              (call (alist-get call-id (alist-get :tool-calls state)
+                               nil nil #'equal)))
+    (and (alist-get :permission-request-id call) t)))
+
+(defun agent-river--offer-text (offer)
+  "Return OFFER as one line: what is being asked, and what may be answered.
+The options are named where they are known and left out where they are
+not -- the responder may never have run, and a question that can only be
+answered in the session buffer is still worth saying out loud."
+  (let ((options (plist-get offer :options)))
+    (concat "asks: " (or (plist-get offer :title) "?")
+            (if options
+                (format " (%s)"
+                        (mapconcat (lambda (option) (alist-get :option option))
+                                   options " · "))
+              ""))))
+
+(defun agent-river--responder (permission)
+  "Note what PERMISSION offers, and leave the answering to whoever asked.
+
+Returns whatever the function this replaced returns, which is nil when
+there was none: non-nil here means agent-shell skips its own dialog, and
+watching a question go past must never be what swallows it.
+
+Its own guard, for the same reason an observer has one: this runs inside
+agent-shell's request handler, and a HUD that cannot note a permission
+request must not be able to stop one being asked."
+  (condition-case err
+      (let* ((call (alist-get :tool-call permission))
+             (id (alist-get :permission-request-id call)))
+        (when id
+          (puthash id (list :id id
+                            :title (alist-get :title call)
+                            :kind (alist-get :kind call)
+                            :options (alist-get :options permission)
+                            :respond (alist-get :respond permission)
+                            :at (current-time))
+                   agent-river--offers)))
+    (error (message "agent-river: permission not noted (%s)"
+                    (error-message-string err))))
+  (and (functionp agent-river--responder-before)
+       (funcall agent-river--responder-before permission)))
+
+(defun agent-river--forget-offers (session)
+  "Drop every permission request recorded for SESSION."
+  (let (stale)
+    (maphash (lambda (id offer)
+               (when (equal (plist-get offer :session) session) (push id stale)))
+             agent-river--offers)
+    (dolist (id stale) (remhash id agent-river--offers))
+    stale))
+
+(defun agent-river--attend (event)
+  "Track the permission requests of the current buffer's session from EVENT.
+
+Separate from `agent-river--shell-observe' and deliberately not gated on
+`agent-river--claim': that gate is about who *folds* a session, so that
+one step is not counted twice, and a session whose hooks own it would
+otherwise have its open questions go unseen -- which is the case with the
+most sessions in it."
+  (let ((data (alist-get :data event))
+        (session (agent-river--shell-session)))
+    (pcase (alist-get :event event)
+      ('permission-request
+       (when-let* ((id (alist-get :request-id data))
+                   (session session))
+         (let ((offer (or (gethash id agent-river--offers)
+                          (list :id id :at (current-time)
+                                :title (alist-get :title
+                                                  (alist-get :tool-call data))))))
+           (setq offer (plist-put offer :session session))
+           (setq offer (plist-put offer :tool-call-id
+                                  (alist-get :tool-call-id data)))
+           (puthash id offer agent-river--offers)
+           ;; That the question was put is point-in-time and belongs in the
+           ;; log; that it is still open is not, and belongs in the panel,
+           ;; which reads the table above.
+           (agent-river-log "ask" (agent-river--offer-text offer)
+                            (agent-river--shell-label session)))))
+      ('permission-response
+       (when-let* ((id (alist-get :request-id data)))
+         (remhash id agent-river--offers)
+         (agent-river--redraw-block)))
+      ('clean-up
+       (when (and session (agent-river--forget-offers session))
+         (agent-river--redraw-block))))))
+
+;;;###autoload
+(defun agent-river-attend-shell (&optional buffer)
+  "Watch BUFFER's agent-shell session for permission requests.
+Idempotent, and a no-op outside an agent-shell buffer."
+  (interactive)
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and (agent-river--shell-buffer-p)
+               (null agent-river--attending)
+               (fboundp 'agent-shell-subscribe-to))
+      (let ((shell (current-buffer)))
+        (setq agent-river--attending
+              (agent-shell-subscribe-to
+               :shell-buffer shell
+               :on-event
+               (lambda (event)
+                 ;; Never let the HUD break the shell it rides on -- but
+                 ;; never go quiet either.
+                 (condition-case err
+                     (with-current-buffer shell
+                       (agent-river--attend event))
+                   (error
+                    (ignore-errors
+                      (agent-river-log
+                       "fail" (format "permission watch failed: %s"
+                                      (error-message-string err)))))))))))))
+
+(defun agent-river-unattend-shell (&optional buffer)
+  "Stop watching BUFFER's agent-shell session for permission requests."
+  (interactive)
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and agent-river--attending (fboundp 'agent-shell-unsubscribe))
+      (agent-shell-unsubscribe :subscription agent-river--attending)
+      (setq agent-river--attending nil))))
+
+;;;###autoload
+(define-minor-mode agent-river-approvals-mode
+  "Show what each session is waiting to be allowed, and let you allow it.
+
+Off by default, and the gesture that turns it on is what turns it off.
+Two things happen here that nothing else in this package does: it
+installs itself in agent-shell's permission path, and
+\\[agent-river-answer] answers a question on the session's behalf --
+writing to a session rather than reading one.
+
+The slot it takes is restored on the way out, and only when it is still
+ours: a responder installed while this was on belongs to whoever
+installed it, and putting the old value back over it would be this mode
+undoing somebody else's setting as it left."
+  :global t
+  :group 'agent-river
+  (if agent-river-approvals-mode
+      (progn
+        (unless (eq agent-shell-permission-responder-function
+                    #'agent-river--responder)
+          (setq agent-river--responder-before
+                agent-shell-permission-responder-function))
+        (setq agent-shell-permission-responder-function #'agent-river--responder)
+        (add-hook 'agent-shell-mode-hook #'agent-river-attend-shell)
+        (mapc #'agent-river-attend-shell (buffer-list)))
+    (when (eq agent-shell-permission-responder-function #'agent-river--responder)
+      (setq agent-shell-permission-responder-function
+            (and (not (eq agent-river--responder-before 'unset))
+                 agent-river--responder-before)))
+    (remove-hook 'agent-shell-mode-hook #'agent-river-attend-shell)
+    (mapc #'agent-river-unattend-shell (buffer-list))
+    (clrhash agent-river--offers)
+    (agent-river--redraw-block)))
+
+;;;###autoload
+(defun agent-river-answer ()
+  "Answer the permission request of the session on this line.
+
+Deliberately a command with a prompt rather than a key per option.  The
+HUD is a view; a single keystroke here that grants an agent
+`allow_always' is the wrong place for a typo, and the options are the
+agent's own words, which no fixed key could keep meaning."
+  (interactive)
+  (let* ((session (get-text-property (point) 'agent-river-session))
+         (offer (and session (agent-river--offer session))))
+    (cond
+     ((null session) (user-error "No session on this line"))
+     ;; Said rather than left to read as \"nothing is pending\": with the
+     ;; mode off nothing is ever pending here, and that is a different fact.
+     ((not agent-river-approvals-mode)
+      (user-error "Permission requests are not watched; M-x agent-river-approvals-mode"))
+     ((null offer) (user-error "This session is not waiting on a permission"))
+     ((not (agent-river--offer-live-p offer))
+      ;; Answered in the session buffer while this was on screen.  Dropped
+      ;; rather than reported as still open: the table is behind, not the
+      ;; session.
+      (remhash (plist-get offer :id) agent-river--offers)
+      (agent-river--redraw-block)
+      (user-error "That request has already been answered"))
+     ((not (and (plist-get offer :options) (functionp (plist-get offer :respond))))
+      (user-error "The options for this request were never seen; answer it in the session"))
+     (t
+      (let* ((options (plist-get offer :options))
+             (labels (mapcar (lambda (option) (alist-get :option option)) options))
+             (pick (completing-read (format "%s: " (plist-get offer :title))
+                                    labels nil t))
+             (chosen (seq-find (lambda (option)
+                                 (equal (alist-get :option option) pick))
+                               options)))
+        (when chosen
+          (funcall (plist-get offer :respond) (alist-get :option-id chosen))
+          ;; The response event clears the table and redraws; this is only
+          ;; what the person pressing the key is owed in the meantime.
+          (message "agent-river: %s" pick)))))))
 
 
 ;;; Entry points -- how state gets in
@@ -2300,6 +2606,16 @@ question an onlooker actually has."
                 (list
                  (propertize (or (agent-river-state-label state) "?")
                              'face 'agent-river-session)
+                 ;; An open question outranks everything measured below it,
+                 ;; and comes first because it is the only thing on this
+                 ;; line that is waiting on the reader rather than
+                 ;; describing the agent.  Queried, never folded: it stops
+                 ;; being true the moment somebody answers it, including in
+                 ;; the session buffer, where nothing here would hear.
+                 (when-let* ((offer (agent-river--offer
+                                     (agent-river-state-id state))))
+                   (propertize (agent-river--offer-text offer)
+                               'face 'agent-river-ask))
                  (when phase
                    (propertize phase 'face
                                (cond ((equal phase "blocked") 'agent-river-fail)
@@ -3056,6 +3372,12 @@ for opening or closing the thing under the heading."
 (define-key agent-river-mode-map (kbd "RET") #'agent-river-visit-session)
 ;; `special-mode' puts `revert-buffer' on g, which has nothing to revert to.
 (define-key agent-river-mode-map (kbd "g") #'agent-river-refresh)
+;; The one key here that writes to a session rather than reading one, and it
+;; still asks which option before it does: the HUD is a view, so a keystroke
+;; that granted an agent `allow_always' outright would be the wrong place for
+;; a typo.  Bound whether or not `agent-river-approvals-mode' is on, so the
+;; answer to pressing it is a sentence rather than nothing happening.
+(define-key agent-river-mode-map (kbd "a") #'agent-river-answer)
 
 (defun agent-river--stop-timer ()
   "Stop the refresh timer."

@@ -78,7 +78,10 @@ Two ways in, one adapter. The right-hand column exists for the agents
 agent-shell hosts that have no hooks; it translates into the payload shape the
 hooks report rather than building events of its own, so everything from
 `agent-river--event` down is shared. Only the hooks can answer the agent —
-the stream is listened to, not spoken on.
+nothing this package *observes* is ever put back on the stream. The one
+thing that travels the other way is not ours: `agent-river-answer` relays a
+permission choice the user made, to the session the line names, and only
+while `agent-river-approvals-mode` is on (see **Approvals** below).
 
 `kind` (`prompt` `act` `think` `fail` `done` `idle`) is passed as an argv from
 settings.json, not read out of the payload, so the hook-event → fold-event mapping
@@ -341,6 +344,54 @@ Reading notes back and deciding what to tell the agent is a separate step, and
 is deliberately not built: `agent-river--signal` still fires on fail streaks
 only. Notes are visible in the HUD (`◉`) and counted in the report (`:notes`)
 first, so the rate can be seen before anything is fed back.
+
+### Approvals — the one thing that travels back
+
+`agent-river-approvals-mode` (off by default) shows what each session is
+waiting to be *allowed*, and `a` in the HUD answers it. The HUD could not
+see this at all before: the `waiting` phase is `idle`, the end of a turn,
+not "is holding a door open for you" — and with five sessions, which of
+them is waiting and for what is the question the HUD exists to answer.
+
+- **The offer is read in two halves that share a request id, because
+  neither source has both.**
+  `agent-shell-permission-responder-function` is handed the tool call, the
+  options and a `:respond` function, and is not told whose session it is;
+  the `permission-request` event is dispatched in the session's own buffer
+  and carries no options. The responder runs first, so
+  `agent-river--attend` finds the entry and fills in the session.
+- **The slot is chained, never claimed** (`agent-river--responder`). It is
+  one variable rather than a hook, and returning non-nil means "handled,
+  skip the UI" — so this hands back whatever the function it replaced
+  returns, and a responder somebody else installed goes on deciding.
+  Turning the mode off puts the old value back *only* if the slot is still
+  ours, or the mode would undo a setting made while it was on. Its own
+  guard, like an observer's: this runs inside agent-shell's request
+  handler, and a HUD that cannot note a question must not be able to stop
+  one being asked.
+- **A pending approval is a current-state fact, so it is not folded**
+  (`agent-river--offers`). It stops being true the moment it is answered —
+  including by a button pressed in the session buffer, which nothing here
+  would hear — so it lives in a side table the panel queries where it is
+  read, the way `buffer-modified-p` is asked rather than noted. What *is*
+  point-in-time is that the question was put, and that gets a log line
+  (`ask`, `?`). No struct slot, so a reload does not demand a reset.
+- **Liveness is agent-shell's answer, not ours** (`agent-river--offer-live-p`).
+  It clears `:permission-request-id` from the tool call when it answers and
+  documents that consumers may read it that way; our table is the second
+  account and the one that can be behind, so the command asks the first
+  before it speaks and drops its own entry when the answer is no.
+- **Answering is behind its own gesture, and asks which option.** A global
+  mode, because installing yourself in another package's decision path is
+  not something a view does unasked; and a prompt rather than a key per
+  option, because `allow_always` from a typo is the wrong thing for a
+  buffer that is otherwise only looked at — the options are also the
+  agent's own words, which no fixed key could keep meaning.
+- **Its own subscription** (`agent-river--attending`), not
+  `agent-river--shell-observe`'s. That one is gated on
+  `agent-river--claim`, which decides who *folds* a session so no step is
+  counted twice; a session the hooks own would otherwise have its open
+  questions go unseen, which is the case with the most sessions in it.
 
 ### One set of motions, both buffers
 
