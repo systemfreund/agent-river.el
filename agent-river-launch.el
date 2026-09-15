@@ -176,6 +176,7 @@ display, not the account."
 ;;   :occasion  what kind of occasion, from the source's own small vocabulary
 ;;   :title     one line, for a human reading the queue
 ;;   :actor     who caused it -- the provenance guard's input, later
+;;   :labels    tags the source classifies it with, comma-joined and wrapped
 ;;   :session   the agent-river session it came from, where one did
 ;;   :cwd       where a session for this would be started
 ;;   :claim     what the subject said about itself.  Never matched on
@@ -459,7 +460,7 @@ Each rule is a plist:
            returning nil to allow or a string saying why not.
 
 In a `:match' alist FIELD is one of :source :occasion :title :actor
-:session :key :cwd, and SPEC is a regexp, or a list of regexps of which
+:labels :session :key :cwd, and SPEC is a regexp, or a list of regexps of which
 one must match.  All pairs must hold.  A regexp rather than a comparison
 because several of these are prose; anchor it (\"\\\\`gh\\\\'\") where you
 mean the whole value.

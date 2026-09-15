@@ -16,16 +16,22 @@ It is deliberately *not* the design document any more: **this file is**. The
 reasoning behind a decision, and the failure it prevents, lives here and in the
 code comments. A change that moves behaviour updates both.
 
-Five files, no build system: `agent-river.el` (everything), `agent-river-launch.el`
-(the other direction — starting a session from an event; optional, requires
-`agent-river`), `agent-river-tests.el` (ERT, covering both), `agent-river-hook.sh`
-(the bridge), and one example hook wiring per host — `claude-settings.json`,
-`codex-hooks.json`, `gemini-settings.json`.
+No build system. `agent-river.el` is everything the HUD is;
+`agent-river-launch.el` is the other direction, starting a session from an
+event (optional, requires `agent-river`); `agent-river-gh.el` and
+`agent-river-gh.sh` are one *source* for it, and the line they are on the far
+side of is that a source knowing about a foreign system lives beside the
+mechanism rather than inside it — `river` is the normalised shape and
+`handoff` is agent-river itself talking, so both stay in the core, and the
+next source (a tracker, a mailbox, a build) goes next to the GitHub one.
+`agent-river-tests.el` is the ERT suite for all of it, `agent-river-hook.sh`
+is the bridge, and there is one example hook wiring per host —
+`claude-settings.json`, `codex-hooks.json`, `gemini-settings.json`.
 
 ## Commands
 
 ```sh
-# Full suite (389 tests). -L . is required: the tests require both .el files.
+# Full suite (446 tests). -L . is required: the tests require all three .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -826,6 +832,26 @@ process or a no-op. What is load-bearing already:
   file name carries a hash of the full key, because sanitising alone maps
   `a/b` and `a_b` onto one file and a false match here is a launch that never
   happens and never says why.
+- **A poller splits, and derives nothing** (`agent-river-gh.sh`). The spool's
+  unit is one occasion, so one issue is one file, and that split has to
+  happen before the spool or the ledger, the dedupe and the recovery all stop
+  being single-valued — it is `gh --jq`, bundled with `gh`, so still no
+  external dependency. Everything *else* stays in Elisp under test: the
+  script interprets no field and makes no decision. Its watermark is the time
+  of the last run, asked with `>=`, so it over-fetches slightly — which is
+  free, because the spool deduplicates on the occasion key and a repeat costs
+  one deleted file, where a miss costs an issue.
+- **A third party's text is data, and the gate is the boundary**
+  (`agent-river-gh-example-rule`). An issue body is written by whoever can
+  open an issue and would arrive as instructions to an agent holding tools,
+  so it is carried in `:payload` where no rule can match it, and the decision
+  to act is made on `:actor` and `:labels`. A label is the better half: it
+  can only be set by someone with write access, so it is a maintainer saying
+  "this one may be worked on" rather than a guess about a stranger. Labels
+  are comma-*wrapped* (`,bug,`) so the obvious spelling is the exact one —
+  unwrapped, a rule for `bug` also fires on `debug`, and a loose match here
+  is a stranger's issue reaching an agent. Nothing in that file is installed
+  as a default.
 - **A pull source derives its key; a push source mints one**
   (`agent-river-launch--mint`). The rule above is about *re-seeing*: a poller
   meets the same object on every tick, so its key has to say which visit this

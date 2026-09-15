@@ -771,10 +771,28 @@ writing half.
 
 This is the same decision the bridge already made: `agent-river-hook.sh`
 does no parsing, passes files in both directions, and keeps the derivation
-in Elisp where it is under test. A GitHub poller therefore writes `gh`'s raw
-JSON into the spool and understands none of it; a source adapter in Elisp
-turns that into a candidate. One place knows a dialect, exactly as
-`agent-river--event` is the one place that knows a host's.
+in Elisp where it is under test. `agent-river-gh.sh` writes `gh`'s raw JSON
+into the spool and understands none of it; `agent-river-gh.el` turns that
+into a candidate. One place knows a dialect, exactly as `agent-river--event`
+is the one place that knows a host's.
+
+The one thing the poller does beyond moving bytes is **split**: the spool's
+unit is one occasion, so one issue is one file. That has to happen before the
+spool, or the ledger, the dedupe and the recovery all stop being
+single-valued. It is `gh --jq`, which ships with `gh`, so there is still no
+external dependency and still no field interpreted.
+
+It is the same program from cron, a systemd timer or `agent-river-gh-mode` —
+deliberately, because an Emacs that is not running must not be a reason for
+an issue to go unseen. Its watermark is the time of the last run, asked with
+`>=`, so it over-fetches a little. That is free: the spool deduplicates on
+the occasion key, so a repeat costs one deleted file where a miss costs an
+issue.
+
+```elisp
+(setq agent-river-gh-repos '("~/src/agent-river"))
+(agent-river-gh-mode 1)
+```
 
 Everything writes to that door — the poller, the observer, an agent, and you
 with `echo`.
@@ -1012,6 +1030,18 @@ transitions the log exists to show.
   tools. The defence is not phrasing, it is the gate: a trusted author, or a
   label only a maintainer can set. The body travels as data, framed as such,
   and the rule decides how much of it comes along at all.
+
+  That is why the GitHub source carries the body in `:payload`, where no rule
+  can match it, and offers `:actor` and `:labels` to decide on instead. A
+  label is the better half of the two: `:actor` says who opened the issue,
+  but a label can only be set by someone with write access, so it is a
+  maintainer saying *this one may be worked on* rather than a guess about a
+  stranger. Labels are comma-**wrapped** (`,bug,`) so that the obvious
+  spelling is the exact one — unwrapped, a rule for `bug` would also fire on
+  `debug`, and a loose match here is a stranger's issue reaching an agent.
+  `agent-river-gh-example-rule` shows the shape and is deliberately not
+  installed: a default that launches on a stranger's issue is the one thing
+  this must not ship.
 - **Never in the working checkout.** A worktree per launch, a branch rather
   than `main`. The path normalisation here is already built for this — one
   file reached from a worktree and from the main checkout is the same file
