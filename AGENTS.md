@@ -426,10 +426,33 @@ line before it starts scanning.
 the head). It used to pin every window to `point-min` on every event, which
 makes the buffer unreadable by hand and would have made these motions
 pointless. Two halves to it: window points are filtered, and `agent-river-log`
-wraps its edit in `save-excursion` — in the selected window buffer point *is*
-window point, so without it the one window most likely to be the one being
-read was dragged back to the top regardless. Everything the log edits is above
-a reader's position, so their marker rides the text rather than the offset.
+wraps its edit in `agent-river--keeping-place` — in the selected window buffer
+point *is* window point, so without it the one window most likely to be the one
+being read was dragged back to the top regardless.
+
+**The head is the top line, and a block line is kept by name rather than by
+position.** Both halves above were measured against the whole head — the block
+*and* the newest log line — and the block is where `n` and `M-n` do most of
+their walking, so navigating anywhere in it left a reader still counting as
+following and the next tool call pulled them back. Three ways the point ended
+up at `point-min`, and each needed its own answer. A window navigated into the
+block was filtered back in, so the head is now the first line alone: that is
+exactly the span `agent-river--follow` pins to, so it means "nobody has moved
+this", and a reader who walks back up to the top rejoins the head the way they
+left it. A *buffer* point in the block was inside the region
+`agent-river--erase-block` deletes, so `save-excursion`'s marker collapsed to
+`point-min` and the rebuilt block went in front of it — silently, on every
+refresh tick, which is the block redrawing itself out from under whoever was
+reading it. So block lines carry `agent-river-block` (the session id, plus an
+index for a detail line) and `agent-river--block-goto` finds the line again by
+what it names, the way `agent-river--map-here` does one grain up; a session
+that has gone from the block sends point to the head rather than to whatever
+that line number now holds. And the newest log line begins exactly at
+`agent-river--block-end`, so a marker there was swept up with the block like
+any other — it is the one log line that does not ride the text on its own, and
+the marker is given an insertion type to keep it in front of what replaces it.
+Everything else the log edits is above a reader's position, so their marker
+rides the text rather than the offset.
 
 `hl-line-mode` is on in the map and deliberately off in the HUD: the HUD pins
 its point to the head until someone navigates, so a permanent highlight there

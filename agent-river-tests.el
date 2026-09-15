@@ -2650,6 +2650,70 @@ first line from a survey."
                                                          (line-end-position)))
                        line))))))
 
+(ert-deftest agent-river-test-a-redraw-keeps-point-on-the-block-line ()
+  (agent-river-test--with-hud
+    ;; The block is erased and rebuilt on every refresh tick, and a marker
+    ;; inside it collapses to point-min when it goes -- so `save-excursion'
+    ;; alone sent whoever had navigated into the block back to the top once
+    ;; a second, for as long as an agent was working.
+    (agent-river-next-line 1)
+    (let ((line (buffer-substring-no-properties (line-beginning-position)
+                                                (line-end-position))))
+      (should (string-prefix-p "** files:" line))
+      (agent-river--redraw-block)
+      (should (equal (buffer-substring-no-properties (line-beginning-position)
+                                                     (line-end-position))
+                     line))
+      ;; And a tool call arriving rebuilds it the same way.
+      (agent-river-log "act" "Edit later.el" "alpha")
+      (should (equal (buffer-substring-no-properties (line-beginning-position)
+                                                     (line-end-position))
+                     line))
+      ;; Past the stars, where a motion would have left it.
+      (should-not (= (point) (line-beginning-position))))))
+
+(ert-deftest agent-river-test-a-block-line-that-has-gone-sends-point-to-the-head ()
+  (agent-river-test--with-hud
+    (agent-river--scan 1 #'agent-river--session-line-p)
+    (should (looking-at-p "beta"))
+    ;; The session the line named is no longer live, so there is nothing to
+    ;; come back to.  The head is where a reader who has lost their subject
+    ;; resumes -- not wherever that line number now happens to land.
+    (remhash "s2" agent-river-registry)
+    (agent-river--redraw-block)
+    (should (= (point) (point-min)))))
+
+(ert-deftest agent-river-test-an-event-keeps-point-on-the-newest-log-line ()
+  (agent-river-test--with-hud
+    ;; The newest log line begins exactly where `agent-river--block-end' is,
+    ;; so a marker there is swept up with the block like any other -- the one
+    ;; log line that did not ride the text.
+    (goto-char agent-river--block-end)
+    (let ((line (buffer-substring-no-properties (line-beginning-position)
+                                                (line-end-position))))
+      (agent-river-log "act" "Edit later.el" "alpha")
+      (should (equal (buffer-substring-no-properties (line-beginning-position)
+                                                     (line-end-position))
+                     line)))))
+
+(ert-deftest agent-river-test-the-head-is-the-top-line-not-the-whole-block ()
+  (agent-river-test--with-hud
+    (let ((buffer (current-buffer))
+          (window (selected-window)))
+      (set-window-buffer window buffer)
+      ;; The block is where `n' and `M-n' do most of their walking, so a head
+      ;; running to the end of the newest log line made every line a reader
+      ;; could navigate to count as following -- and the next tool call
+      ;; pinned them back to the top.
+      (agent-river--scan 1 #'agent-river--session-line-p)
+      (set-window-point window (point))
+      (should-not (memq window (agent-river--following-windows buffer)))
+      ;; Back at the top it follows again: a reader can rejoin the head the
+      ;; same way they left it.
+      (goto-char (point-min))
+      (set-window-point window (point))
+      (should (memq window (agent-river--following-windows buffer))))))
+
 (defun agent-river-test--log-lines ()
   "Return the log lines of the HUD, newest first, without the state block."
   (with-current-buffer (agent-river--buffer)

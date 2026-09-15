@@ -2665,16 +2665,30 @@ question an onlooker actually has."
     ;; session turned out to be visitable: a line the motion can stop on and
     ;; a line RET can act on are different questions, and tying them together
     ;; made `n' skip every session agent-shell does not host.
+    ;;
+    ;; `agent-river-block' is what a redraw finds the line by, and it is a
+    ;; second property rather than `agent-river-session' reused because that
+    ;; one is only there when the session turned out to be visitable -- point
+    ;; would come home from a redraw for the sessions agent-shell hosts and
+    ;; be dropped at the top for the rest.  A detail line carries its index
+    ;; beside the id: they are all one session's and would otherwise share
+    ;; the header's identity, which is the same mistake `agent-river--map-here'
+    ;; names for rows.
     (let ((header (propertize
                    (agent-river--make-visitable
                     (concat (agent-river--star state)
                             (mapconcat #'identity parts " · "))
                     (agent-river-state-id state))
-                   'agent-river-line 'session))
+                   'agent-river-line 'session
+                   'agent-river-block (agent-river-state-id state)))
           (details (and agent-river--panel-expanded
-                        (mapcar (lambda (line)
-                                  (propertize line 'agent-river-line 'detail))
-                                (agent-river--panel-details state)))))
+                        (seq-map-indexed
+                         (lambda (line n)
+                           (propertize line
+                                       'agent-river-line 'detail
+                                       'agent-river-block
+                                       (cons (agent-river-state-id state) n)))
+                         (agent-river--panel-details state)))))
       (if details
           (concat header "\n" (mapconcat #'identity details "\n"))
         header))))
@@ -2945,15 +2959,70 @@ Oldest is now at the bottom, so this trims the tail."
       (forward-line agent-river-max-entries)
       (delete-region (point) (point-max)))))
 
-(defun agent-river--head-end ()
-  "Return the end of the HUD's head: the state block and the newest event.
-`agent-river--block-end' sits at the start of the newest log line, so the
-head runs to the end of it -- somebody reading the top of the buffer is
-reading the state and what just happened, and both should keep following."
-  (save-excursion
-    (goto-char (or (and (markerp agent-river--block-end)
+(defun agent-river--block-here ()
+  "Return what names the block line point is on, or nil when it is in the log.
+The id of the session for its header, that id and an index for one of its
+detail lines.  This is the map\\='s `agent-river--map-here' at the HUD\\='s
+grain, for the same reason: the block is torn down and rebuilt, so a place
+in it has to be named rather than remembered as a position."
+  (get-text-property (line-beginning-position) 'agent-river-block))
+
+(defun agent-river--block-goto (here)
+  "Put point back on the block line HERE names, if the rebuild still has it.
+At `point-min' otherwise: a session that has gone from the block has taken
+its details with it, and the head is where a reader who has lost their
+subject resumes.  Point lands past the outline stars, where a motion would
+have left it."
+  (goto-char (point-min))
+  (let ((limit (or (and (markerp agent-river--block-end)
                         (marker-position agent-river--block-end))
                    (point-min)))
+        (found nil))
+    (while (and (not found) (< (point) limit))
+      (if (equal here (agent-river--block-here))
+          (setq found t)
+        (forward-line 1)))
+    (if found
+        (agent-river--beginning-of-entry)
+      (goto-char (point-min)))))
+
+(defmacro agent-river--keeping-place (&rest body)
+  "Run BODY, which tears the block down and rebuilds it, and keep point.
+
+`save-excursion' cannot do this on its own, and the failure is silent:
+the marker it restores is inside the region `agent-river--erase-block'
+deletes whenever point is in the block, so it collapses to `point-min'
+and the rebuilt block is inserted in front of it.  Point at the top of
+the buffer, on every refresh tick -- which is the block redrawing itself
+under whoever navigated into it, and the motion commands made pointless
+a second way after `agent-river--following-windows' stopped doing it.
+
+So a block line is restored by name, and a log line rides the text as
+before.  The marker advancing on insertion is the one remaining case: the
+newest log line begins exactly where `agent-river--block-end' is, so a
+marker there is swept up with the block like any other and has to be told
+to stay in front of what replaces it."
+  (declare (indent 0) (debug t))
+  `(let* ((here (agent-river--block-here))
+          (place (and (not here) (> (point) (point-min))
+                      (copy-marker (point) t))))
+     (unwind-protect
+         (progn ,@body)
+       (cond (here (agent-river--block-goto here))
+             (place (goto-char place) (set-marker place nil))))))
+
+(defun agent-river--head-end ()
+  "Return the end of the HUD\\='s first line, which is as far as following goes.
+
+A window is following while it shows the top of the buffer and has not
+been navigated, and `agent-river--follow' pins one to `point-min', so the
+first line is exactly the span that means \"nobody has moved this\".  The
+head used to run to the end of the newest log line, taking the whole block
+with it -- and the block is where `n' and `M-n' do most of their walking,
+so every line a reader could navigate to counted as following and the next
+tool call pulled them back to the top."
+  (save-excursion
+    (goto-char (point-min))
     (line-end-position)))
 
 (defun agent-river--following-windows (buffer)
@@ -3040,14 +3109,15 @@ half that also folds."
         ;; line at the head of the log, trim the tail, rebuild the block --
         ;; so the two things worth seeing never move and never scroll away.
         ;;
-        ;; `save-excursion' is what lets a reader keep their place.  Every
-        ;; edit here is above them, so the marker it restores rides the text
-        ;; they were on rather than the offset they were at.  Without it the
+        ;; `agent-river--keeping-place' is what lets a reader keep theirs.
+        ;; Every edit here is above them, so a log line rides the text it was
+        ;; on rather than the offset it was at; a block line is torn down
+        ;; under them and has to be found again by name.  Without either the
         ;; `goto-char' below moved buffer point, and in the selected window
         ;; buffer point *is* window point -- so the one window most likely
         ;; to be the one being read was dragged back to the top by every
         ;; tool call, whatever `agent-river--following-windows' had decided.
-        (save-excursion
+        (agent-river--keeping-place
           (agent-river--erase-block)
           (goto-char (point-min))
           (insert (agent-river--render kind detail label call) "\n")
@@ -3320,7 +3390,7 @@ it after everything has gone quiet and the timer has retired."
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (let ((inhibit-read-only t))
-          (save-excursion
+          (agent-river--keeping-place
             (agent-river--erase-block)
             (agent-river--insert-block)))))))
 
