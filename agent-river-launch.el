@@ -25,19 +25,22 @@
 ;;   launcher -> session     start it
 ;;   queue                   what has been decided and not yet started
 ;;
-;; What is built here is the first rung of four: source, rule, ledger and
-;; queue, with **no launcher at all**.  Candidates arrive, are deduplicated,
-;; are matched against a rule, are held until its gate opens, and are then
-;; decided `ready' -- the whole pipeline, with a no-op where the process
-;; would go.  It is a dry run rather than a half-built one, and that is the
-;; point rather than an unfinished edge: the path from "watch it decide" to
-;; "let it run overnight" is paved with a fortnight of decisions, and
-;; decisions only accrue in wall-clock time, so the log has to be running
-;; long before the launcher exists.
+;; All five roles exist.  What does not exist is a reason for the last one to
+;; fire: three switches stand in front of it and all three are off, so out of
+;; the box a candidate arrives, is deduplicated, is matched against a rule, is
+;; held until its gate opens, and is then decided `ready' -- the whole
+;; pipeline, with a no-op where the process would go.
 ;;
-;; The launcher is the next commit.  See the README section
-;; "A third direction: starting a session from an event" for the reasoning
-;; behind all of it, including the parts not written yet.
+;; That is deliberate rather than unfinished.  The path from "watch it decide"
+;; to "let it run overnight" is paved with a fortnight of decisions, and
+;; decisions only accrue in wall-clock time, so the log has to be running long
+;; before anything is armed.  `agent-river-launch-launcher' says whether
+;; anything can launch, a rule's `:prompt' whether that rule may, and
+;; `agent-river-launch-auto' whether it happens without being asked.
+;;
+;; See the README section "A third direction: starting a session from an
+;; event" for the reasoning behind all of it, including the parts deliberately
+;; not written yet.
 ;;
 ;;   (agent-river-launch-mode 1)
 ;;   M-x agent-river-queue
@@ -974,6 +977,44 @@ way back to the distinction."
               (format "\n> %s said, of its own work: %s\n"
                       (or (plist-get candidate :actor) "the agent")
                       (agent-river--md-escape (agent-river--squish claim)))))))
+
+(defun agent-river-launch-handoff-instructions ()
+  "Return the text telling an agent how to hand off when it is done.
+
+For a rule\='s `:prompt' to append.  It belongs here rather than with any
+one source: handing off is this layer\='s convention, and a GitHub issue is
+only one of the things an agent might be finishing.
+
+Three things it owes.  It carries the **configured** spool rather than a
+path written into the sentence, or an agent would be told to write
+somewhere nothing is watching.  It is guarded on the directory existing, so
+in a checkout where none of this is running the instruction degrades to a
+no-op rather than to an error the agent then tries to fix.  And it says
+outright that the agent\='s own words are a *quotation* that decides
+nothing -- partly because it is true, and partly because an agent told that
+its prose will be read as an instruction has been handed a reason to write
+prose aimed at the reader."
+  (let ((dir (directory-file-name (agent-river-launch--dir nil))))
+    (concat
+     "## Handing off\n\n"
+     "When you have finished, or when there is a reason for another agent to "
+     "pick this up, say so by writing one file:\n\n"
+     "```sh\n"
+     (format "d=%s\n" dir)
+     "[ -d \"$d\" ] && {\n"
+     "  printf '%s' \"{\\\"source\\\":\\\"handoff\\\","
+     "\\\"occasion\\\":\\\"review\\\","
+     "\\\"session\\\":\\\"$CLAUDE_CODE_SESSION_ID\\\","
+     "\\\"cwd\\\":\\\"$PWD\\\","
+     "\\\"text\\\":\\\"one line on why\\\"}\" > \"$d/h-$$.tmp\"\n"
+     "  mv \"$d/h-$$.tmp\" \"$d/h-$$.json\"\n"
+     "}\n"
+     "```\n\n"
+     "Once, at the end -- not after every step, and not when you have simply "
+     "stopped. `occasion` is one of `done`, `review` or `blocked`, and is the "
+     "only field a rule reads. The `text` is your own account of the work: it "
+     "is shown as a quotation attributed to you, it is not read as an "
+     "instruction, and it decides nothing.\n"))) 
 
 (defun agent-river-launch--prompt (rule candidate)
   "Return what RULE would say to an agent about CANDIDATE, or nil.

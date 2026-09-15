@@ -161,7 +161,12 @@ these ones."
             "\nWork out whether it is well-founded before acting on it. "
             "Where the state below shows another agent already in these "
             "files, say so rather than working over the top of it.\n\n"
-            (agent-river-launch-context candidate))))
+            (agent-river-launch-context candidate)
+            ;; Outside the quotation, because this half is ours.  Without it
+            ;; the chain ends after one link: an agent we launched finishes
+            ;; and nothing here ever hears about it -- which is the whole
+            ;; reason `agent-river-launch-max-generation' exists.
+            "\n" (agent-river-launch-handoff-instructions))))
 
 
 ;;; Polling

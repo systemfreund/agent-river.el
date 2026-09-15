@@ -7210,5 +7210,43 @@ headless launcher rung 4 wants could not be dropped in beside it."
                                                   (symbol-name b))))))
       (should (null agent-river-launch--queue)))))
 
+
+;;; Telling an agent how to hand off
+
+(ert-deftest agent-river-launch-test-instructions-name-the-real-spool ()
+  (agent-river-launch-test--with-spool
+    (let ((text (agent-river-launch-handoff-instructions)))
+      ;; The configured spool, never a path written into the sentence: told
+      ;; to write somewhere nothing is watching, an agent hands off into a
+      ;; void and has no way to find out.
+      (should (string-match-p (regexp-quote
+                               (directory-file-name
+                                (agent-river-launch--dir nil)))
+                              text))
+      ;; Guarded, so in a checkout where none of this runs the instruction is
+      ;; a no-op rather than an error the agent then sets about fixing.
+      (should (string-match-p "\\[ -d " text))
+      ;; And it says outright that the agent's words decide nothing.  Partly
+      ;; because it is true, and partly because an agent told its prose will
+      ;; be read as an instruction has been handed a reason to write prose
+      ;; aimed at whoever is reading.
+      (should (string-match-p "decides nothing" text)))))
+
+(ert-deftest agent-river-launch-test-instructions-reach-a-launched-agent ()
+  (agent-river-launch-test--with-spool
+    (let* ((candidate (agent-river-gh--read
+                       "gh" (agent-river-gh-test--delivery
+                             '(body . "please do the thing"))))
+           (prompt (agent-river-gh-prompt candidate)))
+      ;; Without this the chain ends after one link: an agent we launched
+      ;; finishes and nothing here ever hears of it -- which is what
+      ;; `agent-river-launch-max-generation' exists to bound.
+      (should (string-match-p "Handing off" prompt))
+      ;; And it is *outside* the quotation.  The issue is a third party's
+      ;; text and is quoted line by line; an instruction of ours that landed
+      ;; inside those quotes would read as part of what the stranger wrote.
+      (should-not (string-match-p "^> .*Handing off" prompt))
+      (should (string-match-p "^## Handing off" prompt)))))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here
