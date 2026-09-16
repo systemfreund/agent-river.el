@@ -4475,8 +4475,44 @@ its members behind for the next one."
          (text (plist-get (car rows) :text)))
     (should (string-match-p "alpha" text))
     ;; Saying what a bracket never could.
-    (should (string-match-p "2 writes" text))
-    (should (string-match-p agent-river-map-here-marker text))))
+    (should (string-match-p "2 writes" text))))
+
+(ert-deftest agent-river-test-the-row-repeats-the-here-marker-only-to-attribute-it ()
+  ;; The gutter's marker is scannable and anonymous, which is the whole
+  ;; reason the row may say it again -- but only where there is something to
+  ;; attribute.  With one party the line, the row's face and the row's glyph
+  ;; are three encodings of one fact about one name.
+  (let* ((alone (gethash "/repo/c.el"
+                         (agent-river--rows-parties
+                          "/repo" '((:path "/repo/c.el"
+                                     :parties ((:party "alpha" :weight 9
+                                                :current t)))))))
+         (text (plist-get (car alone) :text)))
+    (should (string-match-p "alpha" text))
+    (should-not (string-match-p agent-river-map-here-marker text))
+    ;; Still said once on the line, so nothing is lost by dropping it here.
+    (should (string-match-p agent-river-map-here-marker
+                            (agent-river--map-line
+                             'file "c.el"
+                             '((:party "alpha" :weight 9 :current t))))))
+  ;; Two parties and one marker up there: which of them it means is the
+  ;; question the rows are for, so the glyph comes back -- on the one it
+  ;; belongs to, and on no other.
+  (let* ((rows (gethash "/repo/c.el"
+                        (agent-river--rows-parties
+                         "/repo" '((:path "/repo/c.el"
+                                    :parties ((:party "alpha" :weight 9
+                                               :current t)
+                                              (:party "beta" :weight 2)))))))
+         (mine (seq-find (lambda (row)
+                           (string-prefix-p "alpha" (plist-get row :text)))
+                         rows))
+         (other (seq-find (lambda (row)
+                            (string-prefix-p "beta" (plist-get row :text)))
+                          rows)))
+    (should (string-match-p agent-river-map-here-marker (plist-get mine :text)))
+    (should-not (string-match-p agent-river-map-here-marker
+                                (plist-get other :text)))))
 
 (ert-deftest agent-river-test-the-map-degrades-without-tree-sitter ()
   ;; The mode ships with Emacs 31, the grammars do not.  Without them the
