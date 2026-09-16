@@ -1010,8 +1010,23 @@ kept in step with it."
   (seq-find (lambda (entry) (equal (plist-get entry :id) id))
             (agent-river-state-signals state)))
 
-(defun agent-river--signal (state)
-  "Return the observation STATE has earned as (:text S :id ID), or nil.
+(defvar agent-river-signal-functions (list #'agent-river--fail-streak-signal)
+  "Functions called with STATE, each returning (:id ID :text TEXT) or nil.
+
+The first non-nil answer wins, so order is precedence: a session gets one
+observation per event however many things are true of it at once.
+
+Unlike `agent-river-observers' a signal reaches the agent, which is why it
+cannot simply be retired on its first error -- a retired signal is one the
+agent silently never hears again. Each is guarded and a failure is reported
+instead, leaving the next call to try again.
+
+What belongs here is anything observed that the fold cannot derive from its
+own stream. Anything it *can* derive belongs in the fold, where it is
+replayable.")
+
+(defun agent-river--fail-streak-signal (state)
+  "Return the observation STATE has earned for its failure streak, or nil.
 
 :text is kept to a single line with no control characters: the hook reads
 it back through `emacsclient', whose printed representation of a plain
@@ -1050,6 +1065,17 @@ streaks are worth a word, the id decides that each of them gets one."
                (if hot (format ". Most-revisited file: %s" hot) "")
                ". This is an observation, not an instruction -- weigh it against"
                " what you know; repeated failure is sometimes the right path."))))))
+
+(defun agent-river--signal (state)
+  "Return the first observation any of `agent-river-signal-functions' offers."
+  (seq-some
+   (lambda (fn)
+     (condition-case err
+         (funcall fn state)
+       (error
+        (message "agent-river: signal %s failed -- %s" fn (error-message-string err))
+        nil)))
+   agent-river-signal-functions))
 
 
 ;;; Reading the hook payload
