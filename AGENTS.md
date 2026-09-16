@@ -979,10 +979,23 @@ meant stale and cold and elided besides. A fifth colour would leave a reader
 unable to say which fact any given colour meant, and one fact must not take two encodings either — the
 brackets used to read `[alpha:4]`, which gave the weight a second rendering
 nobody could reconcile against the first and pushed the names, which is what
-the brackets are for, into the margin. The position marker is repeated
-*inside* the brackets against the party it belongs to — in the left-hand
-column it is scannable but anonymous, and "where is this agent now" is a
-question about a party.
+the brackets are for, into the margin. The position marker is repeated in a
+party's own row against the party it belongs to — in the gutter it is
+scannable but anonymous, and "where is this agent now" is a question about a
+party — but **only where there is something to attribute**
+(`agent-river--rows-parties`). With one party on the node the gutter's
+marker, the row's face and the row's glyph are three renderings of one fact
+about the only name there is, which is the rule above broken rather than the
+exception to it earned; with several, the gutter says somebody is here and
+cannot say who, and that is the question the rows exist for. The condition is
+the node's party count, not the row's own `:current`, for the reason
+`agent-river--map-said-p` is per contributor: dropping the glyph from one row
+of several would leave the gutter's marker reading as though it belonged to
+whichever rows still had theirs. Note this is *not* the `:summarised`
+mechanism and cannot be — that one is keyed on a contributor's `:summary`
+earning the fixed-width column, and `parties` has no `:summary`; the gutter
+is a second reader of `:current` that never goes through the contributor
+protocol at all.
 
 The green and red in the diffstat are not a counter-example to that, and the
 distinction is worth keeping straight: they do not encode a fact of their own,

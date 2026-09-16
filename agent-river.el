@@ -6599,34 +6599,49 @@ a worktree workflow is the more pressing of the two; the name is where it
 goes, because it is a fact about the party rather than about the file."
   (let ((table (make-hash-table :test 'equal)))
     (dolist (node nodes)
-      (let ((rows
-             (mapcar
-              (lambda (party)
-                (let ((writes (or (plist-get party :writes) 0))
-                      (last (plist-get party :last)))
-                  (list :key (concat "party/" (plist-get party :party))
-                        ;; Between the step above and the diffstat below:
-                        ;; who has been here outlasts what is happening this
-                        ;; second, and answers the question the map is
-                        ;; opened with before the state of the tree does.
-                        :rank 1
-                        :face (if (plist-get party :current)
-                                  'agent-river-prompt
-                                'agent-river-stale)
-                        :text (concat
-                               (plist-get party :party)
-                               (if (plist-get party :tree)
-                                   (concat "@" (plist-get party :tree)) "")
-                               (if (plist-get party :current)
-                                   (concat " " agent-river-map-here-marker) "")
-                               (if (> writes 0)
-                                   (format " · %d write%s" writes
-                                           (if (= writes 1) "" "s"))
-                                 "")
-                               (if last
-                                   (format " · %s ago" (agent-river--ago last))
-                                 "")))))
-              (plist-get node :parties))))
+      (let* ((parties (plist-get node :parties))
+             ;; The line's gutter already carries a here-marker whenever any
+             ;; party on this node is `:current', and the row says the same
+             ;; thing a third way in its face.  With one party those are all
+             ;; about the only name there is, so the glyph in the text is one
+             ;; fact wearing three encodings and a reader cannot tell which of
+             ;; them is the one carrying it.  It earns its place only where
+             ;; the gutter's is ambiguous: with several parties the marker up
+             ;; there says somebody is here and cannot say who, which is
+             ;; exactly the question these rows exist to answer.  Kept per
+             ;; node rather than per row for the reason `agent-river--map-said-p'
+             ;; is per contributor -- dropping it from one row of several
+             ;; would leave the gutter's marker reading as though it belonged
+             ;; to whichever rows still had theirs.
+             (several (cdr parties))
+             (rows
+              (mapcar
+               (lambda (party)
+                 (let ((writes (or (plist-get party :writes) 0))
+                       (last (plist-get party :last)))
+                   (list :key (concat "party/" (plist-get party :party))
+                         ;; Between the step above and the diffstat below:
+                         ;; who has been here outlasts what is happening this
+                         ;; second, and answers the question the map is
+                         ;; opened with before the state of the tree does.
+                         :rank 1
+                         :face (if (plist-get party :current)
+                                   'agent-river-prompt
+                                 'agent-river-stale)
+                         :text (concat
+                                (plist-get party :party)
+                                (if (plist-get party :tree)
+                                    (concat "@" (plist-get party :tree)) "")
+                                (if (and (plist-get party :current) several)
+                                    (concat " " agent-river-map-here-marker) "")
+                                (if (> writes 0)
+                                    (format " · %d write%s" writes
+                                            (if (= writes 1) "" "s"))
+                                  "")
+                                (if last
+                                    (format " · %s ago" (agent-river--ago last))
+                                  "")))))
+               parties)))
         (when rows (puthash (plist-get node :path) rows table))))
     table))
 
