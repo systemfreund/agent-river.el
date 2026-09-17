@@ -5755,5 +5755,98 @@ first."
       ;; said in words and now says for a second reason.
       (should-not (agent-river--artifact-gone-p state "inc:INC-444")))))
 
+;;; The cost of a redraw
+;;
+;; The map redraws on a timer into a buffer somebody is reading, so the
+;; derivation behind it is on a budget.  These are the two shapes that budget
+;; was being spent on, and both are the kind of thing that comes back: a
+;; second reader added later that resolves keys for itself, or a walk of the
+;; registry added to a draw that already had one.
+
+(ert-deftest agent-river-test-placement-is-derived-once-and-agrees-with-itself ()
+  (agent-river-test--with-artifacts
+    (let ((state (agent-river-state "s1" "alpha")))
+      (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"
+                                      :path "/repo/a.el" :cwd "/repo"))
+      (agent-river-appeared "inc:INC-444" :domain 'inc)
+      (agent-river-fold state '(:kind "touch" :file "inc:INC-444" :cwd "/repo"))
+      (dolist (entry (agent-river--heat-entries 'session))
+        ;; The entry carries the answer, so no reader recomputes it -- and the
+        ;; cached answer has to be the one the computation gives, or the cache
+        ;; is a second account of the placement rather than the same one.
+        (should (plist-member entry :abs))
+        (should (plist-member entry :place))
+        (should (equal (plist-get entry :abs)
+                       (agent-river--heat-resolve
+                        (list :cwd (plist-get entry :cwd)
+                              :anchor (plist-get entry :anchor)
+                              :file (plist-get entry :file)))))
+        ;; And a cached nil is an answer, not a miss: every non-file key gets
+        ;; one, which is exactly the set that cannot benefit from recomputing.
+        (should (equal (agent-river--heat-absolute entry) (plist-get entry :abs)))
+        (should (equal (agent-river--heat-place entry) (plist-get entry :place)))))))
+
+(ert-deftest agent-river-test-a-hand-built-entry-still-resolves ()
+  (agent-river-test--with-artifacts
+    ;; `agent-river--artifact-gone-p' and `agent-river--rows-step' build an
+    ;; entry by hand and carry no cached answer.  They must go on working, or
+    ;; the cache has quietly become mandatory.
+    (should (equal (agent-river--heat-absolute '(:cwd "/repo" :file "a.el"))
+                   "/repo/a.el"))
+    (should (equal (agent-river--heat-place '(:cwd "/repo" :file "a.el"))
+                   "/repo/a.el"))))
+
+(ert-deftest agent-river-test-one-draw-walks-the-registry-once ()
+  (agent-river-test--with-artifacts
+    (let ((state (agent-river-state "s1" "alpha")) (walks 0))
+      (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"
+                                      :path "/repo/a.el" :cwd "/repo"))
+      (advice-add 'agent-river--heat-walk :before (lambda (&rest _) (setq walks (1+ walks))))
+      (unwind-protect
+          (progn
+            ;; Outside a draw every call walks: a dired shading asked a second
+            ;; later is asking about a second later, and a cache there would
+            ;; be answering the wrong question.
+            (agent-river--heat-entries 'session)
+            (agent-river--heat-entries 'session)
+            (should (= walks 2))
+            ;; Inside one, the listing, the roots and the markers are readings
+            ;; of one set of artifacts, so they take it once.
+            (setq walks 0)
+            (let ((agent-river--heat-memo (cons 'none nil)))
+              (agent-river--heat-entries 'session)
+              (agent-river--heat-entries 'session)
+              (agent-river--heat-entries 'session)
+              (should (= walks 1))
+              ;; One slot, because a draw asks one frame throughout.  A
+              ;; different frame is a different question, so it busts the
+              ;; cache rather than being served the answer to the first one --
+              ;; which is the failure that would matter, a task-frame listing
+              ;; annotated with session-frame weights.
+              (agent-river--heat-entries 'task)
+              (should (= walks 2))))
+        (advice-mapc (lambda (f _p) (advice-remove 'agent-river--heat-walk f))
+                     'agent-river--heat-walk)))))
+
+(ert-deftest agent-river-test-the-shared-entry-list-is-never-mutated ()
+  (agent-river-test--with-artifacts
+    (let ((state (agent-river-state "s1" "alpha")))
+      (dotimes (i 5)
+        (agent-river-fold state (list :kind "act" :tool "Edit"
+                                      :file (format "src/f%d.el" i)
+                                      :path (format "/repo/src/f%d.el" i)
+                                      :cwd "/repo")))
+      (let* ((agent-river--heat-memo (cons 'none nil))
+             (first (agent-river--heat-entries 'session))
+             (snapshot (copy-tree first)))
+        ;; Every reader in a draw gets the same list object.  One that sorted
+        ;; or reversed it in place would reorder what the next reader sees,
+        ;; and the bug would show up as the map drawing a different answer
+        ;; depending on which section was rendered first.
+        (agent-river--map-reach "/repo" 'session)
+        (agent-river--map-all-roots 'session)
+        (agent-river--map-newest first)
+        (should (equal first snapshot))))))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here

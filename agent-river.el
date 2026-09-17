@@ -5245,6 +5245,19 @@ of it onto every entry would be a second account of the same thing."
              agent-river-registry)
     gone))
 
+(defvar agent-river--heat-memo nil
+  "A one-draw cache of `agent-river--heat-entries', or nil when not caching.
+
+Bound to a fresh box by `agent-river--map-draw' and thrown away with it,
+which is why there is no invalidation here to get wrong: a draw is
+synchronous Lisp, nothing on that path folds, and the binding cannot
+outlive the walk it was made for.  A contributor's `:refresh' may start a
+subprocess, but its sentinel runs later and under no binding of this.
+
+Outside a draw this stays nil and every call walks the registry, which is
+what every other reader wants -- a dired shading asked a second later is
+asking about a second later.")
+
 (defun agent-river--heat-entries (&optional scope)
   "Return one plist per artifact of every folded session.
 
@@ -5268,6 +5281,20 @@ a view that got missed -- they answer \"how often\", and say so in the
 words they render (\"6 touches\"), where this answers \"how hot\".  A tally
 that aged would leave the panel's number disagreeing with itself between
 two redraws with nothing having happened in between."
+  (let ((key (or scope 'task)))
+    (if (and agent-river--heat-memo (eq (car agent-river--heat-memo) key))
+        (cdr agent-river--heat-memo)
+      (let ((entries (agent-river--heat-walk scope)))
+        (when agent-river--heat-memo
+          (setcar agent-river--heat-memo key)
+          (setcdr agent-river--heat-memo entries))
+        entries))))
+
+(defun agent-river--heat-walk (&optional scope)
+  "Walk the registry for `agent-river--heat-entries'.
+Split out so the cache above and the walk cannot come apart.  The list is
+shared between every reader within one draw, so nothing may mutate it --
+each caller sorts a list of its own instead."
   (let (entries)
     (maphash
      (lambda (_id state)
@@ -5275,14 +5302,34 @@ two redraws with nothing having happened in between."
              (cwd (agent-river-state-cwd state))
              (anchors (agent-river-state-anchors state)))
          (maphash (lambda (path entry)
-                    (push (list :party party
-                                :cwd cwd
-                                :anchor (and anchors (gethash path anchors))
-                                :file path
-                                :weight (agent-river--heat-weight entry)
-                                :writes (or (plist-get entry :writes) 0)
-                                :last (plist-get entry :last))
-                          entries))
+                    ;; `:abs' and `:place' are derived here, once, rather than
+                    ;; by each reader for itself.  That is this function's own
+                    ;; promise one grain finer: a map draw used to resolve every
+                    ;; key three times over -- in `agent-river--map-newest', in
+                    ;; `agent-river--map-reach's own loop, and again inside
+                    ;; `agent-river--map-live-p' -- and `expand-file-name' is
+                    ;; not cheap.  Measured on 2026-09-17 with 5000 artifacts:
+                    ;; `--map-reach' alone took 135 ms, of which around 60 ms
+                    ;; was the same answer computed twice too often.
+                    (let* ((anchor (and anchors (gethash path anchors)))
+                           ;; Resolved from a three-key plist rather than from
+                           ;; the finished one, so the entry is consed once
+                           ;; instead of built and then copied by `append'.
+                           (abs (agent-river--heat-resolve
+                                 (list :anchor anchor :cwd cwd :file path))))
+                      (push (list :party party
+                                  :cwd cwd
+                                  :anchor anchor
+                                  :file path
+                                  :weight (agent-river--heat-weight entry)
+                                  :writes (or (plist-get entry :writes) 0)
+                                  :last (plist-get entry :last)
+                                  :abs abs
+                                  :place (or abs
+                                             (and (not (eq (agent-river--key-domain path)
+                                                           'file))
+                                                  path)))
+                            entries)))
                   (if (eq scope 'session)
                       (agent-river-state-artifacts state)
                     (agent-river-state-task-artifacts state)))))
@@ -5303,6 +5350,18 @@ file *outside* the cwd to the same shape, and resolving those against the
 cwd used to draw them inside a tree they have nothing to do with; they
 carry an `:anchor' instead, the directory they were really folded from,
 and it wins over the cwd here."
+  (if (plist-member entry :abs)
+      ;; Derived already, by `agent-river--heat-entries'.  Read with
+      ;; `plist-member' rather than `plist-get': nil is a real answer here --
+      ;; it is what every non-file key gets -- and treating it as a miss would
+      ;; put the whole cost back for exactly the entries that cannot benefit.
+      (plist-get entry :abs)
+    (agent-river--heat-resolve entry)))
+
+(defun agent-river--heat-resolve (entry)
+  "Resolve ENTRY's key against its anchor or cwd.
+The body of `agent-river--heat-absolute', split out so that the cached
+answer and the computed one cannot come apart."
   (let ((cwd (or (plist-get entry :anchor) (plist-get entry :cwd)))
         (file (plist-get entry :file)))
     (and cwd (not (string-empty-p cwd)) file (not (string-empty-p file))
@@ -5326,11 +5385,13 @@ for something that is not on disk.  This one answers \"which artifact\",
 which
 is the question the position marker, the party floor and the section
 listings are all really asking."
-  (or (agent-river--heat-absolute entry)
-      (let ((file (plist-get entry :file)))
-        (and file (not (string-empty-p file))
-             (not (eq (agent-river--key-domain file) 'file))
-             file))))
+  (if (plist-member entry :place)
+      (plist-get entry :place)
+    (or (agent-river--heat-absolute entry)
+        (let ((file (plist-get entry :file)))
+          (and file (not (string-empty-p file))
+               (not (eq (agent-river--key-domain file) 'file))
+               file)))))
 
 (defun agent-river--heat-table (&optional scope)
   "Return a hash of basename to weighted touch count across every folded session.
@@ -6505,9 +6566,20 @@ the question by deleting it."
       (let* ((abs (agent-river--heat-absolute entry))
              (party (plist-get entry :party))
              (last (plist-get entry :last))
-             (hit (and abs (seq-find (lambda (cell)
-                                       (string-prefix-p (car cell) abs))
-                                     prefixes))))
+             ;; Written out rather than `seq-find', which is the same search
+             ;; through a generic dispatch: measured on 2026-09-17 at 5000
+             ;; artifacts, 21.5 ms against 2.6 ms for the loop.  Everywhere
+             ;; else in this file `seq-find' is the right call -- it is asked
+             ;; once, of a listing, and reads better.  Here it is asked once
+             ;; per artifact per draw, which is the one shape that turns a
+             ;; readability win into a fifth of the redraw.
+             (hit (and abs
+                       (let ((left prefixes) (found nil))
+                         (while (and left (not found))
+                           (when (string-prefix-p (car (car left)) abs)
+                             (setq found (car left)))
+                           (setq left (cdr left)))
+                         found))))
         ;; A touch too cold to name is not reached any more, so the node it
         ;; would have made is never built: an entry left with no parties
         ;; would otherwise be listed with an empty annotation, which reads
@@ -8070,6 +8142,13 @@ nothing."
       (with-current-buffer buffer
         (let* ((here (agent-river--map-here))
                (inhibit-read-only t)
+               ;; One walk of the registry for the whole draw.  The listing,
+               ;; the roots, the position markers and every domain section
+               ;; are readings of one set of artifacts, and taking that set
+               ;; three times over is three chances for them to disagree as
+               ;; well as three times the work: measured on 2026-09-17 at
+               ;; 5000 artifacts, a draw spent about 30 ms re-walking.
+               (agent-river--heat-memo (cons 'none nil))
                ;; Asked whether or not the map is zoomed: the grouping is
                ;; what tells everything below which trees a section stands
                ;; for, and a zoomed map is looking at one of those sections.
