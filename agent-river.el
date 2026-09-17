@@ -1334,7 +1334,7 @@ from here would reach into a state this command is not about."
                             keys)
                           nil t)))
   (remhash key agent-river-artifacts)
-  (agent-river-log "artifact" (format "%s forgotten" key))
+  (agent-river--forget-reported (format "%s forgotten" key) "artifact")
   key)
 
 ;;;###autoload
@@ -1343,7 +1343,10 @@ from here would reach into a state this command is not about."
 The artifact-side `agent-river-forget-artifacts': what was being worked
 on is dropped, and who was working is left alone."
   (interactive)
-  (clrhash agent-river-artifacts))
+  (let ((n (hash-table-count agent-river-artifacts)))
+    (clrhash agent-river-artifacts)
+    (agent-river--forget-reported
+     (format "forgot %d artifact record%s" n (if (= n 1) "" "s")) "artifact")))
 
 ;;; Derived signals
 
@@ -4637,8 +4640,12 @@ file that no longer exists."
     (agent-river--forget-reported
      (format "forgot %d artifact%s" n (if (= n 1) "" "s")))))
 
-(defun agent-river--forget-reported (text)
-  "Say TEXT happened, and redraw the views a forget has just changed.
+(defun agent-river--forget-reported (text &optional kind)
+  "Say TEXT happened as an event of KIND, and redraw the views it changed.
+
+KIND defaults to `note', which is what a forget on a session is.  A
+forget on an artifact passes `artifact', so the line is coloured by what
+it was about rather than by which command wrote it.
 
 Logged only into a HUD that already exists.  `agent-river-log' would
 otherwise create the buffer and `agent-river-auto-display' pop a window
@@ -4647,9 +4654,12 @@ from the map.
 
 The map is drawn rather than marked dirty: its timer only runs while an
 agent is working, so a flag set between turns would sit there until the
-next one and the view would go on naming what was just forgotten."
+next one and the view would go on naming what was just forgotten.  Which
+is the whole reason the artifact commands come through here too -- they
+remove a subject rather than fold it, so the observer hook the map now
+listens on never hears about them."
   (if (get-buffer agent-river-buffer-name)
-      (agent-river-log "note" text)
+      (agent-river-log (or kind "note") text)
     (agent-river--redraw-block))
   (agent-river--map-draw)
   (message "agent-river: %s" text))
@@ -6914,13 +6924,29 @@ earns -- and what keeps the quiet entries quiet."
   (if face (propertize text 'agent-river-map-face face) text))
 
 (defun agent-river--map-name (name)
-  "Return NAME as a Markdown code span.
+  "Return NAME as a Markdown code span, fenced and on one line.
 
 Backticks rather than bare text, for two reasons that happen to agree: a
 path is what a code span is for, and inline markup does not apply inside
 one -- without it `foo_bar_baz.el' renders with `bar' in italics and half
-the underscores eaten, which is a filename the view would be lying about."
-  (concat "`" name "`"))
+the underscores eaten, which is a filename the view would be lying about.
+
+Which holds only for as long as the name cannot close the span it is
+sitting in, and a name stopped being ours the moment a record could carry
+one: `agent-river-artifact-name' is a ticket title from whatever declared
+it, and `Fix \\=`foo\\=` in *bar*' ended the span at its first backtick and
+italicised the rest of the line.  So the fence is measured
+\(`agent-river--md-code', the same answer the export already takes) and
+the text is held to one line (`agent-river--map-one-line', the same rule
+a contributed row already owes) -- a newline here did not make two lines,
+it made one entry and one stray, and the stray carried none of the
+properties the motions and `agent-river--map-here' read.
+
+A path with a backtick in it is rare and was always possible; it gets the
+same treatment for free, which is the reason this is fixed in the one
+place every name goes through rather than beside the record that made it
+likely."
+  (agent-river--md-code (agent-river--map-one-line name)))
 
 ;;; What the disk says, beside what the agents did
 ;;
@@ -8073,9 +8099,17 @@ noticed one yet would take the listing for a single checkout."
     (concat (agent-river--map-marker 1)
             (agent-river--map-mark (cond
                                     ((null root) (format "%d roots" (or roots 0)))
+                                    ;; Through `agent-river--map-name' like
+                                    ;; the tree below it: a label is a name
+                                    ;; and the header is the one place a
+                                    ;; domain's was going in bare, which both
+                                    ;; rendered it differently from every
+                                    ;; other heading and left the one name
+                                    ;; here that nothing had fenced.
                                     ((agent-river--map-domain root)
-                                     (agent-river--domain-label
-                                      (agent-river--map-domain root)))
+                                     (agent-river--map-name
+                                      (agent-river--domain-label
+                                       (agent-river--map-domain root))))
                                     (t (agent-river--map-name
                                         (abbreviate-file-name root))))
                                    'agent-river-prompt)
@@ -8405,9 +8439,14 @@ has no code span -- its text is prose the map escaped -- so the marker is
 stepped over instead; landing in column zero would put the cursor on the
 Markdown marker, which reads as though the markup were the content.
 
+The whole fence, not one backtick of it.  A name holding a backtick is
+fenced with several and written with a space inside them
+\(`agent-river--md-code'), so stopping at the first one left point on
+markup in exactly the case the fence exists for.
+
 Falls back to the start of the line, so this is safe to call anywhere."
   (goto-char (line-beginning-position))
-  (or (re-search-forward "`" (line-end-position) t)
+  (or (re-search-forward "`+ ?" (line-end-position) t)
       (re-search-forward "^[-# ]+" (line-end-position) t)))
 
 (defun agent-river--map-scan (count test)
@@ -8734,8 +8773,23 @@ where drawing inline would read a buffer that is still live."
   (setq agent-river--map-dirty t)
   (agent-river--ensure-map-timer))
 
-(defun agent-river--map-observe (_state _event)
-  "Mark the map as needing a redraw after an event."
+(defun agent-river--map-observe (_subject _event)
+  "Mark the map as needing a redraw after an event about SUBJECT.
+
+On both observer hooks, which is the one shape that may do that.  The two
+are kept apart because a consumer that reads its subject has to know
+which kind it was handed -- and this one never reads it: the map is
+redrawn from the tables either way, so the event is only ever news that
+something moved.  A consumer that does look at SUBJECT belongs on one
+hook or the other, and this is not the precedent for putting it on both.
+
+Subscribing to `agent-river-observers' alone is what this fixes.  An
+artifact declared from outside folds into `agent-river-artifacts' and
+then went nowhere: the timer retires once nothing is dirty and nothing is
+cooling, so an incident arriving while no agent was working sat in the
+table until somebody pressed `g'.  That is the case the artifact table
+exists for -- something matters most when no session is running -- so it
+was also the case the view was blindest to."
   (agent-river--map-invalidate))
 
 (defvar agent-river--map-timer nil
@@ -8801,11 +8855,16 @@ lot of machinery for a view whose subject is the agents."
                        #'agent-river--map-tick))))
 
 (defun agent-river--map-teardown ()
-  "Take the map off the event stream and stop its timer.
+  "Take the map off both event streams and stop its timer.
 Run when the buffer is killed, and as the observer's retirement: the map
 draws only into its own buffer, so closing that buffer is the whole of
-turning it off."
+turning it off.
+
+Both hooks, whichever of them retired it.  `agent-river--run-observers'
+removes a thrower from the hook it threw on and leaves the other holding
+a function that will throw again the moment an artifact arrives."
   (remove-hook 'agent-river-observers #'agent-river--map-observe)
+  (remove-hook 'agent-river-artifact-observers #'agent-river--map-observe)
   (agent-river--stop-map-timer))
 
 (put 'agent-river--map-observe 'agent-river-retire #'agent-river--map-teardown)
@@ -8844,6 +8903,14 @@ takes the map off the event stream."
             agent-river--map-folds nil)
       (add-hook 'kill-buffer-hook #'agent-river--map-teardown nil t))
     (add-hook 'agent-river-observers #'agent-river--map-observe)
+    ;; And the artifact stream, which is the half with no session behind it.
+    ;; A tree changes because an agent did something, so the session hook is
+    ;; enough to keep a listing current; an incident arriving changes the map
+    ;; with no event on that hook at all, and the redraw timer retires as soon
+    ;; as nothing is dirty and nothing is cooling -- so the record sat in the
+    ;; table, drawn by nobody, until somebody pressed `g'.  Quiet is exactly
+    ;; when this view has the most to say.
+    (add-hook 'agent-river-artifact-observers #'agent-river--map-observe)
     (agent-river--map-draw)
     (agent-river--ensure-map-timer)
     (pop-to-buffer buffer)))
