@@ -5596,6 +5596,93 @@ first."
     (should (string-match-p "◎" (agent-river-test--hud)))
     (should (string-match-p "INC-444 routed to you" (agent-river-test--hud)))))
 
+(ert-deftest agent-river-test-a-record-fits-on-one-log-line ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :domain 'inc
+                          :name "INC-444\ndisk full"
+                          :text (concat "routed to you\nbecause "
+                                        (make-string 200 ?x)))
+    (let ((hud (agent-river-test--hud)))
+      ;; The HUD is line-based: a newline does not make two log lines, it
+      ;; makes one line and a remainder carrying none of the properties the
+      ;; motions read -- and the trim then counts lines that are no longer
+      ;; one entry each.  Every other way in squishes and clips already; this
+      ;; is the way in whose text is least ours.
+      (should (= (length (seq-filter (lambda (line) (string-match-p "x" line))
+                                     (split-string hud "\n" t)))
+                 1))
+      (should (string-match-p "routed to you because" hud))
+      (should (string-match-p "…" hud)))))
+
+(ert-deftest agent-river-test-a-context-handed-out-stops-changing ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :domain 'inc
+                          :context '((severity . "P1")))
+    (let ((snapshot (plist-get (car (agent-river-artifacts-list 'inc)) :context)))
+      (agent-river-observe-artifact
+       (list :key "inc:INC-444" :kind "context" :context '((severity . "P3"))))
+      ;; A reading taken at a moment that goes on tracking its subject is not
+      ;; a reading.  The merge used to copy the spine and `setcdr' the shared
+      ;; cells, so a consumer diffing against what it was handed found no
+      ;; change -- the record moving under a reader with no event at that
+      ;; reader's end accounting for it.
+      (should (equal (alist-get 'severity snapshot) "P1"))
+      (should (equal (alist-get 'severity
+                                (agent-river-artifact-context
+                                 (gethash "inc:INC-444" agent-river-artifacts)))
+                     "P3")))))
+
+(ert-deftest agent-river-test-a-producers-own-context-is-never-written-into ()
+  (agent-river-test--with-artifacts
+    (let ((theirs (list (cons 'severity "P1"))))
+      (agent-river-appeared "inc:INC-444" :domain 'inc :context theirs)
+      (agent-river-observe-artifact
+       (list :key "inc:INC-444" :kind "context" :context '((severity . "P3"))))
+      ;; It may well be a quoted literal, and nothing here may write into one.
+      (should (equal (alist-get 'severity theirs) "P1")))))
+
+(ert-deftest agent-river-test-the-domains-in-play-are-derived-not-declared ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (agent-river-appeared "rev:pr-12" :domain 'review :name "PR 12")
+    (agent-river-appeared "notes.org")
+    ;; This was a `defcustom' holding `(file)' that nothing ever added to, so
+    ;; it went on saying `file' while `inc' records piled up beside it.  A
+    ;; declared list of what has arrived is a second account of the table.
+    (should (equal (agent-river-domains) '(inc review file)))
+    (should (equal (agent-river--map-live-domains) '(inc review)))))
+
+(ert-deftest agent-river-test-forgetting-a-record-nobody-has-says-so ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    ;; A log line saying a record was forgotten is a measurement of something
+    ;; that happened, and nothing happened here.
+    (should-not (agent-river-drop-artifact "inc:nope"))
+    (should-not (string-match-p "forgotten" (agent-river-test--hud)))
+    (should (equal (agent-river-drop-artifact "inc:INC-444") "inc:INC-444"))
+    (should (string-match-p "forgotten" (agent-river-test--hud)))))
+
+(ert-deftest agent-river-test-forgetting-every-record-asks-first ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+      (agent-river-artifacts-reset))
+    ;; Nothing undoes this, and what it throws away is the half of the state
+    ;; no event can rebuild: a session folds again from its next hook call, a
+    ;; record that arrived from a webhook an hour ago arrived once.
+    (should (= (hash-table-count agent-river-artifacts) 1))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+      (agent-river-artifacts-reset))
+    (should (= (hash-table-count agent-river-artifacts) 0))))
+
+(ert-deftest agent-river-test-forgetting-records-is-silent-about-none ()
+  (agent-river-test--with-artifacts
+    ;; Nothing to ask about, so nothing is asked: a prompt over an empty
+    ;; table is a question whose answers mean the same thing.
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (error "Asked about nothing"))))
+      (agent-river-artifacts-reset))))
+
 ;;; Domains -- a section that is not a directory
 ;;
 ;; The map's second reading of the artifact tables.  What these hold is the
@@ -5743,6 +5830,26 @@ first."
       ;; every tree somebody is typing in -- backwards for the case this is for.
       (should (equal (mapcar #'car roots) '("inc:")))
       (should (cdr (car roots))))))
+
+(ert-deftest agent-river-test-declaring-after-a-reach-repairs-the-placement ()
+  (agent-river-test--with-domain
+    (let ((state (agent-river-state "s1" "alpha")))
+      (setf (agent-river-state-cwd state) "/repo")
+      (agent-river-fold state '(:kind "touch" :file "inc:INC-444" :cwd "/repo"))
+      ;; Reached before it was declared, the key is a file: `file' is what a
+      ;; key is when nobody has said otherwise, and nothing here may parse a
+      ;; key to decide.  So it resolves into the session's tree as a name that
+      ;; is not on disk -- which is the order `agent-river-reach' now spells
+      ;; out, since only the caller can put the two calls the right way round.
+      (should (equal (agent-river--heat-absolute
+                      (list :cwd "/repo" :file "inc:INC-444"))
+                     "/repo/inc:INC-444"))
+      (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+      ;; And why the window closes by itself rather than needing a repair:
+      ;; the domain is read at every draw, so the record landing late takes
+      ;; the phantom off the tree on the next one.
+      (should-not (agent-river--heat-absolute
+                   (list :cwd "/repo" :file "inc:INC-444"))))))
 
 (ert-deftest agent-river-test-forgetting-gone-files-spares-a-declared-key ()
   (agent-river-test--with-domain

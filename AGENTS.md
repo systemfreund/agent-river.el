@@ -23,7 +23,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (369 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (377 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -232,6 +232,17 @@ These are load-bearing; the tests enforce most of them.
   the script degrades to a no-op; a payload that reaches Emacs and then throws
   writes a `hook failed` / `fold failed` line into the buffer. Silent failure is
   how this has broken before.
+- **One log line is one line** (`agent-river--log-text`). The HUD is
+  line-based: a newline in a log line does not make two entries, it makes one
+  entry and a remainder carrying none of the properties `n` and `>` read, and
+  `agent-river-max-entries` then trims by counting lines that are no longer
+  one entry each. The hook path has always squished and clipped where the
+  event is built (`agent-river--event`); the artifact path went straight to
+  `agent-river-log` with whatever a producer sent, which is the text here
+  least likely to be ours -- a ticket title arrives at any length and shape,
+  where a tool argument at least came from a host this file knows the dialect
+  of. The tag is producer text too, so it gets the same treatment: a label
+  column truncates by width and a newline is not width.
 - **Paths normalise identically across sessions** (`agent-river--rel`): relative to
   the session cwd when under it, bare basename otherwise. Stripping only the
   session's own cwd makes one file reached from a worktree and from the main
@@ -281,6 +292,22 @@ These are load-bearing; the tests enforce most of them.
   the function is used. It is a measurement rather than a claim because
   whoever calls it performed the dispatch and is reporting it -- the same
   standing `agent-river-watch-saves-mode` has.
+- **Declaring comes before reaching, and only the caller can get that
+  right.** The domain is read off the table and `file` is what a key is when
+  nobody has said otherwise, so a key reached before its record exists *is*
+  a file: `inc:INC-444` resolves into the session's tree as a name that is
+  not on disk, which `agent-river-forget-gone-files` then offers to sweep --
+  the mistake below, reached by doing the two calls in the wrong order. Not
+  closed in code, and the alternatives are written down rather than merely
+  rejected. Declaring from `agent-river-reach` would give a *file* reached
+  that way a record saying nothing the session tables do not already say
+  (the table is not a mirror) and would make two calls that declare a
+  domain; a domain argument on the reach is the same duplication with a
+  smaller surface; and anything that decided from the shape of the key is
+  the prefix rule the invariant below exists to refuse. What holds instead
+  is that the window closes by itself -- the domain is read at every draw,
+  so a record landing late repairs the placement -- and that the docstrings
+  at both ends say so. A test pins both halves.
 - **A key belongs to a domain, read off the table and never parsed out of the
   key** (`agent-river--key-domain`). `file` is what a key is when nobody said
   otherwise. A prefix rule would have to decide what `c:/tmp/x` means and
@@ -293,7 +320,23 @@ These are load-bearing; the tests enforce most of them.
   to stop, one domain over. `agent-river--heat-place` is the second reading
   beside it -- "which artifact" where the other says "where on disk" -- and
   it is what the position marker, the party floor and the section listings
-  actually want.
+  actually want. **Which domains are in play is derived too**
+  (`agent-river-domains`, narrowed by `agent-river--map-live-domains`). It
+  was a `defcustom` holding `(file)`, documented as the list a reader could
+  consult instead of walking the table, and nothing ever added to it -- so
+  it went on saying `file` while `inc` records piled up beside it. A
+  declared list of what has arrived is a second account of the table by
+  construction: right only for as long as somebody keeps it in step, which
+  here was nobody.
+- **A context is handed out as a copy, and a producer's own list is never
+  written into** (`agent-river--artifact-merge`, `agent-river-artifacts-list`).
+  The merge used to copy the spine with `copy-sequence` and `setcdr` the
+  cells, which are shared: a context read before an update showed the value
+  from after it, so a consumer diffing against its own snapshot found no
+  change -- the record moving under a reader with no event at that reader's
+  end accounting for it, which is the second-account problem arrived at from
+  the back. Every cell is built fresh now. The same rule keeps the merge off
+  the producer's list, which may well be a quoted literal.
 - **Nothing on the artifact path reaches the agent.** Signals travel back
   through `agent-river-observe` alone, and an artifact has no session to
   answer -- which is the case the table exists for. Side effects hang off
@@ -1010,6 +1053,19 @@ Four things about the map are load-bearing:
   `:files` rather than adding a kind of its own: the transition is identical
   and only its subject differs, and a second kind would be a second place for
   what forgetting means to be decided. It asks first, because nothing undoes it.
+- **The artifact-side forgets ask and report on the same terms**
+  (`agent-river-drop-artifact`, `agent-river-artifacts-reset`). Wholesale
+  asks, like the one above and for a sharper version of its reason: a
+  session folds again from its next hook call, where a record that arrived
+  from a webhook an hour ago arrived once, so this is the half of the state
+  no event can rebuild. Unconditionally rather than on
+  `called-interactively-p`, which answers nil in batch and would have made
+  the question the one behaviour here the suite could not hold; code that
+  means it says `clrhash`. One record does *not* ask, because naming it out
+  of a completing list is already the deliberate act the prompt would be
+  asking for -- and it reports only when something was removed, since a log
+  line saying a record was forgotten is a measurement of something that
+  happened.
 - **Weight and position are different readings.** The numbers say where an
   agent has *been*; `:current` says where it *is*, and after a long task those
   are different places. `:current` is computed across everything a party
