@@ -305,7 +305,7 @@ These are load-bearing; the tests enforce most of them.
   there would be wrong in every reading taken from it, to exactly the extent
   the function is used. It is a measurement rather than a claim because
   whoever calls it performed the dispatch and is reporting it -- the same
-  standing `agent-river-watch-saves-mode` has.
+  standing any measurement made outside the hook stream has.
 - **Declaring comes before reaching, and only the caller can get that
   right.** The domain is read off the table and `file` is what a key is when
   nobody has said otherwise, so a key reached before its record exists *is*
@@ -467,16 +467,25 @@ Two frames again: pick `task` or `session` scope *explicitly* (see
 
 A *consumer* turns state into an outside effect and hangs off
 `agent-river-observers`. A *producer* turns something only Emacs can see into
-an event, via `agent-river-note`, and hangs off whatever Emacs hook sees it —
-not off `agent-river-observers`, which fires on the agent's events, not yours.
-`agent-river-watch-saves-mode` is the worked example: it notices you saving a
-file an agent is working in, which no hook can see because the agent's
-staleness check knows the disk and not your buffers.
+an event, and hangs off whatever Emacs hook or outside source sees it — not
+off `agent-river-observers`, which fires on the agent's events, not yours.
+Two ways in: `agent-river-note`, for something about a session, and
+`agent-river-appeared`, for something that belongs to no session at all.
 
 ```
 hooks -> fold -> observers -> outside world    consumer (agent-river-heat-mode)
-Emacs -> note  -> fold -> observers            producer (agent-river-watch-saves-mode)
+outside -> note/appeared -> fold -> observers  producer
 ```
+
+**Nothing that ships is a note producer any more.**
+`agent-river-watch-saves-mode` was the worked example — it noticed you saving
+a file an agent was working in, which no hook can see because the agent's
+staleness check knows the disk and not your buffers — and it was removed
+having never been switched on: off by default, and in the one live Emacs that
+could be asked, zero notes in the registry and zero `◉` lines in a HUD that
+outlives a reset. A feature nobody has run is not a worked example, it is an
+untested claim about what this protocol is for. The artifact path
+(`agent-river-appeared`) is the producer that is actually used.
 
 What may be noted is narrower than "anything from outside":
 
@@ -488,28 +497,25 @@ What may be noted is narrower than "anything from outside":
 
 Three things a producer owes:
 
-- **A relevance filter.** `after-save-hook` fires on every save you make.
-  Without a filter the log becomes a list of your keystrokes. The filter is a
-  state query — `agent-river--frame-touches` is the one used here.
+- **A relevance filter.** An Emacs hook fires on everything you do, not on
+  what matters — `after-save-hook` fires on every save you make, and without a
+  filter the log becomes a list of your keystrokes. The filter is a state
+  query: has any session actually reached this thing.
 - **A provenance guard.** A producer that cannot tell the agent's own writes
-  from yours launders the agent's action into an observation about it.
-  `agent-river--agent-in-flight-p` is the guard here, and it is deliberately
-  narrow: it suppresses only while a tool call is open on that exact file.
-  Widening it before there is evidence of noise would be tuning on a guess.
-There used to be a third — *the family, not the session* — because a
-delegated file landed in the subagent's task frame and never in its parent's,
-so asking the session alone produced no note at all when a subagent held the
-file, which was silence in the case with the least supervision in it. That
-function is gone with the split that made it necessary: the touch is the
-session's, so there is one frame to ask and one guard to apply.
+  from yours launders the agent's action into an observation about it. Keep it
+  narrow — the one that was here suppressed only while a tool call was open on
+  that exact file, and widening it before there is evidence of noise would be
+  tuning on a guess.
+- **Say which frame a count came from.** `artifacts` and `task-artifacts`
+  answer different questions, and a number under the wrong heading is the
+  failure the frames exist to prevent.
 
-Say which frame the count came from (`agent-river--frame-word`); the text used
-to read "this task" whatever `agent-river-foreign-save-scope` was set to.
-
-Reading notes back and deciding what to tell the agent is a separate step, and
-is deliberately not built: `agent-river--signal` still fires on fail streaks
-only. Notes are visible in the HUD (`◉`) and counted in the report (`:notes`)
-first, so the rate can be seen before anything is fed back.
+Reading notes back and deciding what to tell the agent is deliberately not
+built: `agent-river--signal` fires on fail streaks only. The condition written
+here was that the rate should be seen first — notes are visible in the HUD
+(`◉`) and counted in the report (`:notes`) — and with the save watcher gone
+there is no note producer shipping at all, so that rate is not low, it is
+unobserved. Anything built on it would be designed against a guess.
 
 ### Approvals — the one thing that travels back
 

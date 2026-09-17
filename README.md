@@ -237,15 +237,16 @@ source, it goes through the same claim.
 
 ## Putting your own facts in
 
-Something only Emacs can see, turned into an event. Hang it on whatever Emacs
-hook sees it — *not* on `agent-river-observers`, which fires on the agent's
-events, not yours. `agent-river-watch-saves-mode` is the worked example: it
-notices you saving a file an agent is working in, which no hook can see because
-the agent's staleness check knows the disk and not your buffers.
+Something the fold could never see, turned into an event. Hang it on whatever
+Emacs hook or outside source sees it — *not* on `agent-river-observers`, which
+fires on the agent's events, not yours. Two ways in:
 
 ```elisp
+;; About a session: something was observed happening to it.
 (agent-river-note "shared.el saved outside the session" session-id path)
-(agent-river-appeared "inc:INC-444" :domain 'inc :name "…")  ; no session at all
+
+;; About nothing in particular yet: it belongs to no session at all.
+(agent-river-appeared "inc:INC-444" :domain 'inc :name "…")
 ```
 
 What may be reported is narrower than "anything from outside". A
@@ -254,15 +255,18 @@ nothing can recompute it later. A **current-state fact** — the buffer has
 unsaved changes *right now* — should be queried where it is read, because a
 note of it goes stale the moment it is folded.
 
-A producer owes two things:
+A producer owes three things:
 
-- **A relevance filter.** `after-save-hook` fires on every save you make.
-  Without one the log becomes a list of your keystrokes. The filter is a state
-  query; `agent-river--frame-touches` is the one used here.
+- **A relevance filter.** An Emacs hook fires on everything you do, not on what
+  matters: `after-save-hook` fires on every save you make, and without a filter
+  the log becomes a list of your keystrokes. The filter is a state query — has
+  any session actually reached this thing.
 - **A provenance guard.** A producer that cannot tell the agent's own writes
-  from yours launders the agent's action into an observation about it.
-  `agent-river--agent-in-flight-p` is the guard here, and it is deliberately
-  narrow: it suppresses only while a tool call is open on that exact file.
+  from yours launders the agent's action into an observation about it. Keep it
+  narrow: suppress only while a tool call is open on that exact thing.
+- **Say which frame a count came from.** `artifacts` and `task-artifacts`
+  answer different questions, and a number under the wrong heading is the
+  failure the frames exist to prevent.
 
 A note is a *measurement*, so it may feed a signal — which means a producer
 noting its own opinions closes exactly the loop the claim slots are kept apart
