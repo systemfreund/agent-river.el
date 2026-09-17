@@ -838,7 +838,8 @@ Four things about the map are load-bearing:
   draw reads, so the listing, the reached paths, the changed paths and the
   diffstat cannot come to different conclusions about what a section is
   showing. Six things it owes. **Merging only where there is something to
-  merge** — two *trees* of one repository, both in the state: grouping
+  merge** — the general rule is in **Conventions**; this is the case that paid
+  for it. Two *trees* of one repository, both in the state: grouping
   unconditionally would widen a session started in `repo/backend` to the whole
   checkout, which is a different change wearing this one's clothes. **The
   section is headed by the main worktree even when no agent is in it**, which
@@ -1506,3 +1507,12 @@ together:
 - Tests are named as sentences (`agent-river-test-waiting-outranks-blocked`) and
   assert the reason, not just the value. Helpers: `agent-river-test--with-session`,
   `--fail`, `--acts`, `--payload`, `--with-shell`.
+- **Merge only where there is something to merge.** Sameness of *form* is what
+  tempts; sameness of *subject* is what licenses. Two things that compute alike
+  but answer different questions are two things, and folding them together
+  performs a change nobody asked for while wearing the clothes of the one that
+  was. The test is not how many callers there are: a count is a threshold, and
+  a threshold decides by arithmetic what has to be decided by looking. Ask
+  instead what each caller is *for*, and where they part, leave them apart and
+  say why. First paid for by the map's worktree grouping, where the concrete
+  case is written out.
