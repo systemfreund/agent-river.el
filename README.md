@@ -139,9 +139,21 @@ Three calls put it there:
 (agent-river-ended "inc:INC-444")
 ```
 
+**Declare before you reach.** A domain is read off the artifact table and
+`file` is what a key is when nobody has said otherwise, so a key reached before
+its record exists *is* a file: `inc:INC-444` resolves against the session's cwd
+and shows up in its tree as a name that is not on disk, which
+`agent-river-forget-gone-files` will then offer to sweep. Declaring later
+repairs it — the domain is read at every draw — but the order to write is
+`appeared`, then `reach`.
+
 The `:context` is opaque — this package never reads a value out of it, which is
 what lets a record carry a severity, a body and a URL without agent-river having
-to learn about any of them. It renders as rows under the line.
+to learn about any of them. It renders as rows under the line. Text you pass in
+is yours and is treated as such: a `:name` or a `:text` is fenced, flattened to
+one line and clipped before it reaches a buffer, and the `:context` you get back
+from `agent-river-artifacts-list` is a copy, so a reading you took stays the
+reading you took.
 
 Two things to know before building on it.
 
@@ -285,6 +297,9 @@ to prevent. Note what happened, never what you think about it.
 (agent-river-artifacts-list 'inc)
 ;; ((:key "inc:INC-444" :domain inc :name "…" :context ((severity . "P1"))
 ;;   :gone nil :appeared "4m" :notes 0 :reached 1))
+
+(agent-river-domains)                   ; which domains are in play
+;; (inc review file)
 
 (agent-river-children "<session-id>")   ; subagent states
 ```
@@ -554,7 +569,7 @@ emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 
-369 tests, ~0.3 s. The contract tests for the extension points live in `agent-river-tests.el`
+377 tests, ~0.3 s. The contract tests for the extension points live in `agent-river-tests.el`
 under `;;; Observers`, `;;; Artifacts` and `;;; Domains` — point a new consumer
 at those rather than writing the guard tests again. Useful helpers:
 `agent-river-test--with-session`, `--with-observers`, `--with-artifacts`,
