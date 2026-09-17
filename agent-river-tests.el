@@ -1901,6 +1901,188 @@ CALL overrides fields of the tool call record."
     (should (string-match-p "hooks reach this session" (agent-river-test--hud)))))
 
 
+;;; What the agent said -- the other half of a turn
+;;
+;; Stream only: no hook carries the message text.  Which is why this is the
+;; one ingestion path that is deliberately not gated on `agent-river--claim'
+;; -- that gate decides who counts a session's steps, and nothing here counts
+;; one.
+
+(defmacro agent-river-test--with-say (&rest body)
+  "Run BODY against an empty HUD, a fresh registry and nothing in flight."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river--say-runs (make-hash-table :test 'equal))
+         (agent-river--source (make-hash-table :test 'equal))
+         (agent-river-auto-display nil))
+     (agent-river-clear)
+     ,@body))
+
+(defun agent-river-test--chunk (text)
+  "Return the `agent-message-chunk' agent-shell publishes for TEXT."
+  `((:event . agent-message-chunk) (:data . ((:text-chunk . ,text)))))
+
+(defun agent-river-test--turn-complete (&optional reason)
+  "Return the `turn-complete' agent-shell publishes, ending for REASON."
+  `((:event . turn-complete)
+    (:data . ((:stop-reason . ,(or reason "end_turn"))))))
+
+(ert-deftest agent-river-test-a-turn-is-one-say-however-many-chunks ()
+  (agent-river-test--with-say
+    (let* ((seen nil)
+           (agent-river-observers
+            (list (lambda (_state event)
+                    (when (equal (plist-get event :kind) "say")
+                      (push event seen))))))
+      (agent-river--say-arrived "s1" "Rewrote the parser")
+      (agent-river--say-arrived "s1" " and the tests pass.")
+      ;; Nothing mid-stream: a chunk usually ends inside a clause, and the
+      ;; shell publishes one per chunk, so folding as they arrive would make
+      ;; a dozen events out of one thing said.
+      (should-not seen)
+      (should-not (gethash "s1" agent-river-registry))
+      (agent-river--say-ended "s1" "end_turn" "/repo")
+      (should (= (length seen) 1))
+      (should (equal (plist-get (car seen) :text)
+                     "Rewrote the parser and the tests pass."))
+      ;; Why it ended rides along for whoever wants to tell a finished
+      ;; answer from an interrupted one; nothing here folds it.
+      (should (equal (plist-get (car seen) :stop-reason) "end_turn")))))
+
+(ert-deftest agent-river-test-a-turn-that-said-nothing-folds-nothing ()
+  (agent-river-test--with-say
+    ;; An agent that answers with tool calls alone has said nothing, and a
+    ;; line in the log for the absence of one is worse than no line.
+    (should-not (agent-river--say-ended "s1" "end_turn" "/repo"))
+    (should-not (gethash "s1" agent-river-registry))
+    (agent-river--say-arrived "s1" "   ")
+    (should-not (agent-river--say-ended "s1" "end_turn" "/repo"))
+    ;; A block that is not text -- an image -- carries no chunk at all.
+    (agent-river--say-arrived "s1" nil)
+    (should-not (agent-river--say-ended "s1" "end_turn" "/repo"))
+    (should-not (gethash "s1" agent-river-registry))))
+
+(ert-deftest agent-river-test-the-state-keeps-an-excerpt-of-what-was-said ()
+  (agent-river-test--with-say
+    (let* ((long (make-string (* 3 agent-river-said-width) ?x))
+           (seen nil)
+           (agent-river-observers (list (lambda (_state event) (push event seen)))))
+      (agent-river--say-arrived "s1" long)
+      (agent-river--say-ended "s1" "end_turn" "/repo")
+      ;; The event carries the whole of it.  A dialogue act cannot be read
+      ;; off a first sentence, which is where this parts company with the
+      ;; `◇' lines: what they show is an aside.
+      (should (equal (plist-get (car seen) :text) long))
+      ;; The slot keeps an excerpt, because this is the one value in the
+      ;; state whose length the agent chooses.
+      (should (= (length (agent-river-state-said (gethash "s1" agent-river-registry)))
+                 (1+ agent-river-said-width))))))
+
+(ert-deftest agent-river-test-what-was-said-is-kept-raw-and-on-one-line ()
+  (agent-river-test--with-say
+    (agent-river--say-arrived "s1" "Fixed the *parser*.\n\n- one\n- two")
+    (agent-river--say-ended "s1" "end_turn" "/repo")
+    (let ((said (agent-river-state-said (gethash "s1" agent-river-registry))))
+      ;; Squished, because a turn's output is paragraphs and every reader of
+      ;; the slot is line-based -- a newline in the log makes one entry and a
+      ;; remainder carrying none of the properties the motions read.
+      (should (equal said "Fixed the *parser*. - one - two"))
+      ;; Raw, because escaping is a rendering decision: stored escaped it
+      ;; would double-escape in the export and show backslashes in the HUD,
+      ;; which is deliberately not Markdown.  Same rule as `intent'.
+      (should (string-match-p "\\*parser\\*" said)))
+    (should (string-match-p "“ Fixed the \\*parser\\*\\. - one - two"
+                            (agent-river-test--hud)))))
+
+(ert-deftest agent-river-test-saying-something-is-not-a-step ()
+  (agent-river-test--with-say
+    (let ((state (agent-river-state "s1" "alpha")))
+      (agent-river-fold state '(:kind "act" :cwd "/repo" :tool "Edit" :file "a.el"))
+      (agent-river-fold state '(:kind "say" :cwd "/repo"
+                                      :text "I edited a.el and then b.el"))
+      ;; No tool ran.  A step counted here would be wrong in every reading
+      ;; taken from the step count, to exactly the extent this is used --
+      ;; the same reasoning `agent-river-reach' carries.
+      (should (= (agent-river-state-steps state) 1))
+      ;; And a file named in a sentence is not a file the agent reached.
+      (should (= (hash-table-count (agent-river-state-task-artifacts state)) 1))
+      (should-not (gethash "b.el" (agent-river-state-artifacts state)))
+      ;; Nor does saying something end the call in flight: the step is the
+      ;; tool's to close.
+      (should (agent-river-state-step state))
+      (agent-river-test--fail state 2)
+      (agent-river-fold state '(:kind "say" :text "that did not work"))
+      ;; Least of all does it look like recovery.  The streak is what a
+      ;; signal is built from, and an agent narrating its way out of one
+      ;; would be an agent silencing it.
+      (should (= (agent-river-state-fail-streak state) 2)))))
+
+(ert-deftest agent-river-test-what-is-being-said-is-per-session ()
+  (agent-river-test--with-say
+    (agent-river--say-arrived "s1" "Alpha is done")
+    (agent-river--say-arrived "s2" "Beta is done")
+    ;; Two agents answer side by side; one accumulator would produce a
+    ;; sentence neither of them said.
+    (agent-river--say-ended "s1" "end_turn" "/repo")
+    (should (equal (agent-river-state-said (gethash "s1" agent-river-registry))
+                   "Alpha is done"))
+    (should-not (gethash "s2" agent-river-registry))))
+
+(ert-deftest agent-river-test-what-a-session-says-is-heard-whoever-folds-it ()
+  (agent-river-test--with-say
+    (agent-river-test--with-shell '(("*alpha*" "s1"))
+      ;; The hooks own this session's steps, which is the common case --
+      ;; agent-shell hosts Claude Code, and Claude Code runs hooks.  They
+      ;; carry no message text, so gating this on the claim would make the
+      ;; commonest session the silent one.  The rule holds per kind.
+      (should (agent-river--claim "s1" 'hooks))
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        (agent-river--listen (agent-river-test--chunk "All"))
+        (agent-river--listen (agent-river-test--chunk " done."))
+        (should-not (gethash "s1" agent-river-registry))
+        (agent-river--listen (agent-river-test--turn-complete)))
+      (should (equal (agent-river-state-said (gethash "s1" agent-river-registry))
+                     "All done."))
+      ;; And it counted no step for the session the hooks are counting.
+      (should (= (agent-river-state-steps (gethash "s1" agent-river-registry)) 0)))))
+
+(ert-deftest agent-river-test-a-buffer-dying-drops-the-turn-in-flight ()
+  (agent-river-test--with-say
+    (agent-river-test--with-shell '(("*alpha*" "s1"))
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        (agent-river--listen (agent-river-test--chunk "Half a sen"))
+        (agent-river--listen '((:event . clean-up)))
+        ;; Cut off mid-sentence the chunks stand for nothing -- and left in
+        ;; the table they would sit there until some later turn of a session
+        ;; with that id flushed them as its own.
+        (should-not (gethash "s1" agent-river--say-runs))
+        (agent-river--listen (agent-river-test--turn-complete))
+        (should-not (gethash "s1" agent-river-registry))))))
+
+(ert-deftest agent-river-test-what-was-said-renders-and-is-not-a-landmark ()
+  (should (assoc "say" agent-river-kinds))
+  ;; Its own face, not the reasoning's: thinking is not telling, and one
+  ;; colour for both would leave a reader unable to say which of them a line
+  ;; was carrying.
+  (should-not (eq (nth 2 (assoc "say" agent-river-kinds))
+                  (nth 2 (assoc "reason" agent-river-kinds))))
+  ;; Every turn has one, so `>' passes over it.  That motion is for the
+  ;; handful of lines somebody scanning a long log is looking for, and a
+  ;; kind that fires once a turn is the log's bulk rather than its landmarks.
+  (should-not (member "say" agent-river-notable-kinds)))
+
+(ert-deftest agent-river-test-listening-stops-with-the-mode ()
+  (agent-river-test--with-say
+    (agent-river--say-arrived "s1" "Half a sen")
+    (agent-river-listen-mode 1)
+    (agent-river-listen-mode -1)
+    ;; A message half-accumulated is not something anyone can be told later,
+    ;; and the gesture that turned this on is what turns it off.
+    (should-not (gethash "s1" agent-river--say-runs))
+    (should-not (memq #'agent-river-listen-shell
+                      (bound-and-true-p agent-shell-mode-hook)))))
+
+
 ;;; Approvals -- what a session is waiting to be told
 ;;
 ;; The offer is read in two halves that share a request id: the responder
@@ -3167,9 +3349,25 @@ first line from a survey."
       ;; going somewhere Markdown is read.  Unescaped, an asterisk silently
       ;; italicises the rest of the line and a bracket swallows it into a
       ;; link -- the same hazard that keeps the HUD out of Markdown, small
-      ;; enough to escape here because only two values are the agent's.
+      ;; enough to escape here because only three values are the agent's.
       (should (string-match-p "the \\\\\\*parser\\\\\\* in a\\\\_b" markdown))
       (should (string-match-p "\\\\\\[see \\\\#1\\\\\\]" markdown)))))
+
+(ert-deftest agent-river-test-the-export-carries-what-was-said ()
+  (agent-river-test--with-export
+    (agent-river-fold state '(:kind "say" :text "the *parser* in a_b is fixed"))
+    (let ((markdown (agent-river-markdown)))
+      ;; The third agent-authored value, under the same escape as the other
+      ;; two.  An export with the tool calls and not the words is a tool log.
+      (should (string-match-p "\\*\\*said\\*\\* — the \\\\\\*parser\\\\\\* in a\\\\_b"
+                              markdown))
+      ;; Directly under the prompt, because the two are one exchange: filed
+      ;; below the tallies the answer reads as another measurement rather
+      ;; than as the end of the thing above it.
+      (should (< (string-match "\\*\\*prompt\\*\\*" markdown)
+                 (string-match "\\*\\*said\\*\\*" markdown)))
+      (should (< (string-match "\\*\\*said\\*\\*" markdown)
+                 (string-match "\\*\\*this task\\*\\*" markdown))))))
 
 (ert-deftest agent-river-test-a-name-cannot-break-out-of-its-code-span ()
   ;; A file name will almost never hold a backtick, and the one that does

@@ -239,6 +239,16 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
 (defface agent-river-reason '((t :inherit font-lock-doc-face :slant italic))
   "Face for the agent's own reasoning, as it streams in.")
 
+(defface agent-river-say '((t :inherit font-lock-keyword-face))
+  "Face for what the agent said, at the end of a turn.
+
+The prompt's colour without its weight, because the two are the halves of
+one exchange: the user's words arrive as `agent-river-prompt\=' and the
+answer to them comes back here, and a colour of its own would file the
+answer with the tool calls it is nothing like.  Distinct from
+`agent-river-reason\=', which is the agent's words addressed to nobody --
+thinking is not telling.")
+
 (defface agent-river-signal '((t :inherit warning :weight bold))
   "Face for an observation handed back to the agent.")
 
@@ -296,6 +306,7 @@ map's shading already travels as an overlay because tree-sitter owns
     ("act"    "▸" agent-river-act)
     ("think"  "·" agent-river-think)
     ("reason" "◇" agent-river-reason)
+    ("say"    "“" agent-river-say)
     ("intent" "◈" agent-river-intent)
     ("fail"   "✗" agent-river-fail)
     ("ask"    "?" agent-river-ask)
@@ -308,6 +319,17 @@ map's shading already travels as an overlay because tree-sitter owns
 
 
 ;;; The state
+
+(defconst agent-river-said-width 200
+  "How much of what the agent said the state keeps.
+
+The same number the prompt is clipped to in `agent-river--event\=', matched
+rather than shared: the two sit side by side in the export as the halves
+of one exchange, and an answer allowed to run four times the length of the
+question would read as the whole of what happened rather than as the end
+of it.  Two values because they answer different questions -- how much of
+the brief is kept, and how much of the answer -- and either may move
+without the other.  The event carries the text unclipped.")
 
 (cl-defstruct (agent-river-state (:constructor agent-river--state-create))
   id                ; registry key: "SESSION" or "SESSION/AGENT"
@@ -359,7 +381,20 @@ map's shading already travels as an overlay because tree-sitter owns
   ;; the claims before them: something that was genuinely seen, but not by a
   ;; hook, so it could never be recomputed from the event stream and has to be
   ;; carried rather than derived.
-  notes)
+  notes
+  ;; The end of the last turn, clipped to `agent-river-said-width' and stored
+  ;; raw -- escaping is done where it is rendered, the way an intent's is, so
+  ;; that a rendering decision does not end up in the state and the HUD, which
+  ;; is deliberately not Markdown, does not show an escape it never needed.
+  ;;
+  ;; A measurement and not a claim, which is worth being exact about since the
+  ;; words are the agent's either way: what is recorded is that the turn ended
+  ;; with this being said, which the stream witnessed.  What must not happen is
+  ;; the *content* being read back as an observation -- nothing derives a
+  ;; signal from it, and anything that did would close the same loop the intent
+  ;; slots are kept apart to prevent, with the agent's own sentence coming back
+  ;; to it as a fact about the world.
+  said)
 
 
 (defvar agent-river--current nil
@@ -912,6 +947,23 @@ replaying a session's events from the start."
      ((equal kind "touch")
       (agent-river--touch state file (plist-get event :wrote))
       (agent-river--anchor state file path))
+
+     ;; What the agent said, once the turn it said it in was over.  As narrow
+     ;; as `touch' above and for the same reason: no tool ran, so no step is
+     ;; counted and no artifact table is warmed -- a step count inflated here
+     ;; would be wrong in every reading taken from it, and a file named in a
+     ;; sentence is not a file the agent reached.
+     ;;
+     ;; The event carries the whole text, for whoever is listening on
+     ;; `agent-river-observers'; the slot keeps an excerpt, because this is the
+     ;; one value here whose length the agent chooses.  Squished as well as
+     ;; clipped: a turn's output is paragraphs, and every reader of the slot is
+     ;; line-based.
+     ((equal kind "say")
+      (setf (agent-river-state-said state)
+            (agent-river--clip
+             (agent-river--squish (or (plist-get event :text) ""))
+             agent-river-said-width)))
 
      ;; Both of the below record something that happened *to* the session
      ;; rather than something it did, which is why neither touches the step,
@@ -1877,6 +1929,11 @@ instead of counted."
       (agent-river--clip
        (agent-river--squish (or (alist-get 'prompt payload) "new task")) 100))
      ((equal kind "idle") "waiting for you")
+     ;; Through the path that owns one-line-ness rather than the clip beside
+     ;; it: this is the longest text that reaches the log, it is the agent's
+     ;; own prose, and a newline in it would make one entry and a remainder
+     ;; carrying none of the properties the motions read.
+     ((equal kind "say") (agent-river--log-text (alist-get 'message payload)))
      ((equal kind "done")
       (concat (or (alist-get 'agent_type payload) "subagent") " finished"))
      ;; No inline marker on a failure: the kind already renders ✗ in the
@@ -1947,9 +2004,21 @@ what keeps that from folding as a success."
                             (or (alist-get 'session_id payload) "unknown") id)))
           :outcome (agent-river--outcome kind payload)
           :ms (alist-get 'duration_ms payload)
-          :text (when (equal kind "prompt")
+          ;; Why the turn ended, as the host said it.  On the event and not in
+          ;; the fold, exactly as `:path' is: nothing here reads it, and the
+          ;; consumer that wants to tell a finished answer from an interrupted
+          ;; one is handed the raw event.
+          :stop-reason (alist-get 'stop_reason payload)
+          :text (cond
+                 ((equal kind "prompt")
                   (agent-river--clip
                    (agent-river--squish (or (alist-get 'prompt payload) "")) 200))
+                 ;; Whole, where the prompt is clipped.  A `◇' line shows the
+                 ;; first sentence of a thought because a thought is an aside;
+                 ;; what the agent said is the answer, and the fold clips its
+                 ;; own excerpt out of this rather than being handed one --
+                 ;; an observer reading the event gets what was actually said.
+                 ((equal kind "say") (or (alist-get 'message payload) "")))
           :detail (agent-river--detail kind payload))))
 
 
@@ -2141,7 +2210,7 @@ on its first one."
   "Session id -> the way in that owns it, `hooks' or `shell'.")
 
 (defun agent-river--claim (session source)
-  "Return non-nil when SOURCE may fold SESSION, claiming it if it is free.
+  "Return non-nil when SOURCE may fold SESSION's steps, claiming it if free.
 
 Both ways in describe the same session -- the hooks report what the CLI
 did, agent-shell reports what its ACP stream said -- so folding both
@@ -2151,7 +2220,15 @@ failure streak states a fact that is false, to the agent itself.
 The hooks win, because only they can carry an observation back.  A
 watched session that turns out to have hooks is given up whole rather
 than interleaved: what the stream folded is dropped, and the hooks build
-it again from their first event."
+it again from their first event.
+
+What this decides is who folds the events *both* sources produce, which
+is steps and the turn around them.  It is not a claim on the session as
+such: a kind only one source can report has nothing to double, and so is
+read wherever it can be got.  `agent-river--listen' reads what the agent
+said, which no hook carries, and `agent-river--attend' the permission
+requests, which none of them reports either -- both ungated, and both
+serving sessions the hooks own."
   (let ((owner (gethash session agent-river--source)))
     (cond
      ((or (null owner) (eq owner source))
@@ -2282,6 +2359,12 @@ by different gestures and for different reasons -- folding a session the
 hooks cannot reach, and seeing what any session is waiting for -- and a
 subscription shared between them would end when either did.")
 
+(defvar-local agent-river--listening nil
+  "This buffer's subscription token for what the session says, while it has one.
+A third token, by the same rule as the second: the gesture that turns it
+on is its own, and what it hears is wanted whether or not this session is
+folded from the stream -- see `agent-river-listen-mode'.")
+
 ;;;###autoload
 (defun agent-river-watch-shell (&optional buffer)
   "Fold BUFFER's agent-shell session from the stream agent-shell reads.
@@ -2337,6 +2420,164 @@ ever supplies the sessions the first way in cannot reach."
         (mapc #'agent-river-watch-shell (buffer-list)))
     (remove-hook 'agent-shell-mode-hook #'agent-river-watch-shell)
     (mapc #'agent-river-unwatch-shell (buffer-list))))
+
+
+;;; What the agent said -- the other half of a turn
+;;
+;; The fold knows what a session *did* and, where the ACP stream is readable,
+;; the first sentence of what it *thought*.  It has never known what it
+;; *said*: the whole of a turn's output reached the log as a `done' line, and
+;; the HUD could answer "what is it doing" and not "what did it tell me".
+;;
+;; The hooks cannot close that.  None of them carries the message text --
+;; `Stop' carries a transcript path, and that transcript lags by one record,
+;; which is why reading it was removed.  So this follows the *thought* path
+;; rather than the watch path: stream only, and a session with no agent-shell
+;; buffer gets no `say' lines at all, the same price the `◇' lines pay.
+;;
+;; Which is why it is deliberately *not* gated on `agent-river--claim'.  That
+;; gate decides who folds a session's steps, so that one tool call is not
+;; counted twice; the hooks and the stream both report steps, and only one of
+;; them may.  Neither reports a message but this one, so there is nothing to
+;; double -- and a Claude Code session that agent-shell hosts is precisely the
+;; common case, which the gate would have made silent here.  The rule holds
+;; per *kind*, not per session, and `agent-river--attending' has the same
+;; standing for the same reason.
+;;
+;; Two chunks of mechanism.  The text arrives as `agent-message-chunk', once
+;; per streamed chunk, which the shell "neither renders nor accumulates" --
+;; so the accumulating is ours.  And the end of it is `turn-complete', which
+;; exists on agent-shell's event stream and *not* on the ACP notification
+;; stream the thought handler hangs off: it is derived from the `session/prompt'
+;; response rather than sent as a notification.  So this is a buffer-local
+;; subscription of its own beside `agent-river--watching' and
+;; `agent-river--attending', taking `:event' nil and filtering in the handler,
+;; because `:event' names a single symbol and two events are wanted.
+;;
+;; Installed when the buffer appears rather than on the session's first folded
+;; event, which is where `agent-river--ensure-subscribed' runs: a session that
+;; has folded nothing has no handler yet, and its first turn is exactly the
+;; one worth hearing.
+
+(defvar agent-river--say-runs (make-hash-table :test 'equal)
+  "Session id -> the chunks of the message in flight, newest first.
+
+Deliberately not a slot on `agent-river-state', for the reason
+`agent-river--thought-runs' is not one: this is decoding state for one
+ingestion path, nothing folds it and no query reads it, and putting it in
+the struct would make every reload demand `agent-river-reset'.")
+
+(defun agent-river--say-arrived (session chunk)
+  "Add CHUNK to what SESSION is saying in the turn now running.
+
+A chunk is nil for a block that is not text -- an image -- and there is
+nothing to accumulate from one of those."
+  (when (and (stringp chunk) (not (string-empty-p chunk)))
+    (puthash session (cons chunk (gethash session agent-river--say-runs))
+             agent-river--say-runs)))
+
+(defun agent-river--say-ended (session reason cwd)
+  "Fold what SESSION said this turn, which ended for REASON, anchored at CWD.
+
+Returns the text, or nil for a turn that said nothing -- which is an
+ordinary turn rather than an edge case: an agent that answers with tool
+calls alone has said nothing, and a `say' event carrying an empty string
+would put a line in the log for the absence of one.
+
+The whole of it goes on the event.  A dialogue act cannot be read off a
+first sentence, which is where this parts company with the `◇' lines: what
+they show is an aside, and clipping an aside loses an aside."
+  (let ((chunks (gethash session agent-river--say-runs)))
+    (remhash session agent-river--say-runs)
+    (let ((text (apply #'concat (nreverse chunks))))
+      (unless (string-empty-p (string-trim text))
+        (agent-river-observe
+         (agent-river--event "say" `((session_id . ,session)
+                                     (cwd . ,(or cwd ""))
+                                     (message . ,text)
+                                     (stop_reason . ,reason))))
+        text))))
+
+(defun agent-river--listen (event)
+  "Fold what the current buffer's session says, from agent-shell's EVENT.
+
+Like `agent-river--attend' and unlike `agent-river--shell-observe', not
+gated on `agent-river--claim': see the section comment above -- the gate
+is about who counts a session's steps, and nothing here counts one."
+  (let ((session (agent-river--shell-session))
+        (data (alist-get :data event)))
+    (when session
+      (pcase (alist-get :event event)
+        ('agent-message-chunk
+         (agent-river--say-arrived session (alist-get :text-chunk data)))
+        ('turn-complete
+         (agent-river--say-ended session (alist-get :stop-reason data)
+                                 (directory-file-name
+                                  (expand-file-name default-directory))))
+        ;; The buffer is going.  A turn that never completed said nothing
+        ;; this can stand behind -- the agent was cut off mid-sentence --
+        ;; and the chunks would otherwise sit in the table for the rest of
+        ;; the Emacs session, to be flushed by a turn that is not theirs if
+        ;; the id ever came back.
+        ('clean-up (remhash session agent-river--say-runs))))))
+
+;;;###autoload
+(defun agent-river-listen-shell (&optional buffer)
+  "Fold what BUFFER's agent-shell session says at the end of each turn.
+Idempotent, and a no-op outside an agent-shell buffer."
+  (interactive)
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and (agent-river--shell-buffer-p)
+               (null agent-river--listening)
+               (fboundp 'agent-shell-subscribe-to))
+      (let ((shell (current-buffer)))
+        (setq agent-river--listening
+              (agent-shell-subscribe-to
+               :shell-buffer shell
+               :on-event
+               (lambda (event)
+                 ;; Never let the HUD break the shell it rides on -- but
+                 ;; never go quiet either.
+                 (condition-case err
+                     (with-current-buffer shell
+                       (agent-river--listen event))
+                   (error
+                    (ignore-errors
+                      (agent-river-log
+                       "fail" (format "message watch failed: %s"
+                                      (error-message-string err)))))))))))))
+
+(defun agent-river-unlisten-shell (&optional buffer)
+  "Stop folding what BUFFER's agent-shell session says."
+  (interactive)
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and agent-river--listening (fboundp 'agent-shell-unsubscribe))
+      (agent-shell-unsubscribe :subscription agent-river--listening)
+      (setq agent-river--listening nil))))
+
+;;;###autoload
+(define-minor-mode agent-river-listen-mode
+  "Fold what every agent-shell session says at the end of its turn.
+
+Off by default and reversible by the gesture that turned it on, like the
+other two: what it adds to the log is the agent's own prose, at the
+length the agent chose, and a HUD that starts quoting paragraphs at
+somebody who wanted a tool log is not something to do unasked.
+
+Unlike `agent-river-watch-mode' this is not an alternative to the hooks
+and does not compete with them -- a session they own still gets its
+messages from here, because they carry none.  Turning it off drops the
+turns in flight with the subscriptions: a message half-accumulated is not
+something anyone can be told later."
+  :global t
+  :group 'agent-river
+  (if agent-river-listen-mode
+      (progn
+        (add-hook 'agent-shell-mode-hook #'agent-river-listen-shell)
+        (mapc #'agent-river-listen-shell (buffer-list)))
+    (remove-hook 'agent-shell-mode-hook #'agent-river-listen-shell)
+    (mapc #'agent-river-unlisten-shell (buffer-list))
+    (clrhash agent-river--say-runs)))
 
 
 ;;; Approvals -- the one place this speaks, and whose words it uses
@@ -3677,12 +3918,14 @@ disagree with them."
 (defun agent-river--md-escape (text)
   "Return TEXT with its Markdown-active punctuation neutralised.
 
-For the values the agent wrote: a prompt, a stated intent.  They do not
-stop being arbitrary text because the export is going somewhere Markdown
-is read -- an intent containing an asterisk would silently italicise the
-rest of the line, and one containing a bracket would swallow it into a
-link.  This is the same hazard that keeps the HUD out of Markdown; here it
-is small enough to escape, because only two values are the agent's."
+For the values the agent wrote: a prompt, a stated intent, and the end of
+a turn.  They do not stop being arbitrary text because the export is going
+somewhere Markdown is read -- an intent containing an asterisk would
+silently italicise the rest of the line, and one containing a bracket
+would swallow it into a link.  This is the same hazard that keeps the HUD
+out of Markdown; here it is small enough to escape, because only three
+values are the agent's, and the third is clipped before it arrives
+\(`agent-river-said-width')."
   (replace-regexp-in-string "[][\\\\`*_<>&#|~]" "\\\\\\&" (or text "")))
 
 (defun agent-river--md-code (text)
@@ -3738,6 +3981,7 @@ their work is counted on the parent and aggregated on demand, so that the
 two cannot drift."
   (let* ((kids (agent-river-children (agent-river-state-id state)))
          (task (agent-river-state-task state))
+         (said (agent-river-state-said state))
          (intent (agent-river-state-intent state))
          (streak (agent-river-state-fail-streak state))
          (phase (agent-river--phase state))
@@ -3748,6 +3992,14 @@ two cannot drift."
           lines)
     (when (and task (not (string-empty-p task)))
       (push (format "- **prompt** — %s" (agent-river--md-escape task)) lines))
+    ;; Directly under the prompt, because the two are one exchange: an export
+    ;; carrying the tool calls and not the words is a tool log, and the answer
+    ;; filed below the tallies reads as another measurement rather than as the
+    ;; end of the thing above it.  Escaped here and not in the slot, so the
+    ;; HUD -- which is not Markdown -- is not shown backslashes it never
+    ;; needed.
+    (when (and said (not (string-empty-p said)))
+      (push (format "- **said** — %s" (agent-river--md-escape said)) lines))
     ;; The frame is in the name of the bullet, not left to the reader.  The
     ;; task tally resets with every prompt and the session tally does not.
     (push (format "- **this task** — %d step%s · %d failure%s%s%s"

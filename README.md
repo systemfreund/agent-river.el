@@ -224,7 +224,22 @@ translates it into the payload shape the hooks report, so everything from
 
 What this path cannot do is answer the agent: only the hooks carry text back.
 
-## One session, one source
+## What the agent said
+
+`agent-river-listen-mode` (off by default) folds the end of each turn as a `say`
+event: the `“` lines in the HUD, an excerpt on the state, and a `**said**`
+bullet in the export under the prompt it answers.
+
+No hook carries the message text, so this reads agent-shell's own event stream —
+`agent-message-chunk` accumulated, flushed on `turn-complete` — and a session
+agent-shell does not host gets no `say` lines, exactly as it gets no `◇` ones.
+The event handed to observers carries the whole text and the stop reason; the
+state keeps a clipped, one-line excerpt, because this is the one value in it
+whose length the agent chooses. A `say` counts no step and touches no artifact
+table: no tool ran, and a file named in a sentence is not a file the agent
+reached.
+
+## One session, one source — per kind
 
 The hooks and the stream describe the same session, so folding both counts every
 step twice — and a doubled failure streak states a fact that is false, to the
@@ -233,7 +248,13 @@ carry an observation back, and a watched session they reach is dropped from the
 registry and rebuilt from their first event rather than interleaved.
 
 That is what makes `agent-river-watch-mode` safe to leave on. If you add a third
-source, it goes through the same claim.
+source of *steps*, it goes through the same claim.
+
+What the claim settles is who folds the events both ways in produce. A kind only
+one source can report has nothing to double, and is read wherever it can be got:
+a hooked session that agent-shell hosts still gets its messages
+(`agent-river-listen-mode`) and its permission requests
+(`agent-river-approvals-mode`) from the stream, because no hook carries either.
 
 ## Putting your own facts in
 
@@ -624,8 +645,9 @@ One tool call is **one line**: the outcome is written onto the line that opened
 it, so the timestamp stays the one the call began at. Pairing is by
 `tool_use_id`, never by nearness or tool name — two parallel `Bash` calls would
 otherwise complete each other. The block groups sessions by place once there is
-more than one place to be. `◇` lines are the agent's own reasoning, which only
-the ACP stream carries.
+more than one place to be. `◇` lines are the agent's own reasoning and `“` lines
+what it said at the end of a turn; neither is in any hook payload, so both come
+from the session's agent-shell buffer where there is one.
 
 The HUD is deliberately **not** Markdown: its log carries prompts, reasoning and
 tool arguments — text this package does not control — and Markdown would let

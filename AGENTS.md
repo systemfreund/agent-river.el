@@ -23,7 +23,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (383 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (380 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -137,6 +137,16 @@ while `agent-river-approvals-mode` is on (see **Approvals** below). Both
 gestures that can make that call — `agent-river-answer` in the HUD and a row
 of the approval queue — go through that one function, so they cannot come to
 different conclusions about when a question may still be answered.
+
+A third way in, narrower again, for the one thing neither of those carries:
+
+```
+agent-shell event (whoever folds the session)
+  → agent-river--listen              agent-message-chunk, accumulated
+  → agent-river--say-ended           turn-complete: one event, whole text
+  → agent-river--event               payload alist → event plist
+  → agent-river-observe              from here on, as above
+```
 
 `kind` (`prompt` `act` `think` `fail` `done` `idle`) is passed as an argv from
 settings.json, not read out of the payload, so the hook-event → fold-event mapping
@@ -367,13 +377,49 @@ These are load-bearing; the tests enforce most of them.
   the exception the split allows rather than a hole in it, and the price is
   that the retirement has to leave both hooks, since the runner removes a
   thrower only from the one it threw on.
-- **One session, one way in** (`agent-river--claim`). The hooks and the
-  agent-shell stream describe the same session, so folding both counts every
-  step twice — and a doubled failure streak states a fact that is false, to the
-  agent itself. The hooks win, because only they can carry an observation back;
-  a watched session they reach is dropped from the registry and rebuilt from
-  their first event, rather than interleaved. This is what makes
-  `agent-river-watch-mode` safe to leave on.
+- **One session, one way in — for the kinds both ways in carry**
+  (`agent-river--claim`). The hooks and the agent-shell stream describe the
+  same session, so folding both counts every step twice — and a doubled
+  failure streak states a fact that is false, to the agent itself. The hooks
+  win, because only they can carry an observation back; a watched session they
+  reach is dropped from the registry and rebuilt from their first event,
+  rather than interleaved. This is what makes `agent-river-watch-mode` safe to
+  leave on. What it decides is who folds the *steps* and the turn around them,
+  which is the whole of what both sources report. A kind only one source can
+  produce has nothing to double, and is therefore read wherever it can be got:
+  `agent-river--listen` for what the agent said and `agent-river--attend` for
+  the permission requests are both ungated, and both serve sessions the hooks
+  own — which is the case with the most sessions in it. The rule holds per
+  kind, not per session, and the gate's docstring says so.
+- **What the agent said is stream-only, and counts nothing**
+  (`agent-river--listen`, the `say` branch). No hook carries the message text —
+  `Stop` names a transcript that lags by one record, which is why reading it
+  was removed — so this follows the `◇` lines: a session agent-shell does not
+  host gets no `say` lines, and that is the price rather than a bug. Five
+  things it owes. The **accumulator is a side table**
+  (`agent-river--say-runs`), for the reason `agent-river--thought-runs` is:
+  nothing folds it, no query reads it, and a slot would make every reload
+  demand `agent-river-reset`. The **flush is `turn-complete`**, which exists on
+  agent-shell's event stream and not on the ACP notification stream the
+  thought handler hangs off — it is derived from the `session/prompt` response,
+  not sent as a notification, which is why this is a subscription of its own
+  (`agent-river--listening`) with `:event` nil and a `pcase` in the handler:
+  `:event` names a single symbol and two events are wanted. It is **installed
+  when the buffer appears**, from `agent-shell-mode-hook` plus a sweep of
+  `buffer-list`, and not from `agent-river-observe` where
+  `agent-river--ensure-subscribed` runs — a session that has folded nothing yet
+  has no handler attached, and its first turn is exactly the one worth hearing.
+  **The event carries the whole text and the slot an excerpt**
+  (`agent-river-said-width`): a dialogue act cannot be read off a first
+  sentence, which is where this parts from the `◇` line, and the slot is the
+  one value in the state whose length the agent chooses. And the excerpt is
+  **stored raw, escaped where it is rendered**, the way an intent is — storing
+  it escaped would put a rendering decision in the state and show backslashes
+  in a HUD that is deliberately not Markdown. A `say` counts no step and warms
+  no artifact table, for `agent-river-reach`'s reason: no tool ran, and a file
+  named in a sentence is not a file the agent reached. It is not in
+  `agent-river-notable-kinds` — every turn has one, and `>` is for the lines
+  that want attention.
 - **The stream path builds payloads, not events** (`agent-river--shell-payload`).
   It goes through `agent-river--event` like everything else, so there is one
   place where a file argument can go uncounted rather than two. A tool call is
@@ -811,9 +857,14 @@ child's state rather than take a file name back out of
   about itself, and it is leaving the package — a reader who takes it for one
   of the measurements above it has no way back to the distinction.
 - **The agent's words escaped** (`agent-river--md-escape`), names fenced as
-  code spans long enough to hold a backtick (`agent-river--md-code`). Only two
-  values are the agent's, which is the whole reason this is tractable here and
-  is not in the HUD.
+  code spans long enough to hold a backtick (`agent-river--md-code`). Only
+  three values are the agent's — the prompt it was given, an intent it stated
+  and the end of its last turn — which is the whole reason this is tractable
+  here and is not in the HUD. The third arrives clipped
+  (`agent-river-said-width`) and sits directly under the prompt, because those
+  two are one exchange: an export with the tool calls and not the words is a
+  tool log, and the answer filed below the tallies reads as another
+  measurement rather than as the end of the thing above it.
 
 ### The two views of the artifact tables
 
@@ -1422,6 +1473,18 @@ together:
   reload does not demand `agent-river-reset`. The hooks carry no thinking text, so
   a session agent-shell does not host gets no `◇` lines; that is accepted, not a
   bug to route around.
+- **What the agent said (`“` lines) comes only from agent-shell's own event
+  stream** (`agent-river-listen-mode`, `agent-river--listen`), which is a
+  different mechanism from the one above and not a second use of it:
+  `agent-message-chunk` and `turn-complete` are agent-shell events, published
+  per buffer through `agent-shell-subscribe-to`, where the thought handler
+  reads ACP notifications off the client. `turn-complete` does not exist on
+  that notification stream at all, which is what forced the split. The chunks
+  accumulate in `agent-river--say-runs` and are folded as one `say` on
+  `turn-complete`; a turn that said nothing folds nothing, and a buffer dying
+  mid-turn drops what it had. Off by default, like the other two modes that
+  subscribe, because what it adds to the log is the agent's own prose at the
+  length the agent chose.
 - **The phase is read from the last `agent-river-phase-window` steps**, by
   three rules in order. **`waiting` outranks everything** — the tool window
   still holds the steps of a finished turn, so without it the panel announces
