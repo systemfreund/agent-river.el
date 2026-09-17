@@ -1,39 +1,175 @@
 # agent-river
 
-Claude Code hooks report events one at a time. `agent-river` folds that
-stream into a per-session **state** — what the agent is working on, which
-files it keeps returning to, how its tools are faring — and renders it in
-Emacs next to the event log.
+Coding-agent hooks report events one at a time. `agent-river` folds that stream
+into a per-session **state** — what the agent is working on, which files it
+keeps returning to, how its tools are faring — and hands that state to you.
 
 A flat log answers *what happened*. Only a fold answers *where the work
 stands*, because that question quantifies over a set of events.
 
-It grew out of streaming development live: viewers could see *what* changed
-in the Emacs frame but not what the agent was paying attention to. It has
-two consumers, and they want different things.
+**This README is for integrating your own application with it.** It covers the
+data model, how events get in, how to read the state, how to react to it, and
+how to put your own facts into it. It ships views of its own — a HUD, a project
+map, an approval queue — and those are described near the end, briefly, as
+worked examples of the protocols rather than as the point.
 
-- **Onlookers** get the buffer: a state block over a tailing event log.
-- **The agent itself** gets a short, factual observation when a signal
-  fires, injected back into its own context by the hook.
+The reasoning behind any given decision, and the failure it prevents, lives in
+[`AGENTS.md`](AGENTS.md) and in the code comments. Read that before changing
+behaviour; read this before building on it.
 
 ## Requirements
 
-Emacs 28.1 or later with native JSON, a running Emacs server
-(`M-x server-start`), and Claude Code — or Codex or Gemini CLI, whose hooks
-are close enough to wire up the same bridge. No external tools: the shell
-bridge only moves bytes.
+Emacs 28.1 or later with native JSON, and a running Emacs server
+(`M-x server-start`). No external tools: the shell bridge only moves bytes.
 
-[`agent-shell`](https://github.com/xenodium/agent-shell) is optional for the
-HUD and required for the `◇` lines. When it hosts the sessions, agent-river
-takes liveness and session names from it instead of estimating them, and
-reads the agent's reasoning off the ACP stream — which the hooks do not
-carry at all.
+Event sources, any combination:
 
-## Installing
+- **Claude Code**, or **Codex** / **Gemini CLI**, whose hooks are close enough
+  to wire up the same bridge.
+- [**agent-shell**](https://github.com/xenodium/agent-shell), which is optional
+  but carries things the hooks do not — liveness, stable session names, the
+  agent's own reasoning off the ACP stream, and permission requests.
+- **Your own code**, for anything only Emacs can see and anything that belongs
+  to no session at all.
 
-Clone it, then wire the hooks into the project's `.claude/settings.json`.
-`claude-settings.json` in this repo is a working example — six events, with
-the paths already in place:
+---
+
+# The data model
+
+Four things to understand before you build on this. Everything else in the API
+follows from them.
+
+## The fold, the registry, the key
+
+Events fold into an `agent-river-state`, held in `agent-river-registry`, keyed
+by session. The fold is deterministic given event order, so **a state can be
+rebuilt by replaying its events** — which is the promise that makes everything
+here testable, and the reason nothing but the fold ever writes a slot.
+
+If you take one rule from this document, take that one: **you never `setf` a
+state.** To put a fact into the state you emit an event; see
+[Putting your own facts in](#putting-your-own-facts-in).
+
+The key is `session_id`, or `session_id/agent_id` for a subagent. Subagent hook
+calls arrive with the *parent's* session id, so keying on the session alone
+folds a subagent's steps and failure streaks into its parent —
+`agent-river-key` builds the right one.
+
+```elisp
+agent-river-registry                ; the hash itself: key -> agent-river-state
+(agent-river-state "<session-id>")  ; address one, creating it if needed
+(agent-river-key session agent)     ; build a key, subagent-aware
+(agent-river-reset)                 ; forget every fold
+(agent-river-clear)                 ; only empty the HUD buffer
+```
+
+Several sessions fold side by side. Emacs Lisp is single-threaded, so
+concurrent `emacsclient` calls are atomic with respect to each other and the
+registry needs no locking.
+
+## Two frames, always labelled
+
+`artifacts` accumulate for the whole session; `steps`, `task-artifacts` and the
+task tally reset with every prompt. Reporting one while labelling it the other
+is how a panel starts misleading people, so **every key that leaves this package
+says which frame it is in** — `:task-steps`, `:task-hottest`,
+`:session-hottest`, `:session-elapsed`. Where you take a scope argument, pass
+`'session` or `'task` explicitly and say which one your view is showing.
+
+## Measurements, claims, and current-state facts
+
+Three kinds of fact, kept apart on purpose, because this state is fed *back* to
+the agent and a claim later read as an observation closes the loop with no
+ground truth left in it.
+
+| Kind | Example | Where it lives |
+|---|---|---|
+| **Measurement** | 23 steps, 6 touches of `mpv.el` | folded into the state |
+| **Claim** | `agent-river-set-intent` — what the agent says it is doing | its own slots, reports as `:claimed-intent`, **never feeds a signal** |
+| **Current-state** | is this buffer modified, is git dirty, is a permission request still open | queried where it is read, **never folded** |
+
+The third distinction is the one integrators get wrong. A fact that stops being
+true without an event to say so must not be stored: a pending approval is
+answered by a button in another buffer, a diffstat is wrong again by the next
+write. Fold what happened; query what is.
+
+## Artifacts: things that are not files
+
+The state is built out of what agents *did*, and an agent only does things to
+files. Anything that arrives on its own — an incident routed to you, a review
+requested, a build that broke — has no session to hang on, and it matters most
+when *no* agent is running, which is exactly when there is no session to hang
+it on.
+
+So there is a second table, `agent-river-artifacts`, with a fold of its own. A
+non-file **domain** heads a section of its own on the map:
+
+```
+# 2 roots  ·  1 agent
+##   ⏿ `Incidents`
+### ▾ ⏿ `INC-444 disk full on db-3`
+- severity: P1
+- queue: infra
+- alpha · 0s ago
+###     `INC-501 cert expiring`
+##     `~/src/agent-river`
+```
+
+Three calls put it there:
+
+```elisp
+;; Something arrived.  Returns the record the first time and nil on every
+;; repeat, so a producer that polls needs no bookkeeping of its own — the
+;; table is the dedup, and the answer comes back from the same call that
+;; folds, so asking and folding cannot come apart.
+(agent-river-appeared "inc:INC-444"
+                      :domain 'inc
+                      :name "INC-444 disk full on db-3"
+                      :context '((severity . "P1") (queue . "infra"))
+                      :text "INC-444 routed to you")
+
+;; An agent was dispatched to it.  Folded onto the *session* as a touch, so
+;; the map's parties, the shading and `agent-river-touching' see it without
+;; being taught anything — and it counts no step, because no tool ran.
+(agent-river-reach "inc:INC-444" session-id)
+
+;; It is over.  Struck through on the map rather than dropped: the ending is
+;; itself a thing that happened.  `agent-river-drop-artifact' removes it when
+;; that has stopped being news.
+(agent-river-ended "inc:INC-444")
+```
+
+The `:context` is opaque — this package never reads a value out of it, which is
+what lets a record carry a severity, a body and a URL without agent-river having
+to learn about any of them. It renders as rows under the line.
+
+Two things to know before building on it.
+
+**The split is deliberate.** What is true of the artifact lives in the new
+table; what is true of the *relationship* between a session and an artifact
+stays in the session's own two tables and is still aggregated at read time.
+That is what keeps the frames out of the artifact record. It also means the
+table is **not a mirror**: a file an agent touched needs no record there,
+because the session's table already says everything true of it. In practice the
+artifact table holds tens of records where the session tables hold thousands.
+
+**A key belongs to a domain, and `file` is what it is when nobody said
+otherwise.** A file key is placed by resolving it against the session's working
+directory; a declared key has no such answer, and resolving `inc:INC-444`
+against a cwd would produce `/repo/inc:INC-444` — a file in a tree it has
+nothing to do with, which every view would then draw, shade and eventually
+offer to delete as missing. The domain is read off the artifact table, never
+parsed out of the key, so a key nobody declared is a file and stays one.
+
+---
+
+# Getting events in
+
+## From hooks
+
+Wire them into the project's `.claude/settings.json`, or the user's
+`~/.claude/settings.json` to cover every checkout. `claude-settings.json` in
+this repo is a working example — six events, paths already in place:
 
 ```json
 {
@@ -47,368 +183,84 @@ the paths already in place:
 }
 ```
 
-Two details in that example are load-bearing rather than cosmetic:
+Nothing needs loading in advance: the first hook call loads the Elisp itself,
+and does so again after an Emacs restart.
 
-- **`PreToolUse` and `PostToolUseFailure` must not set `"async": true`.**
-  A synchronous `PreToolUse` orders its line before its own completion; an
-  async hook's stdout is never read, so only a synchronous one can hand an
-  observation back to the agent.
+Two details are load-bearing rather than cosmetic:
+
+- **Whatever hook can produce a signal must not set `"async": true`.** An async
+  hook's stdout is never read, so only a synchronous one can hand an observation
+  back to the agent. On Claude Code that means `PreToolUse` and
+  `PostToolUseFailure`; on Codex and Gemini CLI the post-tool hook joins them.
 - Settings are read at session start, so a change needs a restart.
 
-Nothing needs loading in advance: the first hook call loads the Elisp
-itself, and does so again after an Emacs restart.
+The `kind` (`prompt` `act` `think` `fail` `done` `idle`) is passed as an argv
+from the settings file rather than read out of the payload, so the hook-event →
+fold-event mapping stays visible in the config. `agent-river--event` may
+*refine* a kind — a `think` whose `tool_response` reports an error becomes a
+`fail` — but never invents one.
 
-### Other hosts: Codex and Gemini CLI
+`codex-hooks.json` and `gemini-settings.json` are the equivalents for those
+hosts; `agent-river--event` is the one function that knows a host's dialect, so
+everything downstream sees one shape.
 
-Both run hooks the same way Claude Code does — an external command, the
-payload as JSON on stdin, the answer as JSON on stdout — and both read an
-observation back out of `hookSpecificOutput.additionalContext`, in exactly
-Claude's shape. `session_id`, `cwd`, `tool_name`, `tool_input`,
-`tool_response` and `prompt` all carry the same names. So the bridge and the
-response side are unchanged; only the wiring differs, and
-`codex-hooks.json` and `gemini-settings.json` in this repo are the two
-examples. Codex needs `[features] codex_hooks = true` in
-`~/.codex/config.toml`.
+## From agent-shell's ACP stream
 
-Three differences are real, and two of them are handled in
-`agent-river--event` — the one function that knows a host's dialect:
+Claude Code, Codex and Gemini CLI report themselves through hooks. The other
+agents agent-shell hosts — Goose, Qwen Code, opencode, Cursor — do not. But
+agent-shell is already reading their ACP stream, and `agent-river-watch-mode`
+translates it into the payload shape the hooks report, so everything from
+`agent-river--event` down is shared.
 
-- **Neither has a failure event.** One post-tool event fires whether the
-  call worked or not, and the outcome sits in `tool_response`. So a `think`
-  whose response carries `error`, `is_error`, `isError`, `success: false`
-  or a non-zero `exit_code` is refined to `fail` before it is folded —
-  otherwise the failure streak, the one measurement that reads back to the
-  agent, could never rise on these hosts. `interrupted` stays a success on
-  purpose: the user stopped that call.
+What this path cannot do is answer the agent: only the hooks carry text back.
 
-  This is why their post-tool hook must be **synchronous** where Claude's
-  can be async. It is now the event that can produce a signal.
-- **Gemini CLI names a read's argument `absolute_path`**, not `file_path`.
-  Unknown to `agent-river--tool-file`, that would not have failed — it
-  would have quietly stopped counting files.
-- **Codex subagents fold into their parent.** `agent_id` rides
-  `SubagentStart` and `SubagentStop` but not the tool events between them,
-  and those carry the parent's `session_id`. `agent-river-key` therefore
-  cannot separate them the way it does on Claude Code: a Codex subagent's
-  steps and failures are counted against its parent. Documented rather than
-  guessed around — a key invented from `turn_id` would split a parent's own
-  work instead.
+## One session, one source
 
-Gemini CLI has no subagent hooks at all, so its wiring is four events, not
-six: `BeforeAgent`, `BeforeTool`, `AfterTool`, `AfterAgent`.
+The hooks and the stream describe the same session, so folding both counts every
+step twice — and a doubled failure streak states a fact that is false, to the
+agent itself. `agent-river--claim` decides: the hooks win, because only they can
+carry an observation back, and a watched session they reach is dropped from the
+registry and rebuilt from their first event rather than interleaved.
 
-Both configurations are written from the hosts' documentation and are
-covered by tests at the payload level, but have not been run against a live
-Codex or Gemini session.
+That is what makes `agent-river-watch-mode` safe to leave on. If you add a third
+source, it goes through the same claim.
 
-## What you see
+## Putting your own facts in
 
-One line per step — and one line per *tool call*, which is not the same
-thing. Shown oldest-first here for reading; the buffer itself is newest-first.
-
-```
-16:22:48 ◆ add a queue-position render field       ← task from the user
-16:22:59 ▸ Bash  Syntax-check the updated hook ✓  12ms
-                                               ↑ appended when the call returned;
-                                                 the timestamp is when it started
-16:23:03 ◇ The mode sets truncate-lines, so a…     ← the agent's own reasoning
-16:23:03 ▸ Edit  supersonic-mpv.el ✗  2.1s         ← interrupted, not a success
-16:23:09 ▸ Bash  Run the test suite ✗  340ms       ← errored
-16:23:12 ■ waiting for you                         ← idle
-```
-
-A call's outcome is written onto the line that opened it rather than taking
-a line of its own, so the timestamp stays the one the call *began* at and
-`agent-river-max-entries` holds twice the history. The pairing is by
-`tool_use_id`, never by nearness or tool name — two parallel `Bash` calls
-would otherwise complete each other. Where the opening line is gone (trimmed
-away, or never written because Emacs started mid-run) or the host names no
-call at all, the outcome still takes a line of its own, `·` for a completion
-and `✗` for a failure: a tidier log that silently drops outcomes is the wrong
-trade.
-
-Two things worth knowing about what lands on those lines. `Bash` and `Task`
-calls carry a human-written `description` alongside the raw command, and the
-HUD prefers it — "Syntax-check the updated hook" reads better on stream than
-the shell it expands to. And `PostToolUse` carries `duration_ms` plus
-`tool_response`, so the outcome reports how long the call took and marks an
-interrupted one with `✗` rather than claiming success.
-
-Failures get their own `PostToolUseFailure` hook and a red `✗` line, which is
-a different thing from the `✗` that `think` shows for an *interrupted* call.
-
-## The panel is the view of the state
-
-One buffer, two halves. The state block sits at the top — one line per live
-session, rewritten on every fold — and the log runs underneath it **newest
-first**:
-
-```
-* supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
-* supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
-
-19:07:03 super<2> ▸ Edit  supersonic-mpv.el
-19:06:58 superson ▸ Read  Cask ✓  2ms
-19:06:55 superson ◆ fix the mpv bridge
-```
-
-The `*` on a session line spins through a handful of star-like glyphs
-(`✢ ✳ ✶ ✻ ✽`) while that session's turn is running, and settles back to a
-plain star the moment the turn ends — the same question the elapsed clock
-answers, asked at a glance and from across the room. It is drawn as a
-`display` property over a star that stays a star in the buffer: the line
-has to go on being an outline heading while it spins, and `outline-regexp`
-reads the text, not the picture. `agent-river-spinner-frames` set to nil
-turns it off, which is also the answer for a font that does not have the
-glyphs.
-
-The blank line is the only thing dividing the two halves. There was a
-`* -- eventlog` heading there once; it was removed, because a divider that
-exists to be a fold handle earns its line from nobody who is reading, and a
-blank one separates just as well at no cost in labels. It belongs to the
-block and is redrawn with it, so a session ending cannot leave it behind.
-
-Each block line is an outline heading. `TAB` unfolds the session under
-point, into the same touch counts the block condenses into its one
-parenthetical, at a grain that says what the step count is made of:
-
-```
-* supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
-** files: mpv.el 6 · supersonic-mpv.el 2 · Cask 1
-```
-
-That fold is a flag, not an overlay. The block is erased and rebuilt on
-every event, so an outline fold would spring open on the next tool call;
-a flag means the rebuilt block is drawn already open and stays that way
-until it is asked to close.
-
-A scrolling log shows activity. Only the block answers what is being worked
-on right now, which is the question an onlooker actually has — and the
-reason the fold exists at all. A live failure run appears there too
-(`3 failing`, in the error face), because that is the one thing nobody
-should have to reconstruct from scrollback.
-
-Newest-first means there is nothing to tail: the block and the latest event
-are both at the head of the buffer and never move, so neither can scroll out
-of view as the log grows. Trimming takes the oldest lines off the bottom.
-
-### Grouped by where the sessions are
-
-Five sessions is a list. Five sessions across three checkouts is a list that
-has to be read before it can be used, because the one thing that decides
-whether two of those lines are about the same work — where each session is —
-lived only in the label, and a label is a basename that says nothing about two
-checkouts of one project. So the block groups:
-
-```
-* ~/src/agent-river · 2 sessions
-** agent-river    · editing · 4m12s · 23 steps · agent-river.el (6 touches)
-** agent-river<2> · waiting · 2 steps
-* ~/src/agent-river/.claude/worktrees/customizable-act-glyph · 1 session
-** agent-river<3> · exploring · 9m32s · 17 steps
-```
-
-A heading appears only once there is more than one place to be. With every
-session in the same directory the heading would be a constant at the top of
-the block, which is the same noise the session column in the log declines to
-draw while only one agent is live — and the same trade the map makes when it
-lists one root with no section heading over it. `RET` on a heading opens the
-place: for a directory that is dired, already shaded if `agent-river-heat-mode`
-is on. `M-n` stops on headings as well as on sessions, the way it stops on the
-map's root sections.
-
-**The working directory is the default anchor, not the only one.** It is what
-the hooks happen to report, not something a session fundamentally has: this
-already folds sessions that touch no file, and a session with no disk at all
-is not thereby unplaceable — it is placed by something the fold does not know.
-So `agent-river-panel-place-functions` is a list of questions rather than a
-setting. Each is handed a state and answers either nil ("not mine") or where
-that session belongs:
+Something only Emacs can see, turned into an event. Hang it on whatever Emacs
+hook sees it — *not* on `agent-river-observers`, which fires on the agent's
+events, not yours. `agent-river-watch-saves-mode` is the worked example: it
+notices you saving a file an agent is working in, which no hook can see because
+the agent's staleness check knows the disk and not your buffers.
 
 ```elisp
-(add-to-list 'agent-river-panel-place-functions
-             (lambda (state)
-               (when-let* ((team (agent-river-state-label state)))
-                 (list :key (concat "team:" team)
-                       :name (concat "team " team)
-                       ;; Optional: what RET on the heading means.
-                       :visit (lambda () (browse-url "https://…"))))))
+(agent-river-note "shared.el saved outside the session" session-id path)
+(agent-river-appeared "inc:INC-444" :domain 'inc :name "…")  ; no session at all
 ```
 
-The first function to answer wins, so the list reads from the most specific
-question to the most general. A session nothing places is drawn as it always
-was, after the groups and with no heading over it: a heading naming the
-absence of a place would be the one line in the block that names nothing.
+What may be reported is narrower than "anything from outside". A
+**point-in-time fact** — you saved this file at 14:32 — is what a note is for;
+nothing can recompute it later. A **current-state fact** — the buffer has
+unsaved changes *right now* — should be queried where it is read, because a
+note of it goes stale the moment it is folded.
 
-Worktrees are deliberately *not* merged here, though the map merges them. The
-map is asking "is this the same file", and two checkouts of one repository
-answer yes; the block is asking "where is this agent working", and two
-worktrees are two branches of work — which is why the map, having merged them,
-has to put the tree back onto the party name.
+A producer owes two things:
 
-A place function is asked on every redraw, so it answers from what it already
-has, and one that throws is retired on the spot with a message — the same
-bargain an observer and a map contributor make, for the same reason: a block
-that died with it would be the worse outcome.
+- **A relevance filter.** `after-save-hook` fires on every save you make.
+  Without one the log becomes a list of your keystrokes. The filter is a state
+  query; `agent-river--frame-touches` is the one used here.
+- **A provenance guard.** A producer that cannot tell the agent's own writes
+  from yours launders the agent's action into an observation about it.
+  `agent-river--agent-in-flight-p` is the guard here, and it is deliberately
+  narrow: it suppresses only while a tool call is open on that exact file.
 
-### The block keeps its own time
+A note is a *measurement*, so it may feed a signal — which means a producer
+noting its own opinions closes exactly the loop the claim slots are kept apart
+to prevent. Note what happened, never what you think about it.
 
-Elapsed times are only correct at the moment the block is drawn, so drawing
-it solely on events makes the clock jump by however long the gap between two
-of them was. A repeating timer
-(`agent-river-refresh-interval`, 1 s) redraws just the block — the log is
-never touched.
+---
 
-It runs only while an agent is actually mid-task, which is narrower than
-"the session is live": a turn that has ended leaves the session registered
-and reachable, but nothing is happening in it, and a clock ticking over an
-idle agent claims work that is not being done. So the timer starts on the
-next folded event and retires itself on the first tick that finds no one
-working — it is not running between turns, or at all once Emacs is quiet.
-
-A subagent still working keeps it alive even when its parent looks idle. A
-redraw that throws cancels the timer rather than repeating the error every
-second.
-
-The block is **not** the header line, and that is not a style choice.
-`header-line-format` is structurally single-line, so with two sessions it
-could only ever show whichever acted last — the step count jumped between 1
-and 4 with nothing to say these were different agents, which is worse than
-showing nothing. The mode now sets it to nil explicitly: an earlier version
-did keep the state there, and a value left behind by that version sat frozen
-at the top of the buffer showing a step count and an elapsed time from
-whenever it was last written.
-
-A subagent does not get a line: it is counted on its parent, so the session
-stays the subject.
-
-### When agent-shell is hosting the sessions
-
-The sessions run as `agent-shell` buffers in this same Emacs, and
-`agent-shell--state` carries the ACP session id — which is *verbatim* the
-`session_id` the hooks report. So the link is an id comparison, not an
-inference from process ancestry or working directory.
-
-That deletes three pieces of guesswork rather than adding a feature:
-
-- **Liveness stops being an estimate.** For a hosted session the buffer
-  settles it: the process runs here, so whether it is alive is a fact. The
-  TTL is what remains for subagents and for anything this Emacs does not
-  own — it was only ever a way of guessing at something we could not see.
-- **Labels stop drifting.** They come from the agent-shell buffer name,
-  which does not change when the session changes directory.
-- **Uniquifying them stops being our job.** agent-shell already numbers its
-  buffers (`Claude Agent @ supersonic.el<2>`); the parallel scheme here was
-  duplicated work.
-
-Each session line is also a link: `RET` or `mouse-1` jumps to that
-session's shell buffer. A line with nothing to jump to does not pretend
-otherwise.
-
-All of this degrades to the previous behaviour when agent-shell is absent —
-the test is simply whether a buffer in `agent-shell-mode` claims that id.
-
-### Telling two sessions apart
-
-Two agents in one checkout derive the same label from their directory, so
-labels are uniquified the way Emacs uniquifies buffers, and the way the
-session list already shows them: `supersonic.el`, `supersonic.el<2>`.
-
-The session column truncates to `agent-river-label-width`, and truncating
-from the right would cut both down to `superson` — undoing the whole point.
-It keeps the suffix instead: `super<2>`.
-
-The label follows the session's working directory, so it changes if the
-session moves. That is accurate rather than stable; a session that spends a
-while outside the repo will show up under whatever directory it is in.
-
-### The phase
-
-`exploring` / `editing` / `verifying` / `blocked` / `waiting`, read from the
-last `agent-river-phase-window` steps. Three rules decide it, in order:
-
-- **`waiting` outranks everything.** The tool window still holds the steps
-  of a finished turn, so without this the panel announces `exploring` above
-  a log line saying the turn is over — describing what the work *was* while
-  presenting it as what the work *is*.
-- **`blocked` comes from failures, not tools.** A run of errors says more
-  about where the work stands than which tools produced it. Its threshold
-  (2) is deliberately lower than the one for interrupting the agent (3): an
-  onlooker may see a rough patch early, the agent should only be told once
-  it looks like more than bad luck.
-- **Otherwise the dominant tool bucket wins**, and only with at least two
-  classified steps. One is noise, two is a tendency.
-
-Shell calls stay unclassified unless they match
-`agent-river-verify-regexp`, because the same tool runs the test suite, a
-git query and a directory listing. The practical consequence is that
-shell-heavy work often shows *no* phase at all — abstaining beats guessing.
-The pattern is applied only to shell tools: matching it against every step
-once classified reading a file called `Cask` as verification.
-
-`M-x agent-river-status` lists every session in full, and
-`M-x agent-river-who-touches` answers the contention question. Both exist
-because the queries were otherwise reachable only by evaluating Elisp,
-which put the state out of reach of exactly the onlookers it is for.
-
-### The agent can read its own state — and state its intent
-
-Both go through the `emacs` MCP server, as plain function calls. No extra
-tool is needed, but nothing advertises them either, so: they exist.
-
-```elisp
-(agent-river-report "<session-id>")     ; own state
-(agent-river-touching "supersonic.el")  ; is another session on this file?
-(agent-river-set-intent "narrowing down why queue position goes stale")
-```
-
-`set-intent` records the one thing the hooks cannot derive. `:task` is
-literally the user's prompt, which stays put for twenty minutes while the
-work moves through several sub-goals; the intent names the current one, and
-the panel shows it in place of the prompt.
-
-**It is stored as a claim, not a measurement.** Everything else in the state
-is counted — touches, durations, failures, tool mix. A value the agent wrote
-about itself is different in kind, and this state is fed *back* to the
-agent: a claim later read as an observation closes the loop with no ground
-truth left in it. So it lives in its own slots, reports under
-`:claimed-intent`, and never feeds a signal (there is a test for that: a
-cheerful intent cannot talk a failure streak out of firing).
-
-It also ages. An agent remembers to narrate while things go well and forgets
-precisely when it has lost the thread — which is when an onlooker most needs
-to know. So the measured state is allowed to contradict the claim: after
-`agent-river-intent-stale-steps` steps, or once the hottest file has moved
-on, the panel greys it and appends `(stale)` rather than letting it pass as
-current. Silence about having stopped narrating would be the worse failure.
-
-### Two frames, labelled as such
-
-`artifacts` accumulate for the whole session; `steps` and the task tally
-reset with every prompt. Reporting one while labelling it the other is how
-a panel starts misleading people, so the report keys say which frame they
-are in — `:task-steps`, `:task-hottest`, `:session-hottest`,
-`:session-elapsed`. The panel uses the task frame (what is being worked on
-now); `agent-river-touching` uses the session frame, because contention
-has to survive a change of subject.
-
-### Reloading after a struct change
-
-`cl-defstruct` instances already in the registry do not gain a slot added
-later, so reloading this file mid-session can leave the fold erroring
-against states built by the previous definition. That once stopped the
-display with no error anywhere. The fold now reports such a failure as a
-line in the buffer naming `agent-river-reset` as the fix — losing the
-folded state is cheap, a HUD that has silently gone dark is not.
-
-## Asking the state things
-
-Events fold into a per-session `agent-river-state` held in
-`agent-river-registry`, keyed by session id. The fold is deterministic
-given event order, so a state can be rebuilt by replay.
-`agent-river-reset` forgets it; `agent-river-clear` only empties the buffer.
-
-Two queries expose the meta level:
+# Reading the state
 
 ```elisp
 (agent-river-report "<session-id>")
@@ -420,409 +272,348 @@ Two queries expose the meta level:
 ;;  :task-hottest "supersonic-mpv.el (2 touches)"
 ;;  :fail-streak 0 :history nil
 ;;  :session-hottest "supersonic.el (14 touches)" :session-elapsed "41m"
-;;  :signals 1
+;;  :signals 1 :notes 0
 ;;  :subagents (:running 0 :total 1 :steps 2
 ;;              :each (("Explore" :steps 2 :fail-streak 0 :status "done"))))
 
 (agent-river-touching "supersonic-mpv.el")
 ;; (("session-b" :label "worktree-…" :touches 2 :ago "9s"))
+
+(agent-river-reaching "inc:INC-444" 'session)
+;; (("s1" :label "alpha" :touches 1 :writes 0 :ago "2m"))
+
+(agent-river-artifacts-list 'inc)
+;; ((:key "inc:INC-444" :domain inc :name "…" :context ((severity . "P1"))
+;;   :gone nil :appeared "4m" :notes 0 :reached 1))
+
+(agent-river-children "<session-id>")   ; subagent states
 ```
 
-`agent-river-touching` is the one that earns its keep: two agents editing
-the same file without knowing about each other is a real hazard in a
-worktree setup. Several sessions fold side by side already; Emacs Lisp is
-single-threaded, so concurrent `emacsclient` calls are atomic and the
-registry needs no locking.
+`agent-river-touching` is the one that earns its keep: two agents editing the
+same file without knowing about each other is a real hazard in a worktree setup.
+It matches on the **basename**, so one file reached from a worktree and from the
+main checkout counts as one artifact. `agent-river-reaching` matches the **key
+exactly**, which is right for an artifact that has no other spelling.
 
-### Subagents
+Interactively, `M-x agent-river-status` lists every session in full and
+`M-x agent-river-who-touches` answers the contention question.
 
-A subagent's tool calls fire the same hooks, and arrive with the **session
-id and transcript path of its parent**. The only fields that give them away
-are `agent_id` and `agent_type`, which are absent on a call the parent makes
-itself:
+`M-x agent-river-markdown` and `agent-river-copy-report` render the state for an
+issue or a PR. The export is a third derivation beside the panel and the report,
+built on neither — the report's values are already formatted for a human reading
+a plist, and re-formatting a formatted string is a second account of the same
+data.
+
+## The phase
+
+`exploring` / `editing` / `verifying` / `blocked` / `waiting`, derived from the
+last `agent-river-phase-window` steps. Shell-heavy work often shows *no* phase
+at all, which is deliberate — the same tool runs the test suite, a git query and
+a directory listing, and abstaining beats guessing. Do not treat an absent phase
+as an error; `AGENTS.md` has the three rules that decide it.
+
+## Subagents
+
+A subagent's tool calls fire the same hooks and arrive with the **session id and
+transcript path of its parent**. The only fields that give them away are
+`agent_id` and `agent_type`, absent on a call the parent makes itself:
 
 ```
 PreToolUse   Bash   -                  -
 PreToolUse   Read   a37409f14b2a9aa55  Explore
 ```
 
-So the registry key is `session_id`, or `session_id/agent_id` for a
-subagent. Keying on the session alone folded a subagent's work into its
-parent — inflating the step count and, worse, letting one subagent's
-failures raise a streak that got reported against the parent. `agent_type`
-doubles as the label, which reads better than a directory name:
+Hence the composite key. A subagent is counted on its parent and **aggregated on
+demand** via `agent-river-children` rather than mirrored, so the two cannot
+drift. `:status` distinguishes three things on purpose: `done` comes from
+`SubagentStop` and is a fact; `stale` means the TTL expired with no end event —
+something went away without saying so; only `running` is a claim that it is
+still working. Inferring "finished" from silence is how a registry starts lying.
 
-```
-18:25:38 Explore  ▸ Read  Makefile
-18:25:36 superson ▸ Agent  Verify subagent tree folding ✓  7.8s
-```
+## From inside a session
 
-The parent still sees what it set in motion, aggregated on demand from the
-registry rather than mirrored onto the parent (so the two cannot drift):
+A session being observed can query its own fold through the `emacs` MCP server,
+as plain function calls. Nothing advertises this, so: it exists.
 
 ```elisp
-(agent-river-report "<session>")
-;; … :steps 3
-;;   :subagents (:running 1 :total 1 :steps 2
-;;               :each (("Explore" :steps 2 :fail-streak 0 :status "running")))
+(agent-river-report "<session-id>")     ; own state
+(agent-river-touching "supersonic.el")  ; is another session on this file?
+(agent-river-set-intent "narrowing down why queue position goes stale")
 ```
 
-`:status` distinguishes three things on purpose. `done` comes from
-`SubagentStop` and is a fact. `stale` means the TTL expired with no end
-event — something went away without saying so. Only `running` is a claim
-that it is still working. Inferring "finished" from silence is how a
-registry starts lying, and a `done` event that carries no `agent_id` is
-dropped rather than applied to the parent key.
+`agent-river-touching` is the one that carries something the agent does not
+already have — another session, in another worktree, editing the file it is
+about to rewrite leaves no trace in its own transcript. The other two address a
+*session* and cannot reliably tell which one the caller is, so pass the
+`session_id` from the hook payload.
 
-### One buffer, several sessions
+`set-intent` records the one thing the hooks cannot derive: `:task` is literally
+the user's prompt, which stays put for twenty minutes while the work moves
+through several sub-goals. It is a **claim**, reports as `:claimed-intent`, and
+never feeds a signal. It also ages out — an agent remembers to narrate while
+things go well and forgets precisely when it has lost the thread, so the measured
+state is allowed to contradict it.
 
-Every session renders into the same `*agent-river*` buffer, so a session
-column appears as soon as a second one is live:
+---
+
+# Reacting to the state
+
+Five places to hang your own code, and the choice between them is mostly the
+answer to one question: *who is the subject?*
+
+| You want to… | Hang it on | Subject |
+|---|---|---|
+| react to what an agent did | `agent-river-observers` | a session |
+| react to something arriving | `agent-river-artifact-observers` | an artifact |
+| report what only Emacs can see | `agent-river-note` | a session |
+| report something no session owns | `agent-river-appeared` | an artifact |
+| annotate the map's lines | `agent-river-map-contributors` | a path or key |
+| say where a session belongs | `agent-river-panel-place-functions` | a session |
 
 ```
-18:05:40 ▸ Edit  supersonic.el                 ← one session: no column
-18:05:48 other    ▸ Edit  supersonic.el        ← two: who did it matters
-18:05:48 superson ▸ Bash  Run the test suite
+hooks → fold → observers → outside world      consumer
+Emacs → note → fold → observers               producer
 ```
 
-Two details that are easy to get wrong and were:
+## Observers
 
-- **Paths must normalise identically across sessions.** They render relative
-  to the session cwd when under it, and as a bare basename otherwise. An
-  earlier version stripped only the session's own cwd, so the same file
-  reached from a worktree and from the main checkout produced two different
-  strings — and the view showed a collision as two unrelated files, which is
-  the exact opposite of the point.
-- **The column is liveness-gated**, not registry-gated: a session silent for
-  `agent-river-session-ttl` stops counting, so a crashed session does not
-  leave a column behind forever.
+An abnormal hook called with `(SUBJECT EVENT)` after each fold. The runner
+already owns the three things every consumer needs, so don't reimplement them:
+its own error guard (an error reported as a fold failure would send the user to
+`agent-river-reset` over one overlay), **retirement on the first error** (this
+path runs on every tool call, so a broken consumer is broken thousands of
+times), and teardown through the `agent-river-retire` symbol property.
 
-The label is the cwd basename, truncated to `agent-river-label-width` (8),
-which makes `supersonic.el` read as `superson`. Ugly but distinguishing;
-widen it, or the window, if it bothers you. Lines already in the buffer keep
-whatever format they were written with — it is an append-only log, not a
-re-rendered table.
+```elisp
+(defun my/notify-on-streak (state _event)
+  (when (>= (agent-river-state-fail-streak state) 3)
+    (notifications-notify :body (format "%s is stuck"
+                                        (agent-river-state-label state)))))
+(add-hook 'agent-river-observers #'my/notify-on-streak)
+```
 
-A buffer per session, with an overview, is the obvious next step. It is
-deliberately not built yet: it costs real work and only pays off once
-several agents run in parallel routinely.
+Three rules. **Return values are ignored** — signals are the only channel back
+into the agent's context and are kept narrow on purpose, so a side effect must
+not speak through it. **Never `setf` the subject** — produce state with
+`agent-river-note` instead, which puts it in the event stream where it is
+logged, counted and attributable. And **off by default**: writing into buffers
+the user did not point you at needs consent, which is what a global minor mode
+is for. A consumer that draws only into a buffer of its own needs no mode —
+opening it is the consent and killing it is the retirement.
+
+`EVENT` is the raw plist, and is where to look for anything the fold
+deliberately drops — `:path`, the absolute file name, being the case in point.
+The state deliberately cannot address a file on disk; see
+[Placing a key](#placing-a-key).
+
+`agent-river-map` and `agent-river-heat-mode` are both observers. Read one
+before writing a third.
 
 ## Talking back to the agent
 
-`agent-river-observe` returns an observation when a signal fires, and the
-hook turns it into `hookSpecificOutput.additionalContext` — text injected
-into the agent's own context. Today one signal exists: a run of
-`agent-river-fail-streak-threshold` consecutive tool failures.
+`agent-river-observe` returns an observation when a signal fires, and the hook
+turns it into `hookSpecificOutput.additionalContext` — text injected into the
+agent's own context. Today one signal exists: a run of consecutive tool
+failures.
 
-```
-agent-river: 3 consecutive tool failures (Edit x2, Bash x1), 7s into the
-current task. Most-revisited file: supersonic-mpv.el (2 touches). This is an
-observation, not an instruction — weigh it against what you know; repeated
-failure is sometimes the right path.
-```
+Four rules bind anything that speaks here, and they are the reason this channel
+stays narrow:
 
-Three constraints hold this together, and each is load-bearing:
+- **Signals state facts, never instructions.** They are one line with no control
+  characters, and they fold back in as a `signals` count, so "how often was the
+  agent told something" is itself observable.
+- **One observation is delivered once.** The `signals` list is a delivery log,
+  not a tally — each entry carries an `:id`, and an id already logged is
+  withheld.
+- **Only a reachable state may signal** — root sessions, never subagents.
+  Measured, not assumed: a subagent's `additionalContext` reaches nobody.
+- **Only an answering event may signal** (`agent-river-answering-kinds`).
+  Anything that later reads notes back to the agent hangs off the same gate.
 
-- **Only a synchronous hook can inject.** An async hook's stdout is never
-  read, which is why `PostToolUseFailure` alone omits `"async": true`.
-- **Observations, never instructions.** Signals are heuristics and will
-  misfire; sometimes six edits to one file is exactly right. A wrong fact
-  costs tokens, a wrong instruction derails a correct solution.
-- **Rare, and never a target.** Emitted signals fold back into the state as
-  a `signals` count, so "how often did the agent have to be told" is itself
-  observable. If that count ever becomes a measure of quality, the whole
-  mechanism is corrupted — an agent can lower it by avoiding the *measure*
-  rather than the problem.
+---
 
-## What a session is waiting to be allowed
+# Annotating the views
 
-The one thing that travels the other way. `agent-river-approvals-mode` (off
-by default) watches agent-shell's permission requests: it chains onto
-`agent-shell-permission-responder-function` — a slot, not a hook, where
-returning non-nil means "handled, skip the dialog", so this hands back
-whatever function it replaced returns and never swallows a question — and
-subscribes to each session's `permission-request` events. The two halves
-share a request id and neither has both: the responder is given the options
-and the means to answer and is not told whose session it is, the event is
-dispatched in the session's buffer and carries no options.
+The state is already there; these change how it reads.
 
-A pending question is a *current-state* fact, so it is not folded. It stops
-being true the moment somebody answers it — including with a button in the
-session buffer, which nothing here would hear — so it lives in a side table
-the views query where they are read, the way `buffer-modified-p` is asked
-rather than remembered. What *is* point-in-time is that the question was
-put, and that gets a log line (`?`).
+## Map contributors
 
-With the mode on, the session's panel line grows a `asks: …` clause and `a`
-answers it with a prompt. That is the desk version.
+A contributor is asked `(ROOT NODES)` and answers a hash of path to rows.
+`:read` is synchronous and instant, from whatever it already has; `:refresh` may
+take as long as it likes and hands its answer back through
+`agent-river-map-contribute`, which marks the map dirty rather than drawing —
+an answer landing after the redraw timer retired would otherwise reach a cache
+and never the screen.
 
-### The approval queue
-
-`M-x agent-river-approval-queue` is the same questions as a buffer you can
-answer from with a thumb. It exists because of where an approval most often
-catches you: a phone, over emacsclient in a terminal emulator, held in
-portrait. Nothing about the HUD survives that trip — it is a 56-column side
-window whose bulk is the agent's prose, and answering one question there is
-a `completing-read` behind a soft keyboard that covers the text you are
-reading to decide.
-
-```
-2 waiting · 2 working
-
-? agent-river · execute · waiting 2m14s
-  Run `git push --force-with-lease`
-  git push --force-with-lease origin approval-queue
-  editing · 3 steps · 1 failing · agent-river.el
-  → Allow
-  → Allow always
-  → Reject
-
-? dotfiles · edit · waiting 0s
-  Write ~/.zshrc
-  /home/oemer/.zshrc
-  → Allow
-  → Reject
+```elisp
+(add-to-list 'agent-river-map-contributors
+             (list :name 'mine
+                   :ttl 5
+                   :read (lambda (_root nodes)
+                           (let ((table (make-hash-table :test 'equal)))
+                             (dolist (node nodes)
+                               (puthash (plist-get node :path)
+                                        (list (list :key "mine/x"
+                                                    :rank 1
+                                                    :text "something"))
+                                        table))
+                             table)))
+             t)
 ```
 
-So the shape is decided by the screen rather than by the state:
+A row is `:text` (one line; the map escapes it), `:key` (stable across redraws,
+or point lands on the wrong row after one), `:rank` (low first) and optionally
+`:face` — **a face symbol, never a face on the text**, because tree-sitter owns
+`face` in that buffer and would quietly drop a text property. `:summary` is how
+a contributor earns the line's fixed-width column, and it must be a reading *of
+the rows*, the same data smaller, never a second account of it.
 
-- **One question is a block, not a line.** Columns are what a narrow screen
-  has none of and lines are what it has: who is asking and for how long,
-  what agent-shell summarises the request as, the agent's *own* words for
-  what it wants to do — the raw arguments, which is what a decision is
-  actually made on — one line of context out of the fold, then the answers.
-- **Every answer is a row, and the row is the target.** RET or a tap on it
-  answers. That is exactly what `agent-river-answer` refuses to do, and the
-  reason does not survive the trip: at a desk a prompt costs one keystroke
-  and stops a slip granting `allow_always`, on a phone it costs the screen.
-  The friction is kept where it still earns its place — the two `_always`
-  kinds ask `y or n` first, the ones that decide a single call do not.
-- **A row is propertised through its newline**, so the whole width of it
-  answers a tap and not just the glyphs on it. A thumb is about as wide as
-  three characters of what it is aiming at.
-- **Wrapped, never measured.** The width is whatever the window is, so
-  turning the phone is a window resized and nothing here has to notice.
-  Counting columns would mean redrawing on every rotation to arrive at what
-  `word-wrap` does for free.
-- **The fold, on the block that wants to interrupt it.** `Run rm -rf build`
-  reads differently under an agent that has been editing quietly for twenty
-  steps and under one that has failed three times running — and in the
-  session buffer that context is several screens up.
-- **Oldest first.** It is a queue where the HUD is a log: there the newest
-  line is the news, here the question held longest is the one holding a
-  session up.
+Batch per root — thirty lines with a subprocess each, every TTL, is a fork bomb
+with a view attached — and expect to be **retired on the first error**, like an
+observer. The diffstat (`agent-river--rows-vc`) is the asynchronous, batched and
+aggregating case at once; read it before writing anything that shells out.
 
-The keys are the other two buffers': `n`/`p` (plus `SPC`/`DEL` and the
-arrows) walk every row worth stopping on, `M-n`/`M-p` and `>`/`<` walk one
-question at a time, `TAB` shows the rest of a long argument, `RET` on a
-heading opens the session, `g` redraws, `q` buries. `>` and `M-n` are the
-same motion here and are bound anyway — in the other views `>` means "the
-next line that wants you", and in this one every block is one.
+## Where a session belongs
 
-Two things it is careful about. It **lists what is not known to be
-answered**, which is the opposite of what the answering path asks: a command
-about to speak for a session refuses where it cannot see, and a view doing
-the same would go silent exactly where it exists to say something. And a
-redraw **finds a row again by what it names** — the buffer is rebuilt every
-couple of seconds, and found by position a question answered above would
-slide a different question's `Allow` under a thumb already on its way down.
+A place function is called with one state and answers nil ("not mine") or a
+plist of `:key` (identity, compared with `equal`), `:name` and an optional
+`:visit`. The first to answer wins, so the list reads from the most specific
+question to the most general.
 
-Opening the buffer turns `agent-river-approvals-mode` on, because there is
-nothing to queue otherwise: the options and the means to answer are only
-ever seen by the responder that mode installs. Killing the buffer turns it
-back off — unless it was already on when you opened it, the same way the
-responder slot is only given back while it is still ours.
-
-## Tests
-
-The fold and the payload parsing are the parts that are logic rather than
-formatting, and both are pure — so they are tested without a frame, a hook
-or a live session:
-
+```elisp
+(add-to-list 'agent-river-panel-place-functions
+             (lambda (state)
+               (when-let* ((team (agent-river-state-label state)))
+                 (list :key (concat "team:" team)
+                       :name (concat "team " team)
+                       :visit (lambda () (browse-url "https://…"))))))
 ```
+
+**The working directory is the default anchor, not the only one.** It is what
+the hooks happen to report, not something a session fundamentally has: this
+already folds sessions that touch no file, and a session with no disk at all is
+not thereby unplaceable — it is placed by something the fold does not know,
+which is what the extension point is for.
+
+A place function is asked on every redraw, so it answers from what it already
+has, and one that throws is retired on the spot.
+
+## Domains
+
+Registering a domain in `agent-river-map-domains` is optional and only ever
+about presentation — a `:label` for the section and a `:visit` for RET:
+
+```elisp
+(add-to-list 'agent-river-map-domains
+             (cons 'inc (list :label "Incidents"
+                              :visit (lambda (key) (browse-url (ticket-url key))))))
+```
+
+A domain absent from it is still drawn: something that has arrived should not
+have to wait for configuration before it can be seen, which is the failure mode
+of every dashboard that has to be taught about a new source.
+
+## Placing a key
+
+`agent-river--rel` normalises an artifact key relative to the session cwd, or to
+a bare basename otherwise — so **the state cannot address a file on disk**, and
+it must keep working that way: stripping only the session's own cwd makes one
+file reached from a worktree and from the main checkout render as two, which
+defeats the contention query.
+
+Three ways out, and each answers a different question:
+
+| You are asking | Use |
+|---|---|
+| *which* file is this | match the basename, as `agent-river-touching` does |
+| *where* is the file the event was about | read `:path` off the raw event |
+| *where* does this key sit in a tree | `agent-river--heat-absolute`, anchor over cwd |
+
+The third is the only one that can place a key in a directory tree and the only
+one that re-splits a worktree from its main checkout. It answers **nil** for a
+key in a non-file domain, which is what every caller already does the right
+thing with — a key that cannot be placed is left alone rather than guessed at.
+
+---
+
+# Testing your integration
+
+The fold and the payload parsing are logic rather than formatting, and both are
+pure — so they test without a frame, a hook or a live session. Yours should too:
+**test the derivation, not the rendering.**
+
+```sh
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 
-121 tests covering the state transitions, streak accounting, signal
-threshold and throttle, the phase, subagent isolation, the registry and its
-TTL, the cross-session `touching` query, the reasoning stream — chunk
-accumulation, the sentence boundary, which path serves a hosted session —
-the payload derivation: which argument of a call is the interesting one, how
-a duration is formatted, what counts as an interrupted call, what a host
-other than Claude Code calls a file and how it reports a failure — and the
-second way in: one step per tool call however often it is updated, and the
-hooks taking a watched session over.
+359 tests, ~0.3 s. The contract tests for the extension points live in `agent-river-tests.el`
+under `;;; Observers`, `;;; Artifacts` and `;;; Domains` — point a new consumer
+at those rather than writing the guard tests again. Useful helpers:
+`agent-river-test--with-session`, `--with-observers`, `--with-artifacts`,
+`--fail`, `--acts`, `--payload`, `--with-shell`.
 
-Verified to actually fail rather than merely pass: mutating the streak
-reset in a scratch copy turns exactly the two responsible tests red, and
-three mutations of the reasoning path — accepting an incomplete sentence,
-dropping the end-of-run flush, letting two sessions share one thought run —
-turn three, one and three.
+---
 
-## The `◇` lines: reasoning
+# What ships as a view
 
-Where agent-shell hosts the session, the reasoning comes off the ACP stream
-that already drives the shell. `agent_thought_chunk` notifications carry it,
-`agent-shell--state` hands over the client, and the handler is attached the
-first time a session folds an event.
+Worked examples of the protocols above, and the reason each of them exists.
 
-That makes the order chronological rather than arranged: a thought arrives
-when the agent thinks it, which is before the tool call it explains. The
-difference is visible in the timestamps — the fallback below emits its line
-*inside* the `act` hook, so `◇` and `▸` share a second; a streamed thought
-carries its own.
+## The HUD (`*agent-river*`)
 
-A thought arrives in chunks, which is the one thing this path makes harder.
-Only the first sentence is shown, so a run is emitted as soon as one is
-complete and the rest of it is dropped; a run that ends without a sentence
-boundary is flushed by the next notification that is not a thought. Waiting
-for the boundary is the point — a chunk usually ends mid-clause, and showing
-that would put a truncated sentence on screen and never correct it.
+One buffer, two halves: a state block of one line per live session, rewritten on
+every fold, over a **newest-first** log.
 
-The reasoning is in whatever language the agent thinks in, which is not
-necessarily the language of the conversation.
+```
+* supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
+* supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
 
-This is the one thing agent-shell is *required* for rather than merely
-better with. It replaced lifting the thinking out of the session
-transcript, which the hooks point at but which is always one step behind:
-the record holding the current `tool_use_id` is still unflushed when the
-hook fires. That path compensated by placing its line inside the `act`
-hook; it is gone, and a session this Emacs does not host now gets no `◇`
-lines at all.
-
-It is driven by Claude Code hooks, not by the agent choosing to call
-something — this repo's `.claude/settings.json` wires six events to
-`~/src/agent-river/agent-river-hook.sh`, which turns the hook's JSON
-payload into an `agent-river-observe` call over `emacsclient`:
-
-| Hook event           | Kind     | Means                                     |
-|----------------------|----------|-------------------------------------------|
-| `UserPromptSubmit`   | `prompt` | a task arrived                            |
-| `PreToolUse`         | `act`    | done thinking, about to act — and on what |
-| `PostToolUse`        | `think`  | tool returned, reasoning follows          |
-| `PostToolUseFailure` | `fail`   | the call errored                          |
-| `SubagentStop`       | `done`   | a subagent finished                       |
-| `Stop`               | `idle`   | turn over                                 |
-
-`PreToolUse` runs **synchronously**, which is not a detail. Both it and
-`PostToolUse` used to be async, and the `act` path was then the slower of
-the two (17 ms against 11 ms, because it scanned the transcript for
-reasoning), so a line could lose the race against its own completion and
-the buffer showed `· Read ✓` *above* `▸ Read Makefile`. That scan is gone
-now, but the ordering argument does not depend on it: running `act` before
-the tool starts orders the pair by construction rather than by luck, and
-nothing about two async hooks guarantees which lands first.
-`emacsclient` is wrapped in `timeout` (`AGENT_RIVER_TIMEOUT`, 2 s) so a
-wedged Emacs cannot stall the stream.
-
-The gap between a `think` line and the next `act` line *is* the thinking
-window. Hooks carry no thinking text, so tool-call granularity is the finest
-resolution available — and the right one for a viewer anyway.
-
-There is nothing to arm. Every hook call wraps its payload in
-
-```elisp
-(progn (unless (fboundp 'agent-river-log) (load "…/agent-river.el" t t))
-       (agent-river-log …))
+19:07:03 super<2> ▸ Edit  supersonic-mpv.el
+19:06:58 superson ▸ Read  Cask ✓  2ms
+19:06:55 superson ◆ fix the mpv bridge
 ```
 
-so the first hook after an Emacs restart loads the Elisp, and every later
-one skips the load. No init-file entry is needed, and restarting Emacs mid
-stream costs nothing. Override the path with `AGENT_RIVER_LISP` if you move
-the file.
+One tool call is **one line**: the outcome is written onto the line that opened
+it, so the timestamp stays the one the call began at. Pairing is by
+`tool_use_id`, never by nearness or tool name — two parallel `Bash` calls would
+otherwise complete each other. The block groups sessions by place once there is
+more than one place to be. `◇` lines are the agent's own reasoning, which only
+the ACP stream carries.
 
-This matters because the failure is invisible: a hook firing into a session
-where `agent-river-log` is undefined errors inside `emacsclient`, the script
-swallows it by design, and the HUD simply stays blank with nothing to
-suggest why. Self-arming removes the only way that happened in practice.
+The HUD is deliberately **not** Markdown: its log carries prompts, reasoning and
+tool arguments — text this package does not control — and Markdown would let
+that text restructure the view watching it.
 
-Logging pops the side window by itself (`agent-river-auto-display`), so
-there is nothing else to do. `M-x agent-river-show` reopens it after a
-`C-x 1`, `M-x agent-river-clear` empties it.
+## The map (`M-x agent-river-map`) and dired heat
 
-### The shell script only moves bytes
+Two views of the same artifact tables. `agent-river-heat-mode` shades the dired
+buffer you are already in; the map lists one directory in full, each entry
+annotated with what has happened *beneath* it, so several agents spread over a
+large repository are visible at once. Same weighting, same derivation, different
+grain.
 
-`agent-river-hook.sh` is 56 lines and does no parsing. It writes the
-payload to a file, hands Emacs the two paths, and prints whatever Emacs
-wrote back.
+Five facts per line, each on its own channel: weight is shading, party is text,
+contention is a marker, existence is a strike-through, and the diffstat is a
+fixed column. `n`/`p`, `M-n`/`M-p` and `>`/`<` are three grains of motion, shared
+with the HUD and the approval queue.
 
-It was 224 lines of `jq` that parsed the payload and assembled Elisp *as
-text* — which meant every tool argument was interpolated into a form Emacs
-then evaluated, safe only for as long as the escaping held. Passing files
-in both directions removes that class of problem entirely, drops the `jq`
-dependency, and puts the derivation under test: which argument of a call is
-the interesting one, how a duration is formatted, what counts as an
-interrupted call. None of that was covered while it lived in the shell.
+## The approval queue (`M-x agent-river-approval-queue`)
 
-The bridge sits on the critical path of every tool call and must never fail
-one, so every step degrades to a no-op — no Emacs server, unreadable
-payload, no `mktemp`. But a payload that reaches Emacs and then fails to
-parse writes a `hook failed` line into the buffer rather than going quiet:
-silence is how this has broken before, three times.
+What each session is waiting to be *allowed*, as a buffer you can answer from
+with a thumb — `agent-river-approvals-mode` chains onto agent-shell's
+`agent-shell-permission-responder-function`. A pending approval is a
+current-state fact and is **not folded**: it stops being true the moment
+somebody presses a button in the session buffer, which nothing here would hear.
 
-## A second way in, for sessions no hook reaches
+This is the one gesture in the package that relays something back to a session
+on the user's behalf; it is off by default, and the gesture that turns it on is
+what turns it off.
 
-Claude Code, Codex and Gemini CLI report themselves through hooks. The other
-agents agent-shell hosts — Goose, Qwen Code, opencode, Cursor, whatever it
-grows next — do not. But agent-shell is already reading their ACP stream,
-and it publishes what it learns:
+---
 
-```elisp
-(agent-river-watch-mode 1)          ; every agent-shell session
-(agent-river-watch-shell)           ; or just this buffer
-```
+# Design notes
 
-`agent-shell-subscribe-to` is a documented API rather than something read
-over agent-shell's shoulder, and three of its events carry what the fold
-wants:
-
-| agent-shell event  | Kind             | Carries                                    |
-|--------------------|------------------|--------------------------------------------|
-| `input-submitted`  | `prompt`         | the prompt text                            |
-| `tool-call-update` | `act`/`think`/`fail` | status, kind, title, `rawInput`        |
-| `turn-complete`    | `idle`           | the stop reason                            |
-
-The translation is deliberately shallow: it builds the *same payload shape
-the hooks report* and hands that to `agent-river--event`, the one function
-that resolves a host's dialect. So a file argument that path learns to count
-is counted here too — `agent-river--tool-file`, written for Gemini's
-`absolute_path`, reads ACP's `rawInput` unchanged — and nothing downstream
-learns that a second source exists.
-
-Three differences from the hook path are worth knowing:
-
-- **A step is counted once, and timed here.** A tool call is announced and
-  then updated, so the first sighting is the `act` and the terminal status
-  is the `think` or the `fail`; the updates between them are not steps. ACP
-  carries no duration, so the two sightings supply one — which is how the
-  `·` lines keep their timings.
-- **The failure is the protocol's, not a guess.** `status: "failed"` says
-  so outright, where Codex and Gemini leave it to be read out of a tool
-  response.
-- **A tool has no name, only a kind.** ACP gives `read`, `edit`, `execute`
-  and a handful more, plus a free-text title. The tallies use the kind,
-  because they want a small stable vocabulary; the title reaches the log
-  line through the same `description` slot a `Bash` call's would.
-
-### One session, one source
-
-A session folded from both would count every step twice. That is not merely
-untidy: a doubled failure streak states a fact that is false, to the agent
-itself.
-
-So a session belongs to whichever way in claimed it, and **the hooks win** —
-they are the only ones that can carry an observation back. A watched session
-that turns out to have hooks is given up whole rather than interleaved: what
-the stream folded is dropped, the hooks rebuild it from their first event,
-and the buffer says so once. `agent-river-watch-mode` is therefore safe to
-leave on; it only ever supplies the sessions the first way in cannot reach.
-
-What this path cannot do, and will not learn to:
-
-- **Talk back.** A signal still reaches the buffer, but there is no
-  `additionalContext` on a stream we only listen to.
-- **Tell a subagent apart.** ACP has no notion of one, so a delegated task
-  folds as a single step of its parent — `agent-river-key` has nothing to
-  key on.
-
+[`AGENTS.md`](AGENTS.md) is the design document: what each rule prevents, which
+invariants are load-bearing, and what was tried first and lost something. It is
+written for whoever is changing this code — including an agent — and it is the
+file to read before altering behaviour rather than building on it.
