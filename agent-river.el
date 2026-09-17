@@ -6500,49 +6500,17 @@ which is precisely backwards for the case this exists for."
 (defun agent-river--domain-parties (domain scope)
   "Return a hash of artifact key to the parties that reached it, in DOMAIN.
 
-The same derivation `agent-river--map-reach' makes for a directory, over
-the same entries and with the same floor applied -- a party too cold to
-name is not on this line either.  What it does not do is relativise
-anything: an artifact key is already the whole of its own name, which is
-why this is thirty lines rather than a hundred."
-  (let ((by-key (make-hash-table :test 'equal))
-        (entries (agent-river--heat-entries scope)))
-    (let ((newest (agent-river--map-newest entries)))
-      (dolist (entry entries)
-        (let ((key (plist-get entry :file))
-              (party (plist-get entry :party))
-              (last (plist-get entry :last)))
-          (when (and key (eq (agent-river--key-domain key) domain)
-                     (agent-river--map-live-p entry newest))
-            (let* ((parties (or (gethash key by-key)
-                                (puthash key (make-hash-table :test 'equal) by-key)))
-                   (cell (gethash party parties)))
-              (puthash party
-                       (list :weight (+ (or (plist-get cell :weight) 0)
-                                        (plist-get entry :weight))
-                             :writes (+ (or (plist-get cell :writes) 0)
-                                        (or (plist-get entry :writes) 0))
-                             :last (agent-river--map-later (plist-get cell :last) last)
-                             :current (equal key (plist-get (gethash party newest) :abs)))
-                       parties)))))
-      (let ((out (make-hash-table :test 'equal)))
-        (maphash
-         (lambda (key parties)
-           (let (plists)
-             (maphash (lambda (party cell)
-                        (push (list :party party
-                                    :weight (plist-get cell :weight)
-                                    :writes (plist-get cell :writes)
-                                    :last (plist-get cell :last)
-                                    :current (plist-get cell :current))
-                              plists))
-                      parties)
-             (puthash key (sort plists (lambda (a b)
-                                         (> (plist-get a :weight)
-                                            (plist-get b :weight))))
-                      out)))
-         by-key)
-        out))))
+The same derivation `agent-river--map-reach\' makes for a directory, over
+the same entries and with the same floor -- `agent-river--parties-by\' is
+where both of those now live.  What is left here is the whole of what a
+domain changes: an artifact key is already the whole of its own name, so
+there is nothing to relativise and no tree to name."
+  (agent-river--parties-by
+   (lambda (entry)
+     (let ((key (plist-get entry :file)))
+       (when (and key (eq (agent-river--key-domain key) domain))
+         (cons key nil))))
+   scope))
 
 (defun agent-river--domain-entries (root &optional scope)
   "Return ROOT's listing when ROOT is a domain.
@@ -6733,6 +6701,87 @@ Roots are sorted by the most recent touch within them."
                roots)
       (agent-river--map-by-last result))))
 
+(defun agent-river--parties-by (bucket &optional scope)
+  "Return a hash of key to party plists, heaviest first.
+
+BUCKET is called with one entry of `agent-river--heat-entries\=' and answers
+nil -- \"not in this view\" -- or a cons of the key it counts under and a
+tag saying which tree it was reached from, nil where the view has nothing
+to say about that.
+
+What the two callers share, and it is more than the arithmetic.  The floor
+is applied here, so a party too cold to name is not reached any more
+whichever kind of key it reached.  `:current\=' is decided here, by comparing
+the place of the party\='s latest touch under this key against the one
+`agent-river--map-newest\=' says it touched last overall -- the two callers
+used to spell that comparison differently and agreed only because
+`agent-river--heat-place\=' happens to answer the key itself for a non-file
+artifact.  And the tag takes the later touch, which is a tie-break rather
+than a merge: a party is a session and a session has one cwd, so an agent
+that has moved between worktrees is named with the one it is in now.
+
+The place follows that same tie-break, where `agent-river--map-reach\=' used
+to overwrite it with whichever entry the walk reached last.  That is not a
+behaviour being changed but one being given: a party that reached one key
+from two worktrees had its `:current\=' decided by hash order.
+
+`agent-river--map-merge-parties\=' is deliberately not built on this, and the
+distinction is the point rather than an omission.  It merges over *nodes*
+rather than over entries, and its `:current\=' is a disjunction -- a directory
+is where the agent is when anything beneath it is.  Same arithmetic,
+different question; folded in here, every directory above the file an agent
+is in would quietly stop being marked."
+  (let* ((by-key (make-hash-table :test 'equal))
+         (entries (agent-river--heat-entries scope))
+         (newest (agent-river--map-newest entries)))
+    (dolist (entry entries)
+      (let ((hit (funcall bucket entry)))
+        (when (and hit (agent-river--map-live-p entry newest))
+          (let* ((key (car hit))
+                 (last (plist-get entry :last))
+                 (party (plist-get entry :party))
+                 (parties (or (gethash key by-key)
+                              (puthash key (make-hash-table :test 'equal) by-key)))
+                 (cell (gethash party parties))
+                 (later (or (null cell)
+                            (eq last (agent-river--map-later
+                                      (plist-get cell :last) last)))))
+            (puthash party
+                     (list :weight (+ (or (plist-get cell :weight) 0)
+                                      (plist-get entry :weight))
+                           :writes (+ (or (plist-get cell :writes) 0)
+                                      (or (plist-get entry :writes) 0))
+                           :last (agent-river--map-later (plist-get cell :last) last)
+                           :tree (if later (cdr hit) (plist-get cell :tree))
+                           ;; The place, so `:current' is decided by identity
+                           ;; rather than by a path two roots could both
+                           ;; produce.
+                           :place (if later
+                                      (agent-river--heat-place entry)
+                                    (plist-get cell :place)))
+                     parties)))))
+    (let ((out (make-hash-table :test 'equal)))
+      (maphash
+       (lambda (key parties)
+         (let (plists)
+           (maphash (lambda (party cell)
+                      (push (list :party party
+                                  :weight (plist-get cell :weight)
+                                  :writes (plist-get cell :writes)
+                                  :last (plist-get cell :last)
+                                  :tree (plist-get cell :tree)
+                                  :current (equal (plist-get cell :place)
+                                                  (plist-get (gethash party newest)
+                                                             :abs)))
+                            plists))
+                    parties)
+           (puthash key (sort plists (lambda (a b)
+                                       (> (plist-get a :weight)
+                                          (plist-get b :weight))))
+                    out)))
+       by-key)
+      out)))
+
 (defun agent-river--map-reach (root &optional scope)
   "Return what the agents have reached inside ROOT, deepest detail kept.
 
@@ -6754,7 +6803,11 @@ against every member and relativised against the one that holds it, so
 `src/foo.el' reached in two worktrees is one node with two parties on it.
 Each party then carries the `:tree' it was reached from, because a merged
 line that did not say which worktree an agent is in would have answered
-the question by deleting it."
+the question by deleting it.
+
+The aggregation itself is `agent-river--parties-by'; what is left here is
+what makes this view the view it is -- which tree holds a path, and what
+the path is called once that tree is taken off the front."
   (let* ((members (agent-river--map-members root))
          (merged (cdr members))
          (prefixes (mapcar (lambda (member)
@@ -6763,79 +6816,36 @@ the question by deleting it."
                                    (and merged
                                         (agent-river--map-tree-name member))))
                            members))
-         (by-rel (make-hash-table :test 'equal))
-         (entries (agent-river--heat-entries scope))
-         (newest (agent-river--map-newest entries)))
-    (dolist (entry entries)
-      (let* ((abs (agent-river--heat-absolute entry))
-             (party (plist-get entry :party))
-             (last (plist-get entry :last))
-             ;; Written out rather than `seq-find', which is the same search
-             ;; through a generic dispatch: measured on 2026-09-17 at 5000
-             ;; artifacts, 21.5 ms against 2.6 ms for the loop.  Everywhere
-             ;; else in this file `seq-find' is the right call -- it is asked
-             ;; once, of a listing, and reads better.  Here it is asked once
-             ;; per artifact per draw, which is the one shape that turns a
-             ;; readability win into a fifth of the redraw.
-             (hit (and abs
-                       (let ((left prefixes) (found nil))
-                         (while (and left (not found))
-                           (when (string-prefix-p (car (car left)) abs)
-                             (setq found (car left)))
-                           (setq left (cdr left)))
-                         found))))
-        ;; A touch too cold to name is not reached any more, so the node it
-        ;; would have made is never built: an entry left with no parties
-        ;; would otherwise be listed with an empty annotation, which reads
-        ;; as an agent whose name failed to render.
-        (when (and hit (agent-river--map-live-p entry newest))
-          (let* ((rel (substring abs (length (car hit))))
-                 (parties (or (gethash rel by-rel)
-                              (puthash rel (make-hash-table :test 'equal) by-rel)))
-                 (cell (gethash party parties)))
-            (puthash party
-                     (list :weight (+ (or (plist-get cell :weight) 0)
-                                      (plist-get entry :weight))
-                           :writes (+ (or (plist-get cell :writes) 0)
-                                      (or (plist-get entry :writes) 0))
-                           :last (agent-river--map-later (plist-get cell :last) last)
-                           ;; The tree of the later touch, for the rare party
-                           ;; that reached one name from two of them: a party
-                           ;; is a session and a session has one cwd, so this
-                           ;; is a tie-break rather than a merge.
-                           :tree (if (or (null cell)
-                                         (eq last (agent-river--map-later
-                                                   (plist-get cell :last) last)))
-                                     (cdr hit)
-                                   (plist-get cell :tree))
-                           ;; The absolute name, so `:current' is decided by
-                           ;; identity rather than by a path that two roots
-                           ;; could both produce.
-                           :abs abs)
-                     parties)))))
-    (let (nodes)
-      (maphash
-       (lambda (rel parties)
-         (let (plists)
-           (maphash (lambda (party cell)
-                      (push (list :party party
-                                  :weight (plist-get cell :weight)
-                                  :writes (plist-get cell :writes)
-                                  :last (plist-get cell :last)
-                                  :tree (plist-get cell :tree)
-                                  :current (equal (plist-get cell :abs)
-                                                  (plist-get (gethash party newest) :abs)))
-                            plists))
-                    parties)
-           (push (list :rel rel
-                       :parties (sort plists (lambda (a b)
-                                               (> (plist-get a :weight)
-                                                  (plist-get b :weight)))))
-                 nodes)))
-       by-rel)
-      (sort nodes (lambda (a b)
-                    (> (agent-river--map-weight (plist-get a :parties))
-                       (agent-river--map-weight (plist-get b :parties))))))))
+         (by-rel (agent-river--parties-by
+                  (lambda (entry)
+                    ;; `--heat-absolute' rather than the place, so a key in
+                    ;; another domain is out of this view by construction
+                    ;; rather than by failing to match a prefix.
+                    (let ((abs (agent-river--heat-absolute entry)))
+                      (when abs
+                        ;; Written out rather than `seq-find', which is the
+                        ;; same search through a generic dispatch: measured
+                        ;; on 2026-09-17 at 5000 artifacts, 21.5 ms against
+                        ;; 2.6 ms for the loop.  Everywhere else in this file
+                        ;; `seq-find' is the right call -- asked once, of a
+                        ;; listing, it reads better.  Here it is asked once
+                        ;; per artifact per draw, which is the one shape that
+                        ;; turns a readability win into a fifth of a redraw.
+                        (let ((left prefixes) (found nil))
+                          (while (and left (not found))
+                            (when (string-prefix-p (car (car left)) abs)
+                              (setq found (car left)))
+                            (setq left (cdr left)))
+                          (when found
+                            (cons (substring abs (length (car found)))
+                                  (cdr found)))))))
+                  scope))
+         nodes)
+    (maphash (lambda (rel parties) (push (list :rel rel :parties parties) nodes))
+             by-rel)
+    (sort nodes (lambda (a b)
+                  (> (agent-river--map-weight (plist-get a :parties))
+                     (agent-river--map-weight (plist-get b :parties)))))))
 
 (defun agent-river--map-merge-parties (nodes)
   "Return the parties of NODES summed into one list, heaviest first.
