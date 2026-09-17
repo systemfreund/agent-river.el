@@ -19,7 +19,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (200 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (359 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -105,6 +105,22 @@ Claude Code hook                     agent-shell event (no hooks wired)
   → agent-river-registry              key → agent-river-state
   → agent-river--update-panel / agent-river-log     the view
 ```
+
+And a second, narrower path for what no session did:
+
+```
+producer (a webhook, a poll)
+  → agent-river-appeared / -ended / agent-river-note-artifact
+  → agent-river-observe-artifact      addresses, folds, logs, signals nothing
+  → agent-river-fold-artifact         pure state transition
+  → agent-river-artifacts             key → agent-river-artifact
+```
+
+Two folds, two registries, one rule each way: `agent-river-fold` owns a
+session, `agent-river-fold-artifact` owns an artifact, and neither writes
+the other's. The edge between them -- a session having reached an
+artifact -- is folded onto the *session* as a `touch` event
+(`agent-river-reach`), because that is where the two frames are.
 
 Two ways in, one adapter. The right-hand column exists for the agents
 agent-shell hosts that have no hooks; it translates into the payload shape the
@@ -236,6 +252,53 @@ These are load-bearing; the tests enforce most of them.
   cwd already, and a second copy of that fact is only a way for the two to
   disagree. An anchor is dropped as soon as the key is reached from inside the
   cwd, because the same basename is reachable both ways.
+- **An artifact is a subject, and a session reaching it is an edge.**
+  What is true of the artifact lives in `agent-river-artifacts`; what is true
+  of the *relationship* stays in the session's two tables and is still
+  aggregated at read time (`agent-river--heat-entries`,
+  `agent-river--map-reach`). That split is what keeps the frames out of the
+  artifact record: `artifacts` versus `task-artifacts` is a property of the
+  reaching, not of the thing reached. The artifact table is **not a mirror**
+  of the session tables -- a file an agent touched needs no record there, the
+  session's table already says everything true of it, and a second copy is
+  only a way for the two to disagree. What belongs there is what the event
+  stream could never have produced: something declared in from outside, the
+  same rule `agent-river-note` follows one subject over.
+- **Appearing is the key entering the table, not the event arriving.**
+  `agent-river-observe-artifact` returns the artifact on first sight and nil
+  on every repeat, which is the dedup answer given by the table rather than
+  by every producer keeping a list of its own -- the shape
+  `agent-river--signalled-p` gives one subject over, for the same reason. It
+  is a return value rather than a separate query so that asking and folding
+  cannot come apart. A repeat still *folds* what it carries: not-news is not
+  the same as nothing happened, and a severity that moved has to land.
+- **`agent-river-reach` counts no step.** No tool ran. A step count inflated
+  there would be wrong in every reading taken from it, to exactly the extent
+  the function is used. It is a measurement rather than a claim because
+  whoever calls it performed the dispatch and is reporting it -- the same
+  standing `agent-river-watch-saves-mode` has.
+- **A key belongs to a domain, read off the table and never parsed out of the
+  key** (`agent-river--key-domain`). `file` is what a key is when nobody said
+  otherwise. A prefix rule would have to decide what `c:/tmp/x` means and
+  would answer for keys nobody ever declared.
+  `agent-river--heat-absolute` therefore answers **nil** for a non-file key,
+  which is what every existing caller already does the right thing with:
+  resolved against a cwd, `inc:INC-444` became `/repo/inc:INC-444`, a file in
+  a tree it has nothing to do with, which every view would then draw, shade
+  and eventually offer to delete. That is the mistake the anchors were folded
+  to stop, one domain over. `agent-river--heat-place` is the second reading
+  beside it -- "which artifact" where the other says "where on disk" -- and
+  it is what the position marker, the party floor and the section listings
+  actually want.
+- **Nothing on the artifact path reaches the agent.** Signals travel back
+  through `agent-river-observe` alone, and an artifact has no session to
+  answer -- which is the case the table exists for. Side effects hang off
+  `agent-river-artifact-observers`, a *separate* hook run by the same runner
+  (`agent-river--run-observers`, which now takes the hook symbol) under the
+  same three rules. Separate because the subject differs: one hook carrying
+  either kind would make every consumer begin by asking which it had been
+  handed, and one that forgot to ask would be wrong only for the events it
+  saw least often.
 - **One session, one way in** (`agent-river--claim`). The hooks and the
   agent-shell stream describe the same session, so folding both counts every
   step twice — and a doubled failure streak states a fact that is false, to the
@@ -552,6 +615,17 @@ own.
   heading is not a session; what is withheld without a `:visit` is the
   `mouse-face` and the echo, because those are an offer to act and a line that
   makes one has to keep it.
+- **No place function groups sessions by the artifact they are on, though
+  one now could.** `agent-river-reach` makes the association a measurement in
+  the session's own tables, so a function reading `agent-river-reaching` could
+  head a block group with an incident instead of a directory — which is the
+  case the extension point was built for, and it is deliberately not shipped.
+  Two reasons, and the second is the real one. A session reaching several
+  artifacts has no single place, so such a function has to pick, and picking
+  is a policy nobody outside the producer can set. And the block would then
+  have two kinds of heading with nothing saying which kind one is, where the
+  map keeps them apart by section — so the question to settle first is how a
+  block heading says what it is a heading *of*, not how to write the function.
 - **The export follows the block's order and not its headings**
   (`agent-river-markdown` flattens the same cells). The claim that it is a
   snapshot of the block rather than a second opinion has to stay true; but a
@@ -972,6 +1046,60 @@ Four things about the map are load-bearing:
   not become a section for being dirty, or the map would be a second
   `magit-status` rather than a view of where the agents are.
 
+- **A section need not be a directory** (`agent-river-map-domains`,
+  `agent-river--map-domain`). A non-file domain heads a section of its own,
+  and **the section's listing is the artifact table itself** -- which is why
+  there is no per-domain listing function to write: a record already carries
+  its name, whether it has ended, and whatever context its producer put on
+  it, and asking a domain to answer those again would be the second account
+  that table exists to avoid. Five things it owes. **Registering one is
+  optional and only about presentation** -- `:label` and `:visit`; a domain
+  absent from the list is still drawn, because something that has arrived
+  must not wait for configuration before it can be seen, which is the failure
+  mode of every dashboard that has to be taught about a new source. **An
+  unreached record is still listed**, which is the opposite of what
+  `agent-river-map-untouched` decides for a tree and deliberately so: there
+  the unreached entries are the rest of the disk and swamp the few that
+  matter, here an unreached record is a thing nobody has picked up, the
+  single most important line this view can carry. **git is asked nothing**
+  (`agent-river--domain-p`, the guard `agent-river--rows-vc` and
+  `agent-river--refresh-vc` begin with) -- a diffstat is a reading of a
+  working tree and a domain has none, and answering something rather than
+  nothing would reserve the fixed column across the whole buffer for a number
+  only half the sections could carry. **A line is identified by its key**
+  (`agent-river--map-node-path`), never by an expanded path: expanded, the
+  identity would depend on whatever `default-directory` happened to be, and
+  two maps drawn from different buffers would disagree about which line was
+  which. And **domain roots are appended after the grouping**
+  (`agent-river--map-groups`), not folded into it -- a domain has no
+  worktrees to merge and no `--git-common-dir` to ask for, so putting one
+  through that loop would run a subprocess over a name that is not a path.
+- **`>`/`<` does not stop on a record nobody has reached, and that is a
+  decision rather than an oversight.** The motion is read off
+  `agent-river-map-active`, which is set from the parties, so an incident
+  sitting in a queue with no agent on it is passed over — while being, very
+  possibly, the line you opened the map to find. It stays that way because
+  `>` means one thing today, "some agent is under this", and a motion that
+  also meant "somebody should be" would be two questions sharing a keystroke,
+  with no way to ask either on its own. If this is revisited, the answer is a
+  motion of its own, not a widening of this one: the map has three grains
+  already and they are separable because each answers exactly one question.
+- **An ended record is struck through, like a gone file** -- `:missing` set
+  from `agent-river-artifact-gone`, saying the same thing for the same
+  reason: it was worked on and is over, which is history and stays until
+  somebody says otherwise (`agent-river-drop-artifact`, which leaves the
+  sessions' tables alone -- they reached it, and that stays true whatever
+  became of the thing at the other end).
+- **The context rows are an ordinary contributor** (`agent-river--rows-artifact`),
+  gated on the *lookup* rather than on the section being a domain's: one
+  special case fewer, and a record declared against a key the map already
+  draws annotates that line too. It is also what makes it cheap -- the
+  artifact table holds only what was declared into it, so the lookup misses
+  for every ordinary line on the map. This package never reads a value out of
+  a context, which is what lets a record hold a severity, a body and a URL
+  without this file learning about any of them; the rows are escaped like
+  every other contributed row, since a context cell is the least of our text
+  there is.
 - **The diffstat is the one fact on a line the fold cannot produce**
   (`agent-river-map-vc`, default on). Weight says how heavily a name was
   reached, and an agent that read a file forty times and one that rewrote it

@@ -272,6 +272,15 @@ unable to say which of them a line was naming.  Inherited from the
 theme's, like every face here that does not need a shade of its own, so
 it means whatever the theme already means by a type name.")
 
+(defface agent-river-subject '((t :inherit font-lock-variable-name-face))
+  "Face for something that is not a session having happened.
+
+Its own face because it is its own subject: every other kind on this list
+is an agent doing something or being told something, and an artifact
+appearing is true whether or not any agent ever looks at it.  Rendered as
+a note it would have shared a colour with those, leaving a reader unable
+to say whether a line was about an agent or about the work.")
+
 (defface agent-river-gone '((t :inherit agent-river-stale :strike-through t))
   "Face for a name the state knows and the disk does not.
 
@@ -291,6 +300,7 @@ map's shading already travels as an overlay because tree-sitter owns
     ("fail"   "✗" agent-river-fail)
     ("ask"    "?" agent-river-ask)
     ("note"   "◉" agent-river-note)
+    ("artifact" "◎" agent-river-subject)
     ("signal" "!" agent-river-signal)
     ("done"   "□" agent-river-idle)
     ("idle"   "■" agent-river-idle))
@@ -826,6 +836,16 @@ replaying a session's events from the start."
             (setcdr cell (1+ (cdr cell)))
           (push (cons tool 1) (agent-river-state-fail-tools state)))))
 
+     ;; The edge on its own: a session reached something without a tool call
+     ;; this package could see -- see `agent-river-reach'.  Deliberately as
+     ;; narrow as it looks: both artifact frames and the anchor, and nothing
+     ;; else.  A step is a thing the agent did and this is not one, so
+     ;; counting one here would be wrong in every reading taken from the step
+     ;; count, to exactly the extent this is used.
+     ((equal kind "touch")
+      (agent-river--touch state file (plist-get event :wrote))
+      (agent-river--anchor state file path))
+
      ;; Both of the below record something that happened *to* the session
      ;; rather than something it did, which is why neither touches the step,
      ;; the streak or the artifacts.
@@ -893,6 +913,437 @@ replaying a session's events from the start."
         (setf (agent-river-state-done state) t))))
     state))
 
+
+;;; Artifacts -- the things worked on, as subjects of their own
+;;
+;; Everything above folds events onto a *session*.  `agent-river-fold' takes an
+;; `agent-river-state', every branch writes something true of that session, and
+;; the artifact tables inside it record which files it reached.  Which means an
+;; artifact has no existence of its own: it is a key in somebody's table, and
+;; "who is in this file" is reconstructed at every read --
+;; `agent-river--heat-entries' flattens the registry, `agent-river--map-reach'
+;; inverts it, `agent-river-touching' asks it outright.  The identity is
+;; already there; what it has never had is a home.
+;;
+;; That shape is right for a file, which only becomes interesting once an agent
+;; opens it.  It is wrong for anything that arrives on its own -- an incident
+;; routed to you, a review requested, a build that broke -- and the wrongness
+;; is not cosmetic: such a thing matters most when *no* agent is running, which
+;; is exactly when there is no session to fold it onto.  Hanging it on the one
+;; that acted last would be a guess, and it is the same guess
+;; `agent-river-set-intent' already warns about one level up.
+;;
+;; So the implicit identity gets a table.  What is true of the artifact itself
+;; lives here; what is true of the *relationship* between a session and an
+;; artifact stays where it was, in the session's two tables, and is still
+;; aggregated at read time.  That split is the whole design, and it is what
+;; keeps the frames out of here: `artifacts' versus `task-artifacts' is a
+;; property of the reaching, not of the thing reached.
+;;
+;; This table is deliberately not a mirror of those.  A file an agent touched
+;; needs no record here -- the session's table already says everything true of
+;; it, and a second copy is only a way for the two to disagree.  What belongs
+;; here is what the event stream could never produce: something declared in
+;; from outside.  The same rule `agent-river-note' follows, one subject over.
+;;
+;; Widening `agent-river-registry' to hold non-session keys was the obvious
+;; move and is the one to keep resisting.  The registry key is already a
+;; composite ("SESSION" or "SESSION/AGENT"), so one more kind of key looks
+;; free -- but every walker of that table would then have to begin by asking
+;; which kind it had, and there are more of them than it seems:
+;; `agent-river--heat-entries', `agent-river--gone-parties',
+;; `agent-river--panel-places', `agent-river--spinning-p', the block draw,
+;; every report.  A struct serving two meanings is a union type whichever way
+;; it is spelled, and the walker that forgets to test is wrong only for the
+;; records it sees least often -- which here is the ones that arrived with no
+;; agent on them, the whole case this exists for.  Two tables and two folds
+;; cost a second `clrhash' in `agent-river-reset' and nothing else.
+
+(defcustom agent-river-artifact-domains '(file)
+  "Domains this package understands a key in without being told.
+
+A domain is who knows what a key means.  `file' is this package's own and
+is what an unnamespaced key is: a name relative to a session's cwd, which
+`agent-river--rel' produced and `agent-river--heat-absolute' can resolve.
+Anything else was declared by whoever put it here, and only that producer
+knows how to read it back.
+
+The list is advisory -- nothing is refused for being absent from it -- and
+exists so a reader of `agent-river-artifacts-list' can tell which domains
+are in play without walking the table."
+  :type '(repeat symbol))
+
+(cl-defstruct (agent-river-artifact
+               (:constructor agent-river--artifact-create))
+  ;; The identity, exactly as the session tables key it.  For a file that is
+  ;; `agent-river--rel's answer; for anything else it is whatever the producer
+  ;; chose, and it should carry its domain (`inc:INC-444') so that two
+  ;; producers cannot collide on a bare number.
+  key
+  domain            ; symbol: who understands `key'.  `file' when nobody said
+  name              ; what a human calls it; `key' when nothing better was given
+  ;; Whatever the producer carried in, an alist, opaque here.  This package
+  ;; never reads a value out of it -- it is passed to the views that asked for
+  ;; the artifact and to nobody else, which is what lets it hold a ticket body,
+  ;; a severity or a URL without this file having to learn about any of them.
+  context
+  ;; When the key first entered this table.  The fact a dedup asks about, and
+  ;; the reason it is a slot rather than derived: "have I seen this one" is not
+  ;; answerable from an event stream that only carries the events you kept.
+  appeared
+  last              ; when something last happened *to* it
+  ;; Closed, resolved, deleted.  Kept rather than removed, for the reason the
+  ;; map strikes a vanished file through instead of dropping its line: the
+  ;; ending is itself a thing that happened.  `agent-river-drop-artifact' is
+  ;; the gesture for when it has stopped being news.
+  gone gone-at
+  ;; Observations about the artifact itself, newest first -- not about any
+  ;; session that reached it.  Same shape and same rule as the state's own
+  ;; `notes': a measurement, never an opinion.
+  notes)
+
+(defvar agent-river-artifacts (make-hash-table :test 'equal)
+  "Map of artifact key to `agent-river-artifact'.
+
+The second folded table beside `agent-river-registry', and the only other
+one: everything else this package keeps in a hash is a current-state fact
+queried where it is read -- which buffer hosts a session, what a session
+is waiting to be allowed, what git last said about a tree.
+
+Keyed the same way the session tables are, so that a key here and a key
+there are the same artifact and a view can put the two readings together
+without translating between them.")
+
+(defun agent-river-artifact (key &optional domain name)
+  "Return the artifact keyed by KEY, creating it if needed.
+
+DOMAIN and NAME are set once, when the record is created -- an artifact
+does not change what kind of thing it is, and a later event that wants to
+rename it says so through the fold (`name' on an `appear'), where it is
+logged like every other transition.  This is addressing, not folding; it
+writes no slot but the ones a record cannot exist without."
+  (or (gethash key agent-river-artifacts)
+      (puthash key
+               (agent-river--artifact-create
+                :key key
+                :domain (or domain 'file)
+                :name (or name key)
+                :appeared (current-time)
+                :last (current-time))
+               agent-river-artifacts)))
+
+(defun agent-river-artifact-known-p (key)
+  "Return non-nil when KEY is already in `agent-river-artifacts'.
+
+The dedup question asked without folding anything, for a producer that
+wants to decide before it builds an event.  `agent-river-observe-artifact'
+answers the same question as its return value, which is the one to prefer:
+asked separately, the answer is stale by the time the event is folded."
+  (and (gethash key agent-river-artifacts) t))
+
+(defun agent-river-fold-artifact (artifact event)
+  "Fold EVENT into ARTIFACT and return ARTIFACT.
+
+EVENT is a plist with :kind, and optionally :name, :context and :text.
+Deterministic given the event order -- the same promise `agent-river-fold'
+makes one subject over, and it has the same consequence: this is the only
+writer.  Anything else that `setf's a slot here puts a transition into the
+record that no event accounts for, and the promise stops being true
+without anything failing.
+
+Four kinds, and between them they are the whole vocabulary:
+
+  appear   it exists, and here is what is known about it
+  context  what is known about it has changed
+  gone     it is closed, resolved or deleted
+  note     something was observed about it
+
+There is no kind for a session reaching it.  That is an edge rather than a
+fact about the artifact, it is folded onto the session where the two
+frames are (`agent-river-reach'), and duplicating it here would be the
+second account this table exists to avoid."
+  (let ((kind (plist-get event :kind)))
+    ;; Every event is something happening to it, whatever else it does.
+    (setf (agent-river-artifact-last artifact) (current-time))
+    (cond
+     ((equal kind "appear")
+      ;; Idempotent, and that is the point rather than a convenience: a
+      ;; producer that polls sees the same ticket on every pass, and the
+      ;; appearance is the *key* entering the table, not this event arriving.
+      ;; `agent-river-observe-artifact' is where that distinction is reported.
+      (let ((name (plist-get event :name))
+            (context (plist-get event :context)))
+        (when name (setf (agent-river-artifact-name artifact) name))
+        (when context
+          (setf (agent-river-artifact-context artifact)
+                (agent-river--artifact-merge
+                 (agent-river-artifact-context artifact) context))))
+      ;; Reappearing undoes an ending, the way `agent-river--anchor' drops a
+      ;; stale anchor rather than keeping it: a ticket that was resolved and
+      ;; has been reopened is open, and a record that went on saying otherwise
+      ;; would be wrong in the direction that matters.
+      (setf (agent-river-artifact-gone artifact) nil
+            (agent-river-artifact-gone-at artifact) nil))
+
+     ((equal kind "context")
+      ;; Merged per key, not replaced wholesale: a producer that has learned
+      ;; one new thing should not have to resend everything it knew before,
+      ;; and made to, it would eventually send a shorter list by accident and
+      ;; silently drop the rest.
+      (setf (agent-river-artifact-context artifact)
+            (agent-river--artifact-merge
+             (agent-river-artifact-context artifact)
+             (plist-get event :context))))
+
+     ((equal kind "gone")
+      ;; Everything else is left standing.  What it was, who reached it and
+      ;; what was noted about it are all still true of a thing that has
+      ;; finished; only the present tense is withdrawn.
+      (setf (agent-river-artifact-gone artifact) t
+            (agent-river-artifact-gone-at artifact) (current-time)))
+
+     ((equal kind "note")
+      (push (cons (current-time) (plist-get event :text))
+            (agent-river-artifact-notes artifact))))
+    artifact))
+
+(defun agent-river--artifact-merge (old new)
+  "Return alist OLD with NEW's cells replacing or extending it.
+NEW wins per key, and the order of OLD is kept so a context that is read
+as a list does not reshuffle itself every time one field is updated."
+  (let ((merged (copy-sequence old)))
+    (dolist (cell new)
+      (let ((seen (assq (car cell) merged)))
+        (if seen
+            (setcdr seen (cdr cell))
+          (setq merged (append merged (list (cons (car cell) (cdr cell))))))))
+    merged))
+
+(defvar agent-river-artifact-observers nil
+  "Functions called with (ARTIFACT EVENT) after each artifact event is folded.
+
+The artifact-side counterpart to `agent-river-observers', run by the same
+runner and under the same three rules: its own guard, retired on the first
+error, and torn down through the `agent-river-retire' symbol property.
+
+The same runner, not a second one of its own.  A copy of that loop would
+have been four lines and is exactly the shape this package keeps getting
+wrong: those three rules are the whole of what a consumer inherits, each
+of them is a mistake already made here once, and a second copy is a second
+place for one of them to be quietly dropped.  `agent-river--run-observers'
+takes the hook symbol for that reason alone -- it is not an abstraction
+reaching for a third caller.
+
+A separate hook rather than the same one, because the subject differs.
+One hook carrying either an `agent-river-state' or an
+`agent-river-artifact' would make every consumer begin by asking which it
+had been handed, and a consumer that forgot to ask would be wrong only for
+the events it saw least often.")
+
+(defun agent-river-observe-artifact (event)
+  "Fold EVENT about an artifact, render it, and say whether the key was new.
+
+EVENT is a plist: :key addresses the artifact, :kind selects the fold,
+:domain and :name describe it when the record is created, :context carries
+whatever the producer knows and :text is the line for the buffer.
+
+Returns the artifact when this event was the key's first appearance here,
+and nil when it was already known.  That is the dedup answer -- \"have I
+seen this one?\" -- given by the table rather than by every producer
+keeping a list of its own, and it is a return value rather than a query so
+that asking and folding cannot come apart.  It is the same shape
+`agent-river--signalled-p' gives one subject over, for the same reason: a
+tally says how many, a log says which, and only the second can stop a
+thing being delivered twice.
+
+Nothing here can reach the agent.  Signals travel back through
+`agent-river-observe' alone, and an artifact has no session to answer --
+which is the whole case this table exists for."
+  (let* ((key (plist-get event :key))
+         (fresh (not (agent-river-artifact-known-p key)))
+         (artifact (agent-river-artifact key
+                                         (plist-get event :domain)
+                                         (plist-get event :name))))
+    ;; Guarded like the session fold, and for the same failure: reloading this
+    ;; file after changing the struct leaves older records short a slot, and an
+    ;; error here used to be an error in whatever producer called it -- which
+    ;; on a webhook is a dropped ticket rather than a visible mistake.
+    (condition-case err
+        (agent-river-fold-artifact artifact event)
+      (error
+       (agent-river-log "fail" (format "artifact fold failed (%s) -- try M-x agent-river-reset"
+                                       (error-message-string err)))))
+    (agent-river--run-observers 'agent-river-artifact-observers artifact event)
+    (let ((text (plist-get event :text)))
+      (unless (or (null text) (string-empty-p text))
+        (agent-river-log "artifact" text (agent-river-artifact-name artifact))))
+    (and fresh artifact)))
+
+;;;###autoload
+(defun agent-river-appeared (key &rest props)
+  "Record that artifact KEY exists, and return it when that is news.
+
+PROPS is a plist of :domain, :name, :context and :text.  The convenience
+form of `agent-river-observe-artifact' for the case a producer has almost
+always: something showed up, here is what I know about it, tell me whether
+you had already heard.
+
+Nil means the key was already in the table -- already reported, already
+drawn, already whatever the producer did about it last time.  A producer
+polling a queue can therefore act on the return value and keep no
+bookkeeping of its own, which is the bookkeeping most likely to be the
+thing that is wrong."
+  (agent-river-observe-artifact
+   (append (list :kind "appear" :key key) props)))
+
+;;;###autoload
+(defun agent-river-ended (key &optional text)
+  "Record that artifact KEY is closed, resolved or deleted.
+TEXT is the line for the buffer.  The record is kept, struck out of the
+present tense rather than removed: see `agent-river-drop-artifact' for
+when it has stopped being worth showing at all."
+  (agent-river-observe-artifact
+   (list :kind "gone" :key key
+         :text (or text (format "%s ended" key))))
+  nil)
+
+;;;###autoload
+(defun agent-river-note-artifact (key text)
+  "Fold TEXT as an observation about artifact KEY.
+
+The artifact-side `agent-river-note', and it is kept apart from that one
+for the reason the whole table is: a note on a session says something
+about an agent, and a note here says something about the thing being
+worked on, which is true whether or not any agent ever looks at it.
+
+A measurement, not a claim.  An observer minting notes about its own
+opinions closes the same loop the `intent' slots are kept apart to
+prevent."
+  (agent-river-observe-artifact
+   (list :kind "note" :key key :text text))
+  text)
+
+;;;###autoload
+(defun agent-river-reach (key &optional id wrote)
+  "Record that session ID reached artifact KEY, writing it when WROTE.
+
+The edge between a session and an artifact, for the case no tool call can
+express it.  An agent dispatched to an incident has reached it in every
+sense the artifact tables mean, but no tool argument names it and
+`agent-river--tool-file' will never find it -- so without this the
+association exists only in the head of whatever did the dispatching.
+
+A measurement rather than a claim: whoever calls this performed the
+dispatch and is reporting it, the way `agent-river-watch-saves-mode'
+reports a save it watched.  It is folded as an event like any other and
+counted in both frames, so everything downstream -- the map's parties, the
+shading, `agent-river-touching' -- sees it without being taught anything.
+
+What it deliberately does not do is count a step or move the phase.  No
+tool ran, and a step count inflated here would be wrong in every reading
+taken from it, to exactly the extent this is used.
+
+ID defaults to the session that most recently acted.  That is a guess, and
+it is the guess this table exists to avoid making -- name the session
+where you can."
+  (let* ((key (or key ""))
+         (session (or id agent-river--current))
+         (state (and session (gethash session agent-river-registry))))
+    (cond
+     ((string-empty-p key) (user-error "No artifact to reach"))
+     ((null state) (user-error "No session to attach a reach to"))
+     (t
+      (let ((event (list :kind "touch" :file key :wrote wrote :session session)))
+        (agent-river-fold state event)
+        (agent-river--update-panel state)
+        (agent-river-log "artifact" (format "%s reached %s"
+                                            (agent-river-state-label state) key)
+                         (agent-river-state-label state))
+        (agent-river--run-observers 'agent-river-observers state event)
+        key)))))
+
+(defun agent-river-reaching (key &optional scope)
+  "Return which sessions have reached artifact KEY, as a list of plists.
+
+Matched on the key exactly, where `agent-river-touching' matches on a
+basename.  The difference is deliberate and is the difference between the
+two questions: that one asks \"is anybody in this file\", where a worktree
+and a main checkout are the same file reached two ways, and this one asks
+about an artifact that already *is* a key and has no other spelling.
+
+SCOPE is `session' for the whole session, `task' or nil for this task."
+  (let (hits)
+    (maphash
+     (lambda (id state)
+       (let ((entry (gethash key (if (eq scope 'session)
+                                     (agent-river-state-artifacts state)
+                                   (agent-river-state-task-artifacts state)))))
+         (when entry
+           (push (list id
+                       :label (agent-river-state-label state)
+                       :touches (plist-get entry :touches)
+                       :writes (or (plist-get entry :writes) 0)
+                       :ago (agent-river--ago (plist-get entry :last)))
+                 hits))))
+     agent-river-registry)
+    hits))
+
+(defun agent-river-artifacts-list (&optional domain)
+  "Return every known artifact as a plist, newest first.
+DOMAIN narrows to one domain.  Ended artifacts are included and say so:
+dropping them here would make this disagree with what the views draw, and
+the ending is a thing that happened."
+  (let (out)
+    (maphash
+     (lambda (_key artifact)
+       (when (or (null domain) (eq (agent-river-artifact-domain artifact) domain))
+         (push (list :key (agent-river-artifact-key artifact)
+                     :domain (agent-river-artifact-domain artifact)
+                     :name (agent-river-artifact-name artifact)
+                     :context (agent-river-artifact-context artifact)
+                     :gone (and (agent-river-artifact-gone artifact) t)
+                     :appeared (agent-river--ago
+                                (agent-river-artifact-appeared artifact))
+                     :last (agent-river-artifact-last artifact)
+                     :notes (length (agent-river-artifact-notes artifact))
+                     :reached (length (agent-river-reaching
+                                       (agent-river-artifact-key artifact)
+                                       'session)))
+               out)))
+     agent-river-artifacts)
+    (sort out (lambda (a b) (time-less-p (plist-get b :last) (plist-get a :last))))))
+
+;;;###autoload
+(defun agent-river-drop-artifact (key)
+  "Forget artifact KEY entirely.
+
+For when an ending has stopped being news -- the same moment
+`agent-river-forget-gone-files' is for, one subject over.  Removing the
+record is not a second writer to a state the fold owns: it removes the
+subject rather than putting a transition in it, which is what
+`agent-river-reset' does to every session and nobody calls that a write.
+
+The sessions that reached it keep their tables.  Those are the edge, they
+are true whatever became of the thing at the other end, and clearing them
+from here would reach into a state this command is not about."
+  (interactive
+   (list (completing-read "Forget artifact: "
+                          (let (keys)
+                            (maphash (lambda (k _v) (push k keys))
+                                     agent-river-artifacts)
+                            keys)
+                          nil t)))
+  (remhash key agent-river-artifacts)
+  (agent-river-log "artifact" (format "%s forgotten" key))
+  key)
+
+;;;###autoload
+(defun agent-river-artifacts-reset ()
+  "Forget every artifact, keeping the sessions.
+The artifact-side `agent-river-forget-artifacts': what was being worked
+on is dropped, and who was working is left alone."
+  (interactive)
+  (clrhash agent-river-artifacts))
 
 ;;; Derived signals
 
@@ -2690,8 +3141,15 @@ STATE is the `agent-river-state' the event was folded into, and carries
 everything measured.  EVENT is the raw plist, which is where to look for
 anything the fold deliberately drops -- `:path' being the case in point.")
 
-(defun agent-river--run-observers (state event)
-  "Run `agent-river-observers' over STATE and EVENT, each in its own guard.
+(defun agent-river--run-observers (hook subject event)
+  "Run HOOK's functions over SUBJECT and EVENT, each in its own guard.
+
+HOOK is the symbol of an abnormal hook -- `agent-river-observers', whose
+subject is an `agent-river-state', or `agent-river-artifact-observers',
+whose subject is an `agent-river-artifact'.  Taking the hook as an
+argument rather than naming one is what keeps the three rules below in a
+single implementation: they are the whole of what a consumer inherits, and
+a second copy of them is a second place for one of them to be forgotten.
 
 An observer that throws is removed rather than being allowed to fail on
 every tool call for the rest of the session, and says so in the log --
@@ -2699,11 +3157,11 @@ going quiet is how this has broken before.  One that needs to tear
 something down on the way out puts a function on its symbol's
 `agent-river-retire' property; without it, removal is the whole
 retirement."
-  (dolist (observer agent-river-observers)
+  (dolist (observer (symbol-value hook))
     (condition-case err
-        (funcall observer state event)
+        (funcall observer subject event)
       (error
-       (setq agent-river-observers (delq observer agent-river-observers))
+       (set hook (delq observer (symbol-value hook)))
        (when (symbolp observer)
          (let ((retire (get observer 'agent-river-retire)))
            (when retire (ignore-errors (funcall retire)))))
@@ -2752,7 +3210,7 @@ often the agent had to be told something is itself part of the state."
       (error
        (agent-river-log "fail" (format "fold failed (%s) -- try M-x agent-river-reset"
                                        (error-message-string err)))))
-    (agent-river--run-observers state event)
+    (agent-river--run-observers 'agent-river-observers state event)
     (let ((label (agent-river-state-label state))
           (call (plist-get event :call)))
       ;; A call that ends is written onto the line that began it, so one tool
@@ -2908,7 +3366,7 @@ session that most recently acted."
         (agent-river-fold state event)
         (agent-river--update-panel state)
         (agent-river-log "note" text (agent-river-state-label state))
-        (agent-river--run-observers state event)
+        (agent-river--run-observers 'agent-river-observers state event)
         text)))))
 
 
@@ -4134,6 +4592,12 @@ half that also folds."
   "Forget all folded state.  The buffer is left alone."
   (interactive)
   (clrhash agent-river-registry)
+  ;; The second folded table goes with the first.  This is the command for
+  ;; when a struct change has left every record short a slot, and an artifact
+  ;; record can be as short of one as a session's is.  Kept out of
+  ;; `agent-river-forget-artifacts', which is the opposite gesture: that one
+  ;; drops the record of *where the work was* and keeps the subjects.
+  (clrhash agent-river-artifacts)
   ;; Which way in owns a session, and which tool calls are in flight, are
   ;; state about the same sessions: left behind, they would have the fold
   ;; start again while ownership and half-timed calls referred to states
@@ -4842,7 +5306,31 @@ and it wins over the cwd here."
   (let ((cwd (or (plist-get entry :anchor) (plist-get entry :cwd)))
         (file (plist-get entry :file)))
     (and cwd (not (string-empty-p cwd)) file (not (string-empty-p file))
+         ;; A key declared into another domain is not a file, and resolving it
+         ;; here is how `inc:INC-444' became `/repo/inc:INC-444' -- a name in a
+         ;; tree it has nothing to do with, which every view downstream would
+         ;; then draw, shade and eventually offer to delete.  Answering nil is
+         ;; what each of them already does the right thing with: a key that
+         ;; cannot be placed is left alone rather than guessed at.
+         (eq (agent-river--key-domain file) 'file)
          (expand-file-name file (file-name-as-directory cwd)))))
+
+(defun agent-river--heat-place (entry)
+  "Return what identifies ENTRY's artifact to the map, whatever domain it is in.
+
+The absolute file name where there is one, and the key itself where the
+key is the whole of the name -- which is what a non-file artifact has
+instead.  Distinct from `agent-river--heat-absolute' on purpose: that one
+answers \"where on disk\", and a caller asking it must keep getting nil
+for something that is not on disk.  This one answers \"which artifact\",
+which
+is the question the position marker, the party floor and the section
+listings are all really asking."
+  (or (agent-river--heat-absolute entry)
+      (let ((file (plist-get entry :file)))
+        (and file (not (string-empty-p file))
+             (not (eq (agent-river--key-domain file) 'file))
+             file))))
 
 (defun agent-river--heat-table (&optional scope)
   "Return a hash of basename to weighted touch count across every folded session.
@@ -5401,7 +5889,7 @@ only the present tense that is withdrawn."
   (let ((newest (make-hash-table :test 'equal))
         (gone (agent-river--gone-parties)))
     (dolist (entry entries)
-      (let ((abs (agent-river--heat-absolute entry))
+      (let ((abs (agent-river--heat-place entry))
             (party (plist-get entry :party))
             (last (plist-get entry :last)))
         (when (and abs (not (gethash party gone)))
@@ -5430,7 +5918,7 @@ says the agent's last move was into a file that has since gone, which is
 both true and worth knowing.  Refusing the exemption instead left an
 agent whose last act was a deletion named nowhere at all, and losing a
 party off the map entirely is the worse of the two readings."
-  (let ((abs (agent-river--heat-absolute entry)))
+  (let ((abs (agent-river--heat-place entry)))
     (and abs
          (or (null agent-river-map-party-floor)
              (>= (plist-get entry :weight) agent-river-map-party-floor)
@@ -5610,6 +6098,280 @@ such directory costs nothing: it lists nothing and no path lies under it."
   (seq-some (lambda (member) (file-directory-p (expand-file-name name member)))
             (agent-river--map-members root)))
 
+;;; Domains -- what a section of the map is a section of
+;;
+;; The map lists a directory and annotates it with what the agents did there,
+;; which is dired's question asked over the whole state.  That works because a
+;; file key can be placed: `agent-river--heat-absolute' resolves it against the
+;; session's cwd, or against the anchor where the cwd cannot.
+;;
+;; An artifact declared from outside has no such answer.  `inc:INC-444' is a
+;; perfectly good key -- the session tables count it, the parties aggregate over
+;; it, `agent-river-touching' finds it -- but resolved against a cwd it becomes
+;; `/repo/inc:INC-444', a file that does not exist in a tree it has nothing to
+;; do with.  That is the same mistake the anchors were folded to stop, one
+;; domain over, and it is why placement is decided here rather than assumed.
+;;
+;; So: a key belongs to a domain, the domain is read off the artifact table
+;; (`agent-river--key-domain'), and `file' is what a key is when nobody said
+;; otherwise.  A non-file domain heads a section of its own, and the section's
+;; listing is the artifact table itself -- which is the whole reason there is
+;; no per-domain listing function to write.  A record already carries its name,
+;; whether it has ended, and whatever context its producer put on it; asking a
+;; domain to answer those again would be the second account this table exists
+;; to avoid.
+;;
+;; Registering a domain is therefore optional, and is only ever about
+;; presentation: a producer that passes `:domain' gets a section whether or not
+;; anybody registered one, because a thing that has arrived must not need
+;; configuration before it can be seen.
+
+(defvar agent-river-map-domains nil
+  "How the map presents a non-file domain, when the default will not do.
+
+An alist of DOMAIN (the symbol an artifact was declared with) to a plist:
+
+  :label  the section heading.  The domain name capitalised, by default
+  :visit  (KEY) -> nil, what RET on one of its entries does
+
+Purely presentational.  A domain absent from this list is still drawn --
+`agent-river--map-domain-roots' reads the artifact table, not this -- and
+that is deliberate: something that has arrived should not have to wait for
+configuration before it can be seen, which is the failure mode of every
+dashboard that needs teaching about a new source.")
+
+(defun agent-river--key-domain (key)
+  "Return the domain KEY belongs to: the symbol it was declared with, or `file'.
+
+Read off `agent-river-artifacts' rather than parsed out of the key, which
+matters more than it looks.  A prefix rule would have to decide what
+`c:/tmp/x' means, and would answer for keys nobody ever declared -- where
+this answers `file' for everything the event stream produced on its own
+and something else only where a producer said so.  Which is the same line
+the artifact table itself is drawn on."
+  (let ((artifact (and key (not (string-empty-p key))
+                       (gethash key agent-river-artifacts))))
+    (or (and artifact (agent-river-artifact-domain artifact)) 'file)))
+
+(defun agent-river--domain-root (domain)
+  "Return the section root standing for DOMAIN.
+A string, because everything downstream of the draw compares roots with
+`equal' and puts them on text properties; it is an identity and never a
+path, and `agent-river--map-domain' is what tells the two apart."
+  (format "%s:" domain))
+
+(defun agent-river--map-domain (root)
+  "Return the domain ROOT is the section of, or nil when ROOT is a directory.
+
+The one predicate the rest of the draw dispatches on.  Asked rather than
+inferred from the string's shape: a directory can be called anything, and
+a listing that decided what to do by looking at a name would eventually
+run git over somebody's incident queue."
+  (let (found)
+    (dolist (domain (agent-river--map-live-domains))
+      (when (and (not found) (equal root (agent-river--domain-root domain)))
+        (setq found domain)))
+    found))
+
+(defun agent-river--map-live-domains ()
+  "Return every non-file domain with a record in `agent-river-artifacts'.
+Discovered rather than declared, so a producer that invents a domain sees
+it on the map without registering anything."
+  (let (domains)
+    (maphash (lambda (_key artifact)
+               (let ((domain (agent-river-artifact-domain artifact)))
+                 (unless (or (eq domain 'file) (memq domain domains))
+                   (push domain domains))))
+             agent-river-artifacts)
+    (nreverse domains)))
+
+(defun agent-river--domain-label (domain)
+  "Return DOMAIN's section heading."
+  (or (plist-get (alist-get domain agent-river-map-domains) :label)
+      (capitalize (symbol-name domain))))
+
+(defun agent-river--domain-visit (domain key)
+  "Return a thunk for RET on KEY in DOMAIN, or nil when it does nothing.
+Nil rather than a thunk that reports the absence: a line that offers to
+act has to keep the offer, so what is withheld without a `:visit' is the
+offer itself -- the same bargain a place heading makes in the block."
+  (let ((visit (plist-get (alist-get domain agent-river-map-domains) :visit)))
+    (when visit (lambda () (funcall visit key)))))
+
+(defun agent-river--map-domain-roots (&optional scope)
+  "Return one (ROOT . LAST) per live non-file domain, newest first.
+
+LAST is the most recent thing to have happened in the domain, taken from
+the artifact records rather than from the sessions: a queue with nothing
+assigned to it is still a queue that just received something, and ordered
+by what agents did it would sink below every tree somebody is typing in --
+which is precisely backwards for the case this exists for."
+  (let ((seen (make-hash-table :test 'equal))
+        (entries (agent-river--heat-entries scope))
+        result)
+    ;; What the sessions have reached, so a domain somebody is working in
+    ;; sorts by that rather than by when its records last changed.
+    (dolist (entry entries)
+      (let ((domain (agent-river--key-domain (plist-get entry :file))))
+        (unless (eq domain 'file)
+          (puthash domain
+                   (agent-river--map-later (gethash domain seen)
+                                           (plist-get entry :last))
+                   seen))))
+    (maphash (lambda (_key artifact)
+               (let ((domain (agent-river-artifact-domain artifact)))
+                 (unless (eq domain 'file)
+                   (puthash domain
+                            (agent-river--map-later
+                             (gethash domain seen)
+                             (agent-river-artifact-last artifact))
+                            seen))))
+             agent-river-artifacts)
+    (maphash (lambda (domain last)
+               (push (cons (agent-river--domain-root domain) last) result))
+             seen)
+    (agent-river--map-by-last result)))
+
+(defun agent-river--domain-parties (domain scope)
+  "Return a hash of artifact key to the parties that reached it, in DOMAIN.
+
+The same derivation `agent-river--map-reach' makes for a directory, over
+the same entries and with the same floor applied -- a party too cold to
+name is not on this line either.  What it does not do is relativise
+anything: an artifact key is already the whole of its own name, which is
+why this is thirty lines rather than a hundred."
+  (let ((by-key (make-hash-table :test 'equal))
+        (entries (agent-river--heat-entries scope)))
+    (let ((newest (agent-river--map-newest entries)))
+      (dolist (entry entries)
+        (let ((key (plist-get entry :file))
+              (party (plist-get entry :party))
+              (last (plist-get entry :last)))
+          (when (and key (eq (agent-river--key-domain key) domain)
+                     (agent-river--map-live-p entry newest))
+            (let* ((parties (or (gethash key by-key)
+                                (puthash key (make-hash-table :test 'equal) by-key)))
+                   (cell (gethash party parties)))
+              (puthash party
+                       (list :weight (+ (or (plist-get cell :weight) 0)
+                                        (plist-get entry :weight))
+                             :writes (+ (or (plist-get cell :writes) 0)
+                                        (or (plist-get entry :writes) 0))
+                             :last (agent-river--map-later (plist-get cell :last) last)
+                             :current (equal key (plist-get (gethash party newest) :abs)))
+                       parties)))))
+      (let ((out (make-hash-table :test 'equal)))
+        (maphash
+         (lambda (key parties)
+           (let (plists)
+             (maphash (lambda (party cell)
+                        (push (list :party party
+                                    :weight (plist-get cell :weight)
+                                    :writes (plist-get cell :writes)
+                                    :last (plist-get cell :last)
+                                    :current (plist-get cell :current))
+                              plists))
+                      parties)
+             (puthash key (sort plists (lambda (a b)
+                                         (> (plist-get a :weight)
+                                            (plist-get b :weight))))
+                      out)))
+         by-key)
+        out))))
+
+(defun agent-river--domain-entries (root &optional scope)
+  "Return ROOT's listing when ROOT is a domain.
+
+The shape `agent-river--map-entries' returns, so that the draw below is
+one loop rather than two: a section is a section, and the only thing a
+domain changes is where its lines came from.
+
+Every record in the domain, whether or not any agent has reached it.  That
+is the opposite of what `agent-river-map-untouched' decides for a tree, and
+deliberately so: there the unreached entries are the rest of the disk and
+swamp the few that matter, here an unreached record is a thing that has
+arrived and nobody has picked up, which is the single most important line
+this view can carry.
+
+`:missing' is the record having ended, which draws it struck through --
+the same rendering a deleted file gets, saying the same thing: this was
+worked on and is over, which is history and worth keeping on screen until
+somebody says otherwise.
+
+Ordered by weight and then by recency, so the ones being worked on rise
+and a queue with nothing happening in it is in the order things arrived."
+  (let* ((domain (agent-river--map-domain root))
+         (parties (and domain (agent-river--domain-parties domain scope)))
+         entries)
+    (when domain
+      (maphash
+       (lambda (key artifact)
+         (when (eq (agent-river-artifact-domain artifact) domain)
+           (push (list :name key
+                       :dir nil
+                       :parties (gethash key parties)
+                       :files nil
+                       :missing (and (agent-river-artifact-gone artifact) t)
+                       :changed nil
+                       ;; What the line shows, where the key is machinery and
+                       ;; the name is what a human calls it.  A directory entry
+                       ;; has no such split -- its name *is* its key -- which is
+                       ;; why this is the one field a domain adds.
+                       :shown (agent-river-artifact-name artifact)
+                       :visit (agent-river--domain-visit domain key)
+                       :last (agent-river-artifact-last artifact))
+                 entries)))
+       agent-river-artifacts))
+    (sort entries
+          (lambda (a b)
+            (let ((wa (agent-river--map-weight (plist-get a :parties)))
+                  (wb (agent-river--map-weight (plist-get b :parties))))
+              (if (= wa wb)
+                  (time-less-p (plist-get b :last) (plist-get a :last))
+                (> wa wb)))))))
+
+(defun agent-river--rows-artifact (_root nodes)
+  "Return one row per thing known about the artifact each of NODES is.
+
+The context a producer carried in, which this package has never read a
+value out of and does not start here: the cells are rendered as they
+arrived.  That is what lets a record hold a severity, a body and a URL
+without this file having to learn about any of them -- and it is why the
+rows are escaped like every other contributed row, since a context cell is
+the least of our text there is.
+
+Gated on the lookup rather than on the section being a domain's, which is
+one special case fewer and strictly more use: a record declared against a
+key the map already draws annotates that line too.  It is also what makes
+this cheap -- the artifact table holds only what was declared into it, so
+the lookup misses for every ordinary line on the map."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (node nodes)
+      (let* ((key (plist-get node :path))
+             (artifact (gethash key agent-river-artifacts))
+             rows)
+        (when artifact
+          (dolist (cell (agent-river-artifact-context artifact))
+            (push (list :key (format "context/%s" (car cell))
+                        ;; Ahead of the parties and the tree: for a record that
+                        ;; arrived on its own, what it *is* is the question, and
+                        ;; who has since been near it is the follow-up.
+                        :rank 0
+                        :face 'agent-river-note
+                        :text (format "%s: %s" (car cell) (cdr cell)))
+                  rows))
+          (let ((notes (agent-river-artifact-notes artifact)))
+            (when notes
+              (push (list :key "artifact/notes"
+                          :rank 0
+                          :face 'agent-river-stale
+                          :text (format "%s · %s ago"
+                                        (cdr (car notes))
+                                        (agent-river--ago (car (car notes)))))
+                    rows)))
+          (when rows (puthash key (nreverse rows) table)))))
+    table))
+
 (defun agent-river--map-groups (&optional scope)
   "Return every tree the map draws, newest first, worktrees merged into one.
 
@@ -5669,6 +6431,13 @@ the rest of the draw learns what a section is showing."
                      (delete-dups (cons canonical (mapcar #'car tops)))
                      agent-river--map-member-trees)
             (push (cons canonical last) result)))))
+    ;; Appended after the grouping rather than folded into it: a domain has no
+    ;; worktrees to merge and no `--git-common-dir' to ask for, and putting one
+    ;; through the loop above would run a subprocess over a name that is not a
+    ;; path.  Sorted in with the trees afterwards, because what a reader wants
+    ;; at the top is whatever moved last, whichever kind of section it was.
+    (dolist (cell (agent-river--map-domain-roots scope))
+      (push cell result))
     (agent-river--map-by-last result)))
 
 (defun agent-river--map-all-roots (&optional scope)
@@ -5948,6 +6717,12 @@ otherwise be activity the map silently drops, and that is also why the
 filter is written as \"nothing known about it\" rather than \"is not on
 disk\" -- the two coincide for an inert entry and come apart for exactly
 the entries that matter."
+  (if (agent-river--map-domain root)
+      (agent-river--domain-entries root scope)
+    (agent-river--map-tree-entries root scope)))
+
+(defun agent-river--map-tree-entries (root &optional scope)
+  "Return ROOT's listing when ROOT is a directory.  See `agent-river--map-entries'."
   (let* ((reach (agent-river--map-reach root scope))
          (grouped (make-hash-table :test 'equal))
          (reached (make-hash-table :test 'equal))
@@ -6474,6 +7249,12 @@ is in there now."
                     ahead)
            (not outside)))))
 
+(defun agent-river--domain-p (root)
+  "Return non-nil when ROOT is a domain section rather than a directory.
+The guard every contributor that reaches the disk begins with: asked of a
+domain, `git' would be run over a name that is not a path."
+  (and (agent-river--map-domain root) t))
+
 (defun agent-river--refresh-vc (root _nodes)
   "Ask git about ROOT, if the last answer is old enough.
 The throttle is `agent-river--vc-stats\=' own -- the map offers a refresh on
@@ -6483,8 +7264,9 @@ map redraw and a dired shading cannot start two reads of the same tree.
 Every tree ROOT stands for is read, each against its own HEAD: two
 worktrees are two working trees on two branches, and one of them read
 twice would say nothing about the other."
-  (dolist (member (agent-river--map-members root))
-    (agent-river--vc-stats member)))
+  (unless (agent-river--domain-p root)
+    (dolist (member (agent-river--map-members root))
+      (agent-river--vc-stats member))))
 
 (defun agent-river--rows-vc (root nodes)
   "Return what git has to say about each of NODES under ROOT.
@@ -6504,8 +7286,14 @@ Where ROOT stands for several worktrees there is a row per tree, named
 with it, because each has its own HEAD and its own branch: `src/foo.el'
 may be ten lines further on in one and untouched in the other, and those
 are two facts rather than one fact read twice.  What the line does with
-them is `agent-river--vc-summary\=' business."
-  (let* ((members (agent-river--map-members root))
+them is `agent-river--vc-summary\=' business.
+
+Nothing for a domain section.  A diffstat is a reading of a working tree
+and a domain has none -- and answering something rather than nothing here
+is what would reserve the fixed column across the whole buffer for a
+number only half the sections could ever carry."
+  (unless (agent-river--domain-p root)
+   (let* ((members (agent-river--map-members root))
          (merged (cdr members))
          (prefix (file-name-as-directory (expand-file-name root)))
          (out (make-hash-table :test 'equal)))
@@ -6575,7 +7363,7 @@ them is `agent-river--vc-summary\=' business."
                           :text (concat said "in the main branch"))
                     rows)))))
         (when rows (puthash path (nreverse rows) out))))
-    out))
+    out)))
 
 (defun agent-river--vc-summary (rows)
   "Return the column reading for the vc ROWS of one node.
@@ -6647,7 +7435,8 @@ this says the rest somewhere else."
               :refresh #'agent-river--refresh-vc
               :summary #'agent-river--vc-summary)
         (list :name 'parties :read #'agent-river--rows-parties)
-        (list :name 'step :read #'agent-river--rows-step))
+        (list :name 'step :read #'agent-river--rows-step)
+        (list :name 'artifact :read #'agent-river--rows-artifact))
   "What may add rows under the map's nodes, in the order they are drawn.
 
 Each entry is a plist:
@@ -7137,8 +7926,22 @@ the contributed ROWS, are the reason the entry is annotated at all -- and a
 toggle by hand wins from then on.  Rows counting here is what makes them
 enrichment and detail at once: drawn where there are any, hidden by the
 same TAB that hides the files."
-  (agent-river--map-folded-p (expand-file-name (plist-get entry :name) root)
+  (agent-river--map-folded-p (agent-river--map-node-path
+                              root (plist-get entry :name))
                              (and (or (plist-get entry :files) rows) t)))
+
+(defun agent-river--map-node-path (root name)
+  "Return what identifies the line NAME draws under ROOT.
+
+Under a directory that is the absolute file name, which is what the folds,
+the contributors and `agent-river--map-here' have always compared.  Under a
+domain it is the artifact key, which is already an identity and must not be
+expanded into one -- `expand-file-name' would hand back a path under
+whatever `default-directory' happened to be, and two maps drawn from
+different buffers would then disagree about which line was which."
+  (if (agent-river--map-domain root)
+      name
+    (expand-file-name name root)))
 
 (defun agent-river--map-nodes (root entries)
   "Return the lines ENTRIES will draw under ROOT, as nodes for a contributor.
@@ -7149,7 +7952,7 @@ root, and asking again for each entry that turns out to be unfolded would
 put a subprocess behind a keystroke."
   (let (nodes)
     (dolist (entry entries)
-      (let ((path (expand-file-name (plist-get entry :name) root)))
+      (let ((path (agent-river--map-node-path root (plist-get entry :name))))
         (push (list :path path
                     :dir (plist-get entry :dir)
                     :parties (plist-get entry :parties))
@@ -7196,10 +7999,13 @@ noticed one yet would take the listing for a single checkout."
                               (list :parties (plist-get entry :parties)))
                             entries)))))
     (concat (agent-river--map-marker 1)
-            (agent-river--map-mark (if root
-                                       (agent-river--map-name
-                                        (abbreviate-file-name root))
-                                     (format "%d roots" (or roots 0)))
+            (agent-river--map-mark (cond
+                                    ((null root) (format "%d roots" (or roots 0)))
+                                    ((agent-river--map-domain root)
+                                     (agent-river--domain-label
+                                      (agent-river--map-domain root)))
+                                    (t (agent-river--map-name
+                                        (abbreviate-file-name root))))
                                    'agent-river-prompt)
             (if (and trees (> trees 1))
                 (format "  ·  %d worktrees" trees)
@@ -7309,9 +8115,12 @@ nothing."
                   (entries (nth 1 section))
                   (rows (nth 2 section)))
               (when split
-                (insert (propertize
+                (let ((domain (agent-river--map-domain root)))
+                 (insert (propertize
                          (concat (agent-river--map-line
-                                  2 (abbreviate-file-name root)
+                                  2 (if domain
+                                        (agent-river--domain-label domain)
+                                      (abbreviate-file-name root))
                                   (agent-river--map-merge-parties
                                    (mapcar (lambda (entry)
                                              (list :parties (plist-get entry :parties)))
@@ -7321,17 +8130,31 @@ nothing."
                                   (and (gethash root rows) 'open))
                                  "\n")
                          ;; A root is a place like any other line's, so RET
-                         ;; zooms into it and the motions stop on it.
-                         'agent-river-map-name (abbreviate-file-name root)
+                         ;; zooms into it and the motions stop on it.  A domain
+                         ;; is not a directory, so it zooms through its own
+                         ;; thunk rather than through `agent-river-map-descend',
+                         ;; which would expand its name into a path.
+                         'agent-river-map-name (if domain
+                                                   (agent-river--domain-label domain)
+                                                 (abbreviate-file-name root))
                          'agent-river-map-path root
-                         'agent-river-map-dir t
+                         'agent-river-map-dir (not domain)
+                         'agent-river-map-visit
+                         (and domain (lambda ()
+                                       (setq agent-river--map-root root)
+                                       (agent-river--map-draw)))
                          'agent-river-map-section t
-                         'agent-river-map-active (and entries t))))
+                         'agent-river-map-active (and entries t)))))
               (progn
                (dolist (entry entries)
                 (let* ((name (plist-get entry :name))
                        (dir (plist-get entry :dir))
-                       (path (expand-file-name name root))
+                       (path (agent-river--map-node-path root name))
+                       ;; What the line reads.  For a directory entry the key
+                       ;; *is* the name, and this is the name; for an artifact
+                       ;; the key is machinery -- `inc:INC-444' -- and the
+                       ;; record carries what to call it.
+                       (label (or (plist-get entry :shown) name))
                        (mine (gethash path rows))
                        ;; Filtered before the marker is decided, not after:
                        ;; the twisty is a promise that there is something
@@ -7341,7 +8164,7 @@ nothing."
                        (open (agent-river--map-open-p entry root shown)))
                   (insert (propertize
                            (concat (agent-river--map-line
-                                    level (concat name (if dir "/" ""))
+                                    level (concat label (if dir "/" ""))
                                     (plist-get entry :parties)
                                     (plist-get entry :missing)
                                     (agent-river--map-summary mine column)
@@ -7350,6 +8173,10 @@ nothing."
                            'agent-river-map-name name
                            'agent-river-map-path path
                            'agent-river-map-dir dir
+                           ;; Withheld where the domain offered none, because a
+                           ;; line that makes an offer has to keep it -- the
+                           ;; same bargain a place heading makes in the block.
+                           'agent-river-map-visit (plist-get entry :visit)
                            ;; Whether its children were drawn, read back by TAB.
                            ;; Off the rendering rather than derived again, so
                            ;; the toggle cannot disagree with what is on screen.
@@ -7672,6 +8499,12 @@ is the thing the eye chose."
      ((null path) (user-error "Nothing to visit on this line"))
      (dir (agent-river-map-descend path))
      ((file-exists-p path) (find-file path))
+     ;; An artifact that is not a file has nothing here to open, and saying it
+     ;; is "not on disk" would answer a question nobody asked -- it was never
+     ;; going to be.  Only its producer knows what opening one means, which is
+     ;; what `:visit' in `agent-river-map-domains' is for.
+     ((not (eq (agent-river--key-domain path) 'file))
+      (user-error "%s: nothing registered to open it with" path))
      (t (user-error "%s is not on disk" (abbreviate-file-name path))))))
 
 (defun agent-river-map-descend (dir)
