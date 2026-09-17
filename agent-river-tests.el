@@ -5378,5 +5378,382 @@ first."
     ;; And from the overview there is nowhere further out.
     (should-error (agent-river-map-up) :type 'user-error)))
 
+;;; Artifacts -- the second subject
+;;
+;; What the table has to be true of before any view reads it.  The rule these
+;; circle is the same one: a fact about the artifact belongs here, a fact about
+;; a session reaching it stays in the session, and neither is allowed to become
+;; a second account of the other.
+
+(defmacro agent-river-test--with-artifacts (&rest body)
+  "Run BODY with empty registries, empty observer lists and an empty HUD."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-artifacts (make-hash-table :test 'equal))
+         (agent-river-auto-display nil)
+         (agent-river-observers nil)
+         (agent-river-artifact-observers nil))
+     (agent-river-clear)
+     ,@body))
+
+(ert-deftest agent-river-test-an-artifact-appears-once-however-often-it-is-reported ()
+  (agent-river-test--with-artifacts
+    ;; The producer polls; the queue answers with the same ticket every pass.
+    ;; What is news is the key entering the table, not this event arriving --
+    ;; so the second call says nothing and the producer needs no list of its
+    ;; own, which is the list most likely to be the thing that is wrong.
+    (should (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"))
+    (should-not (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"))
+    (should-not (agent-river-appeared "inc:INC-444"))
+    (should (= (hash-table-count agent-river-artifacts) 1))))
+
+(ert-deftest agent-river-test-a-repeat-still-folds-what-it-carries ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :context '((severity . "P3")))
+    ;; Not news is not the same as nothing happened: the severity moved, and a
+    ;; return value about the key must not decide whether the event is folded.
+    (agent-river-appeared "inc:INC-444" :context '((severity . "P1")))
+    (let ((it (agent-river-artifact "inc:INC-444")))
+      (should (equal (alist-get 'severity (agent-river-artifact-context it)) "P1")))))
+
+(ert-deftest agent-river-test-context-merges-rather-than-replaces ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :context '((severity . "P1") (body . "disk full")))
+    (agent-river-observe-artifact '(:kind "context" :key "inc:INC-444"
+                                         :context ((severity . "P2"))))
+    (let ((context (agent-river-artifact-context (agent-river-artifact "inc:INC-444"))))
+      ;; A producer that has learned one thing should not have to resend
+      ;; everything it knew before; made to, it eventually sends a shorter
+      ;; list by accident and drops the rest silently.
+      (should (equal (alist-get 'severity context) "P2"))
+      (should (equal (alist-get 'body context) "disk full")))))
+
+(ert-deftest agent-river-test-an-ended-artifact-keeps-its-record ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :name "INC-444" :context '((severity . "P1")))
+    (agent-river-note-artifact "inc:INC-444" "paged the on-call")
+    (agent-river-ended "inc:INC-444")
+    (let ((it (agent-river-artifact "inc:INC-444")))
+      ;; The ending is itself a thing that happened -- the same reading the map
+      ;; takes of a deleted file, which it strikes through rather than drops.
+      (should (agent-river-artifact-gone it))
+      (should (agent-river-artifact-gone-at it))
+      (should (equal (agent-river-artifact-name it) "INC-444"))
+      (should (= (length (agent-river-artifact-notes it)) 1)))))
+
+(ert-deftest agent-river-test-an-artifact-that-comes-back-is-open-again ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444")
+    (agent-river-ended "inc:INC-444")
+    (agent-river-appeared "inc:INC-444")
+    ;; A ticket that was resolved and has been reopened is open.  A record that
+    ;; went on saying otherwise would be wrong in the direction that matters,
+    ;; which is why this follows `agent-river--anchor' in dropping the stale
+    ;; answer rather than keeping it.
+    (should-not (agent-river-artifact-gone (agent-river-artifact "inc:INC-444")))
+    (should-not (agent-river-artifact-gone-at (agent-river-artifact "inc:INC-444")))))
+
+(ert-deftest agent-river-test-the-artifact-table-is-not-a-mirror-of-the-sessions ()
+  (agent-river-test--with-artifacts
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :file "a.el" :path "/repo/a.el" :detail "Edit a.el"))
+    ;; A file an agent touched needs no record here: the session's own table
+    ;; already says everything true of it, and a second copy is only a way for
+    ;; the two to disagree.  What belongs here is what the event stream could
+    ;; never have produced.
+    (should (zerop (hash-table-count agent-river-artifacts)))
+    (should (agent-river-touching "/repo/a.el"))))
+
+(ert-deftest agent-river-test-reaching-counts-in-both-frames-and-costs-no-step ()
+  (agent-river-test--with-artifacts
+    (let ((state (agent-river-state "s1" "alpha")))
+      (agent-river-fold state '(:kind "prompt" :text "look at the incident"))
+      (agent-river-reach "inc:INC-444" "s1")
+      ;; The edge is folded like any other measurement, so everything that
+      ;; reads the artifact tables sees it without being taught anything.
+      (should (gethash "inc:INC-444" (agent-river-state-artifacts state)))
+      (should (gethash "inc:INC-444" (agent-river-state-task-artifacts state)))
+      ;; And no tool ran.  A step count inflated here would be wrong in every
+      ;; reading taken from it, to exactly the extent this is used.
+      (should (zerop (agent-river-state-steps state)))
+      (should-not (agent-river-state-step state)))))
+
+(ert-deftest agent-river-test-reaching-is-answerable-by-key-not-by-basename ()
+  (agent-river-test--with-artifacts
+    (agent-river-state "s1" "alpha")
+    (agent-river-state "s2" "beta")
+    (agent-river-reach "inc:INC-444" "s1")
+    (agent-river-reach "inc:INC-444" "s2" t)
+    (let ((hits (agent-river-reaching "inc:INC-444" 'session)))
+      ;; Two agents on one incident is the case worth seeing, and it is the
+      ;; same reading `agent-river-touching' gives one subject over.
+      (should (= (length hits) 2))
+      (should (= (plist-get (cdr (assoc "s2" hits)) :writes) 1))
+      (should (zerop (plist-get (cdr (assoc "s1" hits)) :writes))))
+    (should-not (agent-river-reaching "inc:INC-999" 'session))))
+
+(ert-deftest agent-river-test-reaching-without-a-session-refuses ()
+  (agent-river-test--with-artifacts
+    ;; Rather than inventing one.  Hanging the edge on whichever session acted
+    ;; last is the guess this whole table exists to stop being forced into.
+    (should-error (agent-river-reach "inc:INC-444" "nobody") :type 'user-error)
+    (should-error (agent-river-reach "" "s1") :type 'user-error)))
+
+(ert-deftest agent-river-test-an-artifact-observer-sees-the-artifact ()
+  (agent-river-test--with-artifacts
+    (let (seen)
+      (add-hook 'agent-river-artifact-observers
+                (lambda (artifact event) (push (cons artifact event) seen)))
+      (add-hook 'agent-river-observers
+                (lambda (_state _event) (error "a session observer must not run here")))
+      (agent-river-appeared "inc:INC-444" :name "INC-444" :text "INC-444 routed to you")
+      (should (= (length seen) 1))
+      ;; Already folded when the observer runs, like a session's.
+      (should (equal (agent-river-artifact-name (car (car seen))) "INC-444"))
+      ;; And the two hooks are separate, so no consumer has to begin by asking
+      ;; which kind of subject it was handed.
+      (should (equal (plist-get (cdr (car seen)) :kind) "appear")))))
+
+(ert-deftest agent-river-test-a-throwing-artifact-observer-retires-like-any-other ()
+  (agent-river-test--with-artifacts
+    (let ((calls 0))
+      (add-hook 'agent-river-artifact-observers
+                (lambda (_artifact _event) (setq calls (1+ calls)) (error "boom")))
+      (agent-river-appeared "inc:INC-1")
+      (agent-river-appeared "inc:INC-2")
+      ;; One runner, so the three rules a consumer inherits are the same three
+      ;; whichever subject it hangs off -- and there is no second copy of them
+      ;; for one to be forgotten in.
+      (should (= calls 1))
+      (should-not agent-river-artifact-observers)
+      (should (string-match-p "observer .* retired" (agent-river-test--hud))))))
+
+(ert-deftest agent-river-test-an-artifact-event-reaches-no-agent ()
+  (agent-river-test--with-artifacts
+    (add-hook 'agent-river-artifact-observers
+              (lambda (_artifact _event) "agent-river: do something else"))
+    ;; Signals travel back through `agent-river-observe' alone.  An artifact
+    ;; has no session to answer, which is the whole case it exists for.
+    (should (agent-river-appeared "inc:INC-444"))
+    (should-not (agent-river-appeared "inc:INC-444"))))
+
+(ert-deftest agent-river-test-dropping-an-artifact-leaves-the-edge-standing ()
+  (agent-river-test--with-artifacts
+    (agent-river-state "s1" "alpha")
+    (agent-river-appeared "inc:INC-444")
+    (agent-river-reach "inc:INC-444" "s1")
+    (agent-river-drop-artifact "inc:INC-444")
+    (should (zerop (hash-table-count agent-river-artifacts)))
+    ;; The session reached it, and that stays true whatever became of the thing
+    ;; at the other end.  Clearing it from here would reach into a state this
+    ;; command is not about.
+    (should (agent-river-reaching "inc:INC-444" 'session))))
+
+(ert-deftest agent-river-test-forgetting-artifacts-keeps-the-subjects ()
+  (agent-river-test--with-artifacts
+    (agent-river-state "s1" "alpha")
+    (agent-river-appeared "inc:INC-444")
+    (agent-river-reach "inc:INC-444" "s1")
+    (agent-river-forget-artifacts)
+    ;; The two commands are opposite gestures: this one drops the record of
+    ;; where the work was, and keeps what the work was about.
+    (should-not (agent-river-reaching "inc:INC-444" 'session))
+    (should (agent-river-artifact-known-p "inc:INC-444"))))
+
+(ert-deftest agent-river-test-reset-forgets-both-tables ()
+  (agent-river-test--with-artifacts
+    (agent-river-state "s1" "alpha")
+    (agent-river-appeared "inc:INC-444")
+    (agent-river-reset)
+    ;; The big hammer, for when a struct change has left every record short a
+    ;; slot -- and an artifact record can be as short of one as a session's.
+    (should (zerop (hash-table-count agent-river-registry)))
+    (should (zerop (hash-table-count agent-river-artifacts)))))
+
+(ert-deftest agent-river-test-artifacts-list-says-what-is-known-and-who-reached-it ()
+  (agent-river-test--with-artifacts
+    (agent-river-state "s1" "alpha")
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"
+                          :context '((severity . "P1")))
+    (agent-river-appeared "rev:pr-12" :domain 'review :name "PR 12")
+    (agent-river-reach "inc:INC-444" "s1")
+    (let ((all (agent-river-artifacts-list))
+          (inc (agent-river-artifacts-list 'inc)))
+      (should (= (length all) 2))
+      ;; Narrowed by domain, because only the producer of a domain knows what
+      ;; its keys mean and it should not have to filter the others out itself.
+      (should (= (length inc) 1))
+      (should (equal (plist-get (car inc) :name) "INC-444"))
+      (should (= (plist-get (car inc) :reached) 1))
+      (should (equal (alist-get 'severity (plist-get (car inc) :context)) "P1")))))
+
+(ert-deftest agent-river-test-an-artifact-line-is-its-own-kind ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :text "INC-444 routed to you")
+    ;; Its own glyph, because it is its own subject: every other kind in the
+    ;; log is an agent doing or being told something, and this is true whether
+    ;; or not any agent ever looks at it.
+    (should (string-match-p "◎" (agent-river-test--hud)))
+    (should (string-match-p "INC-444 routed to you" (agent-river-test--hud)))))
+
+;;; Domains -- a section that is not a directory
+;;
+;; The map's second reading of the artifact tables.  What these hold is the
+;; line between the two: a file key is placed against a cwd, a declared key is
+;; placed by its domain, and neither placement may ever be applied to the other
+;; kind -- which is the mistake that made `inc:INC-444' into a file in a repo.
+
+(defmacro agent-river-test--with-domain (&rest body)
+  "Run BODY with empty registries and the map's own subprocesses off."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-artifacts (make-hash-table :test 'equal))
+         (agent-river-auto-display nil)
+         (agent-river-map-domains nil)
+         (agent-river-map-vc nil)
+         (agent-river-map-dirty nil)
+         (agent-river--map-root nil)
+         (agent-river--map-folds nil))
+     ,@body))
+
+(defun agent-river-test--domain-map ()
+  "Draw the map and return it as text."
+  (agent-river-map)
+  (with-current-buffer agent-river-map-buffer-name
+    (prog1 (buffer-substring-no-properties (point-min) (point-max))
+      (kill-buffer))))
+
+(ert-deftest agent-river-test-a-declared-key-is-not-a-file-in-the-cwd ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (agent-river-state "s1" "alpha")
+    (agent-river-fold (gethash "s1" agent-river-registry)
+                      '(:kind "touch" :file "inc:INC-444" :cwd "/repo"))
+    (let ((entry (list :cwd "/repo" :file "inc:INC-444")))
+      ;; Resolved against the cwd this became `/repo/inc:INC-444' -- a name in a
+      ;; tree it has nothing to do with, which every view downstream would then
+      ;; draw, shade and eventually offer to delete as a missing file.
+      (should-not (agent-river--heat-absolute entry))
+      ;; But it still has an identity, which is what the map needs of it.
+      (should (equal (agent-river--heat-place entry) "inc:INC-444")))
+    ;; An ordinary key is untouched by any of this.
+    (should (equal (agent-river--heat-absolute '(:cwd "/repo" :file "a.el"))
+                   "/repo/a.el"))))
+
+(ert-deftest agent-river-test-a-domain-is-read-off-the-table-not-the-key ()
+  (agent-river-test--with-domain
+    (should (eq (agent-river--key-domain "inc:INC-444") 'file))
+    (agent-river-appeared "inc:INC-444" :domain 'inc)
+    (should (eq (agent-river--key-domain "inc:INC-444") 'inc))
+    ;; A prefix rule would have to decide what this means, and would answer for
+    ;; keys nobody ever declared.  Undeclared is `file', always.
+    (should (eq (agent-river--key-domain "c:/tmp/x") 'file))
+    (should (eq (agent-river--key-domain nil) 'file))))
+
+(ert-deftest agent-river-test-a-domain-gets-a-section-without-being-registered ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444 disk full")
+    (let ((map (agent-river-test--domain-map)))
+      ;; Something that has arrived must not wait for configuration before it
+      ;; can be seen, which is the failure mode of every dashboard that has to
+      ;; be taught about a new source.
+      (should (string-match-p "Inc" map))
+      (should (string-match-p "INC-444 disk full" map)))))
+
+(ert-deftest agent-river-test-a-registered-domain-is-named-and-opened-its-own-way ()
+  (agent-river-test--with-domain
+    (let (opened)
+      (setq agent-river-map-domains
+            (list (cons 'inc (list :label "Incidents"
+                                   :visit (lambda (key) (setq opened key))))))
+      (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+      (should (string-match-p "Incidents" (agent-river-test--domain-map)))
+      ;; Only the producer knows what opening one means.
+      (funcall (agent-river--domain-visit 'inc "inc:INC-444"))
+      (should (equal opened "inc:INC-444")))))
+
+(ert-deftest agent-river-test-an-unreached-artifact-is-still-listed ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-501" :domain 'inc :name "INC-501 nobody on it")
+    ;; The opposite of what `agent-river-map-untouched' decides for a tree, and
+    ;; deliberately: there the unreached entries are the rest of the disk, here
+    ;; an unreached record is a thing nobody has picked up, which is the single
+    ;; most important line this view can carry.
+    (should-not agent-river-map-untouched)
+    (should (string-match-p "INC-501 nobody on it" (agent-river-test--domain-map)))))
+
+(ert-deftest agent-river-test-an-artifact-carries-its-own-context-onto-the-map ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"
+                          :context '((severity . "P1") (queue . "infra")))
+    (let ((map (agent-river-test--domain-map)))
+      ;; Rendered as they arrived: this package has never read a value out of a
+      ;; context and does not start here, which is what lets a record hold a
+      ;; severity, a body and a URL without this file learning about any.
+      (should (string-match-p "severity: P1" map))
+      (should (string-match-p "queue: infra" map)))))
+
+(ert-deftest agent-river-test-an-agent-on-an-artifact-is-named-under-it ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (agent-river-state "s1" "alpha")
+    (agent-river-reach "inc:INC-444" "s1")
+    (let ((map (agent-river-test--domain-map)))
+      ;; The association falls out of the ordinary parties derivation, which is
+      ;; the point of the edge being a touch rather than a concept of its own.
+      (should (string-match-p "alpha" map))
+      (should (string-match-p agent-river-map-here-marker map)))))
+
+(ert-deftest agent-river-test-an-ended-artifact-is-struck-through-not-dropped ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (agent-river-ended "inc:INC-444")
+    (let* ((entries (agent-river--domain-entries "inc:" 'session)))
+      ;; The same rendering a deleted file gets, saying the same thing: this was
+      ;; worked on and is over, which is history and stays until somebody says
+      ;; otherwise.
+      (should (= (length entries) 1))
+      (should (plist-get (car entries) :missing)))))
+
+(ert-deftest agent-river-test-a-domain-section-asks-git-nothing ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    ;; Run over a name that is not a path, git would be answering about
+    ;; whatever directory Emacs happened to be in.
+    (should-not (agent-river--rows-vc "inc:" '((:path "inc:INC-444"))))
+    (should-not (agent-river--refresh-vc "inc:" nil))
+    (should (agent-river--domain-p "inc:"))
+    (should-not (agent-river--domain-p "/repo"))))
+
+(ert-deftest agent-river-test-a-domain-line-is-identified-by-its-key ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    ;; Expanded, the identity would depend on whatever `default-directory' was,
+    ;; and two maps drawn from different buffers would disagree about which
+    ;; line was which.
+    (should (equal (agent-river--map-node-path "inc:" "inc:INC-444") "inc:INC-444"))
+    (should (equal (agent-river--map-node-path "/repo" "a.el") "/repo/a.el"))))
+
+(ert-deftest agent-river-test-a-domain-sorts-by-what-happened-in-it ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (let ((roots (agent-river--map-domain-roots 'session)))
+      ;; A queue with nothing assigned to it is still a queue that just
+      ;; received something; ordered by what agents did, it would sink below
+      ;; every tree somebody is typing in -- backwards for the case this is for.
+      (should (equal (mapcar #'car roots) '("inc:")))
+      (should (cdr (car roots))))))
+
+(ert-deftest agent-river-test-forgetting-gone-files-spares-a-declared-key ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (let ((state (agent-river-state "s1" "alpha")))
+      (agent-river-fold state '(:kind "touch" :file "inc:INC-444" :cwd "/repo"))
+      ;; Placed against the cwd it would look like a file that is not there, and
+      ;; a command that sweeps missing files would take the incident with it.
+      ;; Unplaceable is not gone, which `agent-river--artifact-gone-p' already
+      ;; said in words and now says for a second reason.
+      (should-not (agent-river--artifact-gone-p state "inc:INC-444")))))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here
