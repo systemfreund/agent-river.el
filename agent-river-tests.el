@@ -5755,6 +5755,106 @@ first."
       ;; said in words and now says for a second reason.
       (should-not (agent-river--artifact-gone-p state "inc:INC-444")))))
 
+;;; A record arriving, and the views that have to hear about it
+;;
+;; The artifact table exists for what matters while no session is running --
+;; which is also when nothing else marks the map dirty, and when its redraw
+;; timer has retired for want of anything to draw.  So the arrival has to
+;; carry itself to the view, and whatever it carries has to be safe to put in
+;; a Markdown buffer: a record's name is the first name on the map that this
+;; package did not make up.
+
+(defmacro agent-river-test--with-open-map (&rest body)
+  "Run BODY with the map open, and kill it afterwards whatever happens."
+  (declare (indent 0))
+  `(let ((agent-river-observers nil)
+         (agent-river-artifact-observers nil)
+         (agent-river--map-dirty nil))
+     (agent-river-map)
+     (unwind-protect (progn ,@body)
+       (when (get-buffer agent-river-map-buffer-name)
+         (kill-buffer agent-river-map-buffer-name)))))
+
+(defun agent-river-test--map-says-p (text)
+  "Return non-nil when the open map names TEXT."
+  (with-current-buffer agent-river-map-buffer-name
+    (save-excursion
+      (goto-char (point-min))
+      (and (search-forward text nil t) t))))
+
+(ert-deftest agent-river-test-an-arriving-artifact-marks-the-map-dirty ()
+  (agent-river-test--with-domain
+    (agent-river-test--with-open-map
+      (setq agent-river--map-dirty nil)
+      (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+      ;; On `agent-river-observers' alone this stayed nil.  A tree changes
+      ;; because an agent did something, so that hook keeps a listing current;
+      ;; an incident arriving changes the map with no event on it at all, and
+      ;; the timer that would have redrawn anyway retires as soon as nothing
+      ;; is dirty and nothing is cooling.
+      (should agent-river--map-dirty))))
+
+(ert-deftest agent-river-test-killing-the-map-leaves-both-streams ()
+  (agent-river-test--with-domain
+    (agent-river-test--with-open-map
+      (should (memq #'agent-river--map-observe agent-river-observers))
+      (should (memq #'agent-river--map-observe agent-river-artifact-observers))
+      (kill-buffer agent-river-map-buffer-name)
+      ;; One gesture on and the same gesture off, both hooks.  Left on one of
+      ;; them, a retired consumer throws again on the first event of the kind
+      ;; it was still subscribed to.
+      (should-not (memq #'agent-river--map-observe agent-river-observers))
+      (should-not (memq #'agent-river--map-observe
+                        agent-river-artifact-observers)))))
+
+(ert-deftest agent-river-test-a-forgotten-artifact-leaves-the-map-at-once ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444 disk full")
+    (agent-river-test--with-open-map
+      (should (agent-river-test--map-says-p "INC-444 disk full"))
+      (agent-river-drop-artifact "inc:INC-444")
+      ;; Drawn rather than marked dirty, like every other forget: removing a
+      ;; subject folds no event, so the hook above never hears of it, and
+      ;; between turns there is no timer waiting to act on a flag.
+      (should-not (agent-river-test--map-says-p "INC-444 disk full")))))
+
+(ert-deftest agent-river-test-a-record-name-cannot-restructure-the-map ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-9" :domain 'inc
+                          :name "Fix `foo` in *bar*\n## injected")
+    (agent-river-test--with-open-map
+      (with-current-buffer agent-river-map-buffer-name
+        (goto-char (point-min))
+        ;; One record is one line.  The newline used to make one entry and one
+        ;; stray heading, and the stray carried none of the properties the
+        ;; motions and `agent-river--map-here' read -- which is the same
+        ;; failure a contributed row is held to one line to prevent.
+        (should (search-forward "injected" nil t))
+        (should (get-text-property (line-beginning-position)
+                                   'agent-river-map-path))
+        (goto-char (point-min))
+        (should-not (re-search-forward "^## injected" nil t))
+        ;; And the name cannot close the span it is sitting in: the backtick
+        ;; in it ended the code span, which italicised the rest of the line.
+        (goto-char (point-min))
+        (should (search-forward "`` Fix `foo` in *bar* ## injected ``" nil t))))))
+
+(ert-deftest agent-river-test-a-name-is-fenced-long-enough-to-hold-it ()
+  ;; The map is Markdown on the condition that every token in it is ours, and
+  ;; a record's name is the first one that is not.  Same answer the export
+  ;; already takes for the two values the agent wrote.
+  (should (equal (agent-river--map-name "a`b") "`` a`b ``"))
+  (should (equal (agent-river--map-name "one\ntwo") "`one two`")))
+
+(ert-deftest agent-river-test-point-lands-past-the-whole-fence ()
+  (with-temp-buffer
+    (insert "##    " (agent-river--map-name "a`b") "\n")
+    (goto-char (point-min))
+    (agent-river--map-beginning-of-name)
+    ;; Point lands on the name, never on markup -- and the first backtick is
+    ;; markup in exactly the case the longer fence exists for.
+    (should (looking-at-p "a`b"))))
+
 ;;; The cost of a redraw
 ;;
 ;; The map redraws on a timer into a buffer somebody is reading, so the

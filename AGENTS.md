@@ -23,7 +23,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (359 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (369 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -302,7 +302,14 @@ These are load-bearing; the tests enforce most of them.
   same three rules. Separate because the subject differs: one hook carrying
   either kind would make every consumer begin by asking which it had been
   handed, and one that forgot to ask would be wrong only for the events it
-  saw least often.
+  saw least often. **A consumer that never reads its subject sits on both**,
+  which is the map (`agent-river--map-observe`, ignoring both arguments and
+  redrawing from the tables): subscribed to the session hook alone it drew
+  nothing for a record that arrived while no agent was running — the case
+  the table exists for, and so the case the view was blindest to. That is
+  the exception the split allows rather than a hole in it, and the price is
+  that the retirement has to leave both hooks, since the runner removes a
+  thrower only from the one it threw on.
 - **One session, one way in** (`agent-river--claim`). The hooks and the
   agent-shell stream describe the same session, so folding both counts every
   step twice — and a doubled failure streak states a fact that is false, to the
@@ -385,7 +392,12 @@ What a consumer must respect:
   moves point under whoever is reading it, thousands of times a task. The
   observer marks dirty and ensures the timer (`agent-river--map-observe`); the
   timer decides how often dirt is worth acting on, and retires itself when
-  there is neither dirt nor anything left to cool.
+  there is neither dirt nor anything left to cool. **Which is why anything
+  that changes the view without folding an event has to draw**, not mark:
+  between turns the timer is not running, so a flag is a redraw that never
+  happens. `agent-river--forget-reported` is where that is decided for every
+  command that removes a subject — the two artifact ones included, since
+  dropping a record folds nothing an observer could hear.
 - **Test the derivation, not the rendering.** Frame choice, aggregation and
   thresholds are pure functions of the state; geometry is the host package's
   problem. The contract tests live under `;;; Observers` — point a new
@@ -1225,9 +1237,26 @@ step. Four things the Markdown base forces:
   view mode's default and reads better on prose, but here the marker *is* the
   indentation — hidden, a directory and the files under it start in the same
   column and the tree stops being one.
-- **Names are code spans.** A path is what a code span is for, and inline
+- **Names are code spans, fenced and on one line**
+  (`agent-river--map-name`). A path is what a code span is for, and inline
   markup does not apply inside one; bare, `foo_bar_baz.el` renders with `bar`
-  in italics and the underscores eaten.
+  in italics and the underscores eaten. That holds only for as long as the
+  name cannot close the span it sits in, and **a name stopped being ours the
+  moment a record could carry one**: an artifact's is a ticket title from
+  whoever declared it, and `Fix ``foo`` in *bar*` ended the span at its first
+  backtick and italicised the rest of the line. So the fence is measured
+  (`agent-river--md-code`, the export's answer) and the text is held to one
+  line (`agent-river--map-one-line`, the rule a contributed row already
+  owes) — a newline made one entry and one stray, and the stray carried none
+  of the properties the motions and `agent-river--map-here` read. Fixed in
+  the one place every name goes through rather than beside the record that
+  made it likely, so a path with a backtick in it is covered by the same
+  change; `agent-river--map-beginning-of-name` steps over the whole fence
+  for the same reason, or point lands on markup in exactly the case the
+  longer fence exists for. The **rows** were escaped from the start
+  (`agent-river--md-escape`) and the **name was the hole beside them** —
+  when the next piece of foreign text arrives on this buffer, this is the
+  question to ask of it first.
 - **`outline-minor-mode-cycle` is off.** It puts a `keymap` text property on
   every heading that wins over the mode map and swallows TAB — but the real
   reason is that its fold lives in overlays, and this buffer is rebuilt every

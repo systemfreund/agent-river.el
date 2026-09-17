@@ -370,6 +370,13 @@ answer to one question: *who is the subject?*
 | annotate the map's lines | `agent-river-map-contributors` | a path or key |
 | say where a session belongs | `agent-river-panel-place-functions` | a session |
 
+The two observer hooks are separate so that a consumer never has to begin by
+asking which kind of subject it was handed. A consumer that reads no subject at
+all — it redraws from the tables, or it only wants to know that something moved
+— may sit on both, as the map does; if you do that, make sure your teardown
+leaves both, because the runner retires a throwing consumer only from the hook
+it threw on.
+
 ```
 hooks → fold → observers → outside world      consumer
 Emacs → note → fold → observers               producer
@@ -547,7 +554,7 @@ emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 
-359 tests, ~0.3 s. The contract tests for the extension points live in `agent-river-tests.el`
+369 tests, ~0.3 s. The contract tests for the extension points live in `agent-river-tests.el`
 under `;;; Observers`, `;;; Artifacts` and `;;; Domains` — point a new consumer
 at those rather than writing the guard tests again. Useful helpers:
 `agent-river-test--with-session`, `--with-observers`, `--with-artifacts`,
