@@ -3646,6 +3646,48 @@ half of what it shows is what is on disk and untouched."
           (should-not (plist-get (nth 3 entries) :dir))
           (should-not (plist-get (car entries) :parties)))))))
 
+(ert-deftest agent-river-test-a-directory-reached-by-name-is-not-a-file-under-itself ()
+  ;; `path' is what Grep and Glob call their argument and
+  ;; `agent-river--tool-file' reads it like any other, so an artifact key
+  ;; names a directory as soon as an agent searches one.  That key grouped
+  ;; under the entry with nothing below it -- a node with a nil `:rel' --
+  ;; and the entry was a directory, so the node was kept as one of its
+  ;; files.  Every reader resolves a file's `:rel' against its entry, so the
+  ;; next draw died with `stringp, nil' and so did every one after it.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :tool "Grep" :cwd root
+                                      :file "common"))
+        (let ((entries (agent-river--map-entries root)))
+          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
+                         '("common")))
+          ;; The touch is the entry's own, and it is counted there.
+          (should (plist-get (car entries) :parties))
+          (should-not (plist-get (car entries) :files))
+          ;; Which is what the draw and the contributors read.
+          (should (equal (mapcar (lambda (n) (plist-get n :path))
+                                 (agent-river--map-nodes root entries))
+                         (list (expand-file-name "common" root)))))))))
+
+(ert-deftest agent-river-test-a-missing-directory-reached-by-name-keeps-its-files ()
+  ;; The same node, on the orphan side: a directory the disk does not have,
+  ;; reached both by name and through a file inside it.  Its own node still
+  ;; is not one of its files, and the file below it still is.
+  (let ((agent-river-heat-half-life nil)
+        (agent-river-map-untouched nil))
+    (agent-river-test--with-tree root
+      (agent-river-test--with-session state
+        (agent-river-fold state (list :kind "act" :cwd root :file "gone"))
+        (agent-river-fold state (list :kind "act" :cwd root :file "gone/a.el"))
+        (let ((entry (car (agent-river--map-entries root))))
+          (should (equal (plist-get entry :name) "gone"))
+          (should (plist-get entry :missing))
+          (should (equal (mapcar (lambda (f) (plist-get f :rel))
+                                 (plist-get entry :files))
+                         '("a.el"))))))))
+
 (defun agent-river-test--cool (state path seconds)
   "Back-date STATE's touches of PATH by SECONDS, in both frames.
 The weighting is recomputed from `:last' on every read, so aging a touch

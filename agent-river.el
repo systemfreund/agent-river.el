@@ -5901,6 +5901,24 @@ backup a repository happens not to ignore would earn a line."
              table))))
       (sort (delete-dups paths) #'string<))))
 
+(defun agent-river--map-beneath (under)
+  "Return the nodes of UNDER that name something below the entry, not the entry.
+
+A node with a nil `:rel\=' is the entry\='s own line -- a path reached at the
+entry itself rather than inside it -- and it is already accounted for in
+the entry\='s parties, which is where a touch on the entry belongs.
+
+Every reader of a file node resolves its `:rel\=' against the entry
+\(`agent-river--map-nodes\=', and the draw), so a nil one is not a blank
+line but a `stringp, nil\=' that takes the whole map down on that draw and
+on every one after it.  The nil-`:rel\=' node used to be dropped only for a
+file entry, on the assumption that a reached path is always a file; a
+directory is reached by name whenever a tool names one -- `path\=' is what
+Grep and Glob call their argument and `agent-river--tool-file\=' reads it
+like any other -- and that directory is in the listing, so the entry was
+a directory with a node of its own among its files."
+  (seq-filter (lambda (node) (plist-get node :rel)) under))
+
 (defun agent-river--map-entries (root &optional scope)
   "Return ROOT's listing, annotated with what the agents have done in it.
 
@@ -5961,27 +5979,29 @@ the entries that matter."
           (push (list :rel under :parties nil) (gethash top grouped)))))
     (dolist (name names)
       (let* ((under (nreverse (gethash name grouped)))
+             (files (agent-river--map-beneath under))
              (dir (agent-river--map-dir-p root name)))
         (remhash name grouped)
         (push (list :name name
                     :dir dir
                     :parties (agent-river--map-merge-parties under)
-                    ;; A file entry's own node comes through the grouping
-                    ;; with a nil `:rel'; there is nothing to unfold under it.
-                    :files (and dir under)
+                    ;; The entry's own node is not a file under it, whether
+                    ;; the entry is a file or a directory an agent reached by
+                    ;; name -- see `agent-river--map-beneath'.
+                    :files (and dir files)
                     :changed (gethash name changed))
               entries)))
     (let (orphans)
       (maphash (lambda (name under)
                  (setq under (nreverse under))
-                 (push (list :name name
-                             :dir (seq-some (lambda (n) (plist-get n :rel)) under)
-                             :parties (agent-river--map-merge-parties under)
-                             :files (and (seq-some (lambda (n) (plist-get n :rel)) under)
-                                         under)
-                             :changed (gethash name changed)
-                             :missing t)
-                       orphans))
+                 (let ((files (agent-river--map-beneath under)))
+                   (push (list :name name
+                               :dir (and files t)
+                               :parties (agent-river--map-merge-parties under)
+                               :files files
+                               :changed (gethash name changed)
+                               :missing t)
+                         orphans)))
                grouped)
       (let ((all (append (nreverse entries)
                          (sort orphans (lambda (a b)
