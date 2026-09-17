@@ -1507,12 +1507,32 @@ together:
 - Tests are named as sentences (`agent-river-test-waiting-outranks-blocked`) and
   assert the reason, not just the value. Helpers: `agent-river-test--with-session`,
   `--fail`, `--acts`, `--payload`, `--with-shell`.
+- **Subject** means what an event is folded onto: an `agent-river-state` or an
+  `agent-river-artifact`. There are exactly two, and each has the same five
+  things — a struct, a fold, a registry, an observer hook and an entry point.
+  Anything else keyed in a hash here is a side table for a current-state fact,
+  queried where it is read rather than folded, and is not a subject however
+  much it looks like one. Where a rule turns on the word, this is what it
+  means. Two subjects is not a
+  reason to unify anything: the scaffolding that exists per subject is
+  duplicated *because* the subjects differ, which is what makes them two.
 - **Merge only where there is something to merge.** Sameness of *form* is what
-  tempts; sameness of *subject* is what licenses. Two things that compute alike
-  but answer different questions are two things, and folding them together
-  performs a change nobody asked for while wearing the clothes of the one that
-  was. The test is not how many callers there are: a count is a threshold, and
-  a threshold decides by arithmetic what has to be decided by looking. Ask
-  instead what each caller is *for*, and where they part, leave them apart and
-  say why. First paid for by the map's worktree grouping, where the concrete
-  case is written out.
+  tempts; sameness of the *question answered* is what licenses. Two things that
+  compute alike but answer different questions are two things, and folding them
+  together performs a change nobody asked for while wearing the clothes of the
+  one that was. The test is not how many callers there are: a count is a
+  threshold, and a threshold decides by arithmetic what has to be decided by
+  looking. Ask instead what each caller is *for*, and where they part, leave
+  them apart and say why. First paid for by the map's worktree grouping, where
+  the concrete case is written out.
+
+  Deliberately not phrased as "the same subject", though that is the shorter
+  word: **subject** is taken, and by the thing most likely to be confused with
+  this — two functions can share one and still answer different questions. That
+  is exactly the trap here. `agent-river--map-reach` and
+  `agent-river--map-merge-parties` are both about sessions, compute the same
+  arithmetic over the same cell shape, and answer *is this the file the party
+  touched last* versus *is the agent anywhere beneath this directory*. Read as
+  "same subject", the rule licenses folding them together; read as written, it
+  forbids it. `agent-river--parties-by` is what the rule did allow, and the
+  seam beside it is what it did not.
