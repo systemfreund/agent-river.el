@@ -296,7 +296,7 @@ to prevent. Note what happened, never what you think about it.
 
 (agent-river-artifacts-list 'inc)
 ;; ((:key "inc:INC-444" :domain inc :name "…" :context ((severity . "P1"))
-;;   :gone nil :appeared "4m" :notes 0 :reached 1))
+;;   :gone nil :appeared "4m" :ago "20s" :notes 0 :reached 1))
 
 (agent-river-domains)                   ; which domains are in play
 ;; (inc review file)
@@ -569,7 +569,7 @@ emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 
-377 tests, ~0.3 s. The contract tests for the extension points live in `agent-river-tests.el`
+383 tests, ~0.3 s. The contract tests for the extension points live in `agent-river-tests.el`
 under `;;; Observers`, `;;; Artifacts` and `;;; Domains` — point a new consumer
 at those rather than writing the guard tests again. Useful helpers:
 `agent-river-test--with-session`, `--with-observers`, `--with-artifacts`,

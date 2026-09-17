@@ -1137,6 +1137,16 @@ One hook carrying either an `agent-river-state' or an
 had been handed, and a consumer that forgot to ask would be wrong only for
 the events it saw least often.")
 
+(defun agent-river--artifact-key (event)
+  "Return EVENT\='s :key, or refuse to address a record with nothing.
+A function rather than a guard inside `agent-river-observe-artifact\=', so
+the check comes before `agent-river-artifact\=' has created the record the
+check is about -- which is in the binding list, one line down."
+  (let ((key (plist-get event :key)))
+    (if (or (null key) (string-empty-p key))
+        (user-error "No artifact key to record")
+      key)))
+
 (defun agent-river-observe-artifact (event)
   "Fold EVENT about an artifact, render it, and say whether the key was new.
 
@@ -1155,8 +1165,13 @@ thing being delivered twice.
 
 Nothing here can reach the agent.  Signals travel back through
 `agent-river-observe' alone, and an artifact has no session to answer --
-which is the whole case this table exists for."
-  (let* ((key (plist-get event :key))
+which is the whole case this table exists for.
+
+An empty :key is refused, the way `agent-river-reach\=' refuses one.  A
+record under no key is addressable by nobody -- it cannot be reached,
+found, ended or dropped, and it would head a map section answering to
+nothing -- so the producer\='s mistake is better said than kept."
+  (let* ((key (agent-river--artifact-key event))
          (fresh (not (agent-river-artifact-known-p key)))
          (artifact (agent-river-artifact key
                                          (plist-get event :domain)
@@ -1348,25 +1363,36 @@ The context comes back as a copy.  What is handed out here is a reading
 taken at a moment, and a reading that goes on tracking its subject is not
 one -- nor may a caller\='s `setcdr\=' reach into a record the fold is
 supposed to own alone."
-  (let (out)
-    (maphash
-     (lambda (_key artifact)
-       (when (or (null domain) (eq (agent-river-artifact-domain artifact) domain))
-         (push (list :key (agent-river-artifact-key artifact)
+  (let (records out)
+    (maphash (lambda (_key artifact)
+               (when (or (null domain)
+                         (eq (agent-river-artifact-domain artifact) domain))
+                 (push artifact records)))
+             agent-river-artifacts)
+    ;; Sorted on the records and rendered afterwards.  It used to sort the
+    ;; plists, which meant carrying a raw timestamp out in `:last' beside a
+    ;; formatted `:appeared' -- one list, two ways of saying when, and the
+    ;; only reason for the odd one out was this comparison.  `:ago' is the
+    ;; word `agent-river-touching' and `agent-river-reaching' already use.
+    (dolist (artifact (sort records
+                            (lambda (a b)
+                              (time-less-p (agent-river-artifact-last b)
+                                           (agent-river-artifact-last a)))))
+      (push (list :key (agent-river-artifact-key artifact)
                      :domain (agent-river-artifact-domain artifact)
                      :name (agent-river-artifact-name artifact)
                      :context (copy-alist (agent-river-artifact-context artifact))
                      :gone (and (agent-river-artifact-gone artifact) t)
                      :appeared (agent-river--ago
                                 (agent-river-artifact-appeared artifact))
-                     :last (agent-river-artifact-last artifact)
+                     :ago (agent-river--ago (agent-river-artifact-last artifact))
                      :notes (length (agent-river-artifact-notes artifact))
                      :reached (length (agent-river-reaching
                                        (agent-river-artifact-key artifact)
                                        'session)))
-               out)))
-     agent-river-artifacts)
-    (sort out (lambda (a b) (time-less-p (plist-get b :last) (plist-get a :last))))))
+            out))
+    (setq out (nreverse out))
+    out))
 
 ;;;###autoload
 (defun agent-river-drop-artifact (key)
@@ -4014,13 +4040,22 @@ draws a place heading over it."
 ;; mean that changing how a line looks quietly changes what `n' stops on --
 ;; and the rendering here is customisable, so it would change under people.
 
-(defcustom agent-river-notable-kinds '("fail" "signal" "note")
-  "Event kinds `agent-river-next-notable' stops on.
+(defcustom agent-river-notable-kinds '("fail" "signal" "note" "artifact")
+  "Event kinds `agent-river-next-notable\=' stops on.
 
 The lines someone scanning a long log is looking for: what broke, what the
 agent was told, and what was seen outside the hook stream.  Reasoning and
-tool calls are the log's bulk rather than its landmarks, which is the whole
-distinction this motion exists to make."
+tool calls are the log\='s bulk rather than its landmarks, which is the whole
+distinction this motion exists to make.
+
+`artifact\=' is here for the last of those reasons and not as a fourth one.
+A note is something Emacs saw that no hook could; a record arriving is
+something *nobody* in the session saw, which is one step further out again
+-- and it is most often the reason to look at the log at all, since it
+arrives when nothing else is happening.  A producer noisy enough to make
+this motion useless is a producer that has made the log useless, and the
+answer is the same either way: take the kind out of this list, or send
+less."
   :type '(repeat string))
 
 (defun agent-river--entry-line-p ()
@@ -5495,8 +5530,7 @@ key is the whole of the name -- which is what a non-file artifact has
 instead.  Distinct from `agent-river--heat-absolute' on purpose: that one
 answers \"where on disk\", and a caller asking it must keep getting nil
 for something that is not on disk.  This one answers \"which artifact\",
-which
-is the question the position marker, the party floor and the section
+which is the question the position marker, the party floor and the section
 listings are all really asking."
   (if (plist-member entry :place)
       (plist-get entry :place)
@@ -6043,6 +6077,21 @@ Nil turns the floor off and restores the old behaviour, where a touch is
 named for as long as the session is folded."
   :type '(choice (const :tag "Never drop a name" nil) number))
 
+(defvar agent-river--newest-memo nil
+  "A one-draw cache of `agent-river--map-newest\=', or nil when not caching.
+
+Keyed on the entry list itself, with `eq\='.  Within a draw every reader is
+handed the same list object by `agent-river--heat-memo\=', so identity is
+the whole of the question -- and a list from a different frame is a
+different object, which busts this cache for free rather than needing a
+scope key of its own.
+
+What it saves is not the loop so much as what the loop begins with: each
+call asks `agent-river--gone-parties\=', which walks the registry and looks
+up a buffer per session.  Three readers asked for the markers per draw --
+the roots, each tree\='s reach and each domain\='s parties -- and all three
+were asking about one set of artifacts at one moment.")
+
 (defun agent-river--map-newest (entries)
   "Return a hash of party to the file it reached most recently.
 
@@ -6060,6 +6109,17 @@ arrow to a file forever, on behalf of nobody.  Absent from the hash, the
 marker is not drawn and the name is left to fade at the floor like any
 other: the file was still touched, which is history and stays, and it is
 only the present tense that is withdrawn."
+  (let ((box agent-river--newest-memo))
+    (if (and box (eq (car box) entries))
+        (cdr box)
+      (let ((newest (agent-river--map-newest-1 entries)))
+        (when box (setcar box entries) (setcdr box newest))
+        newest))))
+
+(defun agent-river--map-newest-1 (entries)
+  "Walk ENTRIES for `agent-river--map-newest\='.
+Split out so the cache above and the walk cannot come apart, the way
+`agent-river--heat-walk\=' is."
   (let ((newest (make-hash-table :test 'equal))
         (gone (agent-river--gone-parties)))
     (dolist (entry entries)
@@ -6334,6 +6394,39 @@ A string, because everything downstream of the draw compares roots with
 path, and `agent-river--map-domain' is what tells the two apart."
   (format "%s:" domain))
 
+(defvar agent-river--section-memo nil
+  "A one-draw cache of `agent-river--domain-sections\=', or nil when not caching.
+
+Bound to a fresh box by `agent-river--map-draw\=' and thrown away with it,
+the way `agent-river--heat-memo\=' is and for the same reason: a draw is
+synchronous Lisp, nothing on that path declares an artifact, and the
+binding cannot outlive the walk it was made for -- so there is no
+invalidation here to get wrong.
+
+Outside a draw this stays nil and every call reads the table, which is what
+a caller outside a draw is asking about.")
+
+(defun agent-river--domain-sections ()
+  "Return an alist of section root to the domain it stands for.
+
+The one derivation behind both readings below, and the one walk of
+`agent-river-artifacts\=' that either of them costs.  `agent-river--map-domain\='
+asked this question once per node per draw and answered it by walking the
+whole table, building a root string per domain on the way: measured on
+2026-09-17 over 3000 artifacts and 200 records, one draw asked it 697
+times.  Held as an alist the lookup is an `assoc\=' and the roots are built
+once."
+  (let ((box agent-river--section-memo))
+    (if (and box (car box))
+        (cdr box)
+      (let (sections)
+        (dolist (domain (agent-river-domains))
+          (unless (eq domain 'file)
+            (push (cons (agent-river--domain-root domain) domain) sections)))
+        (setq sections (nreverse sections))
+        (when box (setcar box t) (setcdr box sections))
+        sections))))
+
 (defun agent-river--map-domain (root)
   "Return the domain ROOT is the section of, or nil when ROOT is a directory.
 
@@ -6341,22 +6434,18 @@ The one predicate the rest of the draw dispatches on.  Asked rather than
 inferred from the string's shape: a directory can be called anything, and
 a listing that decided what to do by looking at a name would eventually
 run git over somebody's incident queue."
-  (let (found)
-    (dolist (domain (agent-river--map-live-domains))
-      (when (and (not found) (equal root (agent-river--domain-root domain)))
-        (setq found domain)))
-    found))
+  (cdr (assoc root (agent-river--domain-sections))))
 
 (defun agent-river--map-live-domains ()
   "Return every non-file domain with a record in `agent-river-artifacts\='.
 Discovered rather than declared, so a producer that invents a domain sees
 it on the map without registering anything.
 
-`agent-river-domains\=' narrowed, not a second walk of the table: a `file\='
-record is an artifact like any other and the only thing that is special
-about it here is that it has no section of its own to head -- it is drawn
-in the tree its key resolves into."
-  (seq-remove (lambda (domain) (eq domain 'file)) (agent-river-domains)))
+Read off `agent-river--domain-sections\=' rather than filtering
+`agent-river-domains\=' a second time, so the sections the map draws and the
+domains it names cannot come from two walks that saw the table
+differently."
+  (mapcar #'cdr (agent-river--domain-sections)))
 
 (defun agent-river--domain-label (domain)
   "Return DOMAIN's section heading."
@@ -7493,77 +7582,77 @@ and a domain has none -- and answering something rather than nothing here
 is what would reserve the fixed column across the whole buffer for a
 number only half the sections could ever carry."
   (unless (agent-river--domain-p root)
-   (let* ((members (agent-river--map-members root))
-         (merged (cdr members))
-         (prefix (file-name-as-directory (expand-file-name root)))
-         (out (make-hash-table :test 'equal)))
-    (dolist (node nodes)
-      (let* ((path (plist-get node :path))
-             (rel (and (string-prefix-p prefix path)
-                       (substring path (length prefix))))
-             (parties (plist-get node :parties))
-             (writes (lambda (tree) (agent-river--map-writes parties tree)))
-             rows)
-        ;; A node the head tree cannot place is asked of that tree alone:
-        ;; without a path below the root there is nothing to carry onto the
-        ;; members, and asking each of them about the same absolute name
-        ;; would answer the same thing once per member.
-        (dolist (member (if rel members (list root)))
-          (let* ((mpath (if rel (expand-file-name rel member) path))
-                 (stat (agent-river--vc-under (agent-river--vc-cached member) mpath))
-                 (tree (and merged (agent-river--map-tree-name member)))
-                 ;; Whether this tree is one the line's agents are in, which
-                 ;; is what lets the column pick between two answers below.
-                 (mine (> (funcall writes tree) 0))
-                 (landed (and mine (agent-river--vc-landed-p member mpath)))
-                 (key (if tree (concat "vc/" tree) "vc"))
-                 (said (if tree (concat tree ": ") "")))
-            (cond
-             (stat
-              (push (list :key key
-                          :mine mine
-                          :rank 2
-                          ;; What the column cannot hold: which of several
-                          ;; trees this is, and how many files a directory's
-                          ;; total is spread over.  With neither, the row is
-                          ;; the column spelled out -- `+529 -122' up there
-                          ;; and `+529 -122 vs HEAD' underneath -- so it
-                          ;; says so and is drawn only where the line is not
-                          ;; carrying it.  The frame is the one thing it
-                          ;; adds, and a fact that never changes belongs in
-                          ;; the documentation rather than on every line.
-                          :summarised (not (or tree
-                                               (and (plist-get node :dir)
-                                                    (> (nth 3 stat) 1))))
-                          :column (agent-river--vc-column stat)
-                          :text (concat
-                                 said
-                                 (or (agent-river--vc-column-plain stat)
-                                     "changed")
-                                 " vs HEAD"
-                                 (if (and (plist-get node :dir)
-                                          (> (nth 3 stat) 1))
-                                     (format " in %d files" (nth 3 stat))
-                                   "")
-                                 (if (nth 2 stat)
-                                     ", untracked by git" "")))
-                    rows))
-             (landed
-              (push (list :key key
-                          :mine mine
-                          :rank 2
-                          ;; The marker in the column and the row say the
-                          ;; same sentence, and only one of them is in a
-                          ;; place a reader can scan.
-                          :summarised (not tree)
-                          :face 'agent-river-landed
-                          :column (agent-river--map-mark
-                                   agent-river-map-landed-marker
-                                   'agent-river-landed)
-                          :text (concat said "in the main branch"))
-                    rows)))))
-        (when rows (puthash path (nreverse rows) out))))
-    out)))
+    (let* ((members (agent-river--map-members root))
+           (merged (cdr members))
+           (prefix (file-name-as-directory (expand-file-name root)))
+           (out (make-hash-table :test 'equal)))
+      (dolist (node nodes)
+	(let* ((path (plist-get node :path))
+               (rel (and (string-prefix-p prefix path)
+			 (substring path (length prefix))))
+               (parties (plist-get node :parties))
+               (writes (lambda (tree) (agent-river--map-writes parties tree)))
+               rows)
+          ;; A node the head tree cannot place is asked of that tree alone:
+          ;; without a path below the root there is nothing to carry onto the
+          ;; members, and asking each of them about the same absolute name
+          ;; would answer the same thing once per member.
+          (dolist (member (if rel members (list root)))
+            (let* ((mpath (if rel (expand-file-name rel member) path))
+                   (stat (agent-river--vc-under (agent-river--vc-cached member) mpath))
+                   (tree (and merged (agent-river--map-tree-name member)))
+                   ;; Whether this tree is one the line's agents are in, which
+                   ;; is what lets the column pick between two answers below.
+                   (mine (> (funcall writes tree) 0))
+                   (landed (and mine (agent-river--vc-landed-p member mpath)))
+                   (key (if tree (concat "vc/" tree) "vc"))
+                   (said (if tree (concat tree ": ") "")))
+              (cond
+               (stat
+		(push (list :key key
+                            :mine mine
+                            :rank 2
+                            ;; What the column cannot hold: which of several
+                            ;; trees this is, and how many files a directory's
+                            ;; total is spread over.  With neither, the row is
+                            ;; the column spelled out -- `+529 -122' up there
+                            ;; and `+529 -122 vs HEAD' underneath -- so it
+                            ;; says so and is drawn only where the line is not
+                            ;; carrying it.  The frame is the one thing it
+                            ;; adds, and a fact that never changes belongs in
+                            ;; the documentation rather than on every line.
+                            :summarised (not (or tree
+						 (and (plist-get node :dir)
+                                                      (> (nth 3 stat) 1))))
+                            :column (agent-river--vc-column stat)
+                            :text (concat
+                                   said
+                                   (or (agent-river--vc-column-plain stat)
+                                       "changed")
+                                   " vs HEAD"
+                                   (if (and (plist-get node :dir)
+                                            (> (nth 3 stat) 1))
+                                       (format " in %d files" (nth 3 stat))
+                                     "")
+                                   (if (nth 2 stat)
+                                       ", untracked by git" "")))
+                      rows))
+               (landed
+		(push (list :key key
+                            :mine mine
+                            :rank 2
+                            ;; The marker in the column and the row say the
+                            ;; same sentence, and only one of them is in a
+                            ;; place a reader can scan.
+                            :summarised (not tree)
+                            :face 'agent-river-landed
+                            :column (agent-river--map-mark
+                                     agent-river-map-landed-marker
+                                     'agent-river-landed)
+                            :text (concat said "in the main branch"))
+                      rows)))))
+          (when rows (puthash path (nreverse rows) out))))
+      out)))
 
 (defun agent-river--vc-summary (rows)
   "Return the column reading for the vc ROWS of one node.
@@ -8285,6 +8374,13 @@ nothing."
                ;; well as three times the work: measured on 2026-09-17 at
                ;; 5000 artifacts, a draw spent about 30 ms re-walking.
                (agent-river--heat-memo (cons 'none nil))
+               ;; And the two readings taken *of* that walk, on the same
+               ;; terms: which roots are domain sections, and where each
+               ;; party is now.  Both are pure functions of what the box
+               ;; above holds, both were asked once per node or once per
+               ;; section, and both are thrown away with the draw.
+               (agent-river--section-memo (cons nil nil))
+               (agent-river--newest-memo (cons nil nil))
                ;; Asked whether or not the map is zoomed: the grouping is
                ;; what tells everything below which trees a section stands
                ;; for, and a zoomed map is looking at one of those sections.
@@ -8331,37 +8427,36 @@ nothing."
                   (rows (nth 2 section)))
               (when split
                 (let ((domain (agent-river--map-domain root)))
-                 (insert (propertize
-                         (concat (agent-river--map-line
-                                  2 (if domain
-                                        (agent-river--domain-label domain)
-                                      (abbreviate-file-name root))
-                                  (agent-river--map-merge-parties
-                                   (mapcar (lambda (entry)
-                                             (list :parties (plist-get entry :parties)))
-                                           entries))
-                                  nil
-                                  (agent-river--map-summary (gethash root rows) column)
-                                  (and (gethash root rows) 'open))
-                                 "\n")
-                         ;; A root is a place like any other line's, so RET
-                         ;; zooms into it and the motions stop on it.  A domain
-                         ;; is not a directory, so it zooms through its own
-                         ;; thunk rather than through `agent-river-map-descend',
-                         ;; which would expand its name into a path.
-                         'agent-river-map-name (if domain
-                                                   (agent-river--domain-label domain)
-                                                 (abbreviate-file-name root))
-                         'agent-river-map-path root
-                         'agent-river-map-dir (not domain)
-                         'agent-river-map-visit
-                         (and domain (lambda ()
-                                       (setq agent-river--map-root root)
-                                       (agent-river--map-draw)))
-                         'agent-river-map-section t
-                         'agent-river-map-active (and entries t)))))
-              (progn
-               (dolist (entry entries)
+                  (insert (propertize
+                           (concat (agent-river--map-line
+                                    2 (if domain
+                                          (agent-river--domain-label domain)
+					(abbreviate-file-name root))
+                                    (agent-river--map-merge-parties
+                                     (mapcar (lambda (entry)
+                                               (list :parties (plist-get entry :parties)))
+                                             entries))
+                                    nil
+                                    (agent-river--map-summary (gethash root rows) column)
+                                    (and (gethash root rows) 'open))
+                                   "\n")
+                           ;; A root is a place like any other line's, so RET
+                           ;; zooms into it and the motions stop on it.  A domain
+                           ;; is not a directory, so it zooms through its own
+                           ;; thunk rather than through `agent-river-map-descend',
+                           ;; which would expand its name into a path.
+                           'agent-river-map-name (if domain
+                                                     (agent-river--domain-label domain)
+                                                   (abbreviate-file-name root))
+                           'agent-river-map-path root
+                           'agent-river-map-dir (not domain)
+                           'agent-river-map-visit
+                           (and domain (lambda ()
+					 (setq agent-river--map-root root)
+					 (agent-river--map-draw)))
+                           'agent-river-map-section t
+                           'agent-river-map-active (and entries t)))))
+              (dolist (entry entries)
                 (let* ((name (plist-get entry :name))
                        (dir (plist-get entry :dir))
                        (path (agent-river--map-node-path root name))
@@ -8410,35 +8505,35 @@ nothing."
                                (frows (gethash fpath rows))
                                (fshown (agent-river--map-shown-rows frows column))
                                (fopen (agent-river--map-folded-p fpath (and fshown t))))
-                        (insert (propertize
-                                 (concat (agent-river--map-line
-                                          'file (plist-get file :rel)
-                                          (plist-get file :parties)
-                                          ;; The entry above says this for
-                                          ;; itself; a file under it used to
-                                          ;; say nothing, so a deletion three
-                                          ;; directories down was drawn as an
-                                          ;; ordinary line.  Git reports one as
-                                          ;; a change like any other, which is
-                                          ;; how the listing now reaches it at
-                                          ;; all.
-                                          (not (file-exists-p fpath))
-                                          (agent-river--map-summary frows column)
-                                          (and fshown (if fopen 'open 'closed)))
-                                         "\n")
-                                 'agent-river-map-name name
-                                 'agent-river-map-rel (plist-get file :rel)
-                                 'agent-river-map-path fpath
-                                 'agent-river-map-open fopen
-                                 'agent-river-map-active
-                                 (and (plist-get file :parties) t)))
-                        (when fopen
-                          (agent-river--map-rows-insert fshown fpath t))))
+                          (insert (propertize
+                                   (concat (agent-river--map-line
+                                            'file (plist-get file :rel)
+                                            (plist-get file :parties)
+                                            ;; The entry above says this for
+                                            ;; itself; a file under it used to
+                                            ;; say nothing, so a deletion three
+                                            ;; directories down was drawn as an
+                                            ;; ordinary line.  Git reports one as
+                                            ;; a change like any other, which is
+                                            ;; how the listing now reaches it at
+                                            ;; all.
+                                            (not (file-exists-p fpath))
+                                            (agent-river--map-summary frows column)
+                                            (and fshown (if fopen 'open 'closed)))
+                                           "\n")
+                                   'agent-river-map-name name
+                                   'agent-river-map-rel (plist-get file :rel)
+                                   'agent-river-map-path fpath
+                                   'agent-river-map-open fopen
+                                   'agent-river-map-active
+                                   (and (plist-get file :parties) t)))
+                          (when fopen
+                            (agent-river--map-rows-insert fshown fpath t))))
                       (when (> (length files) (length shown))
                         (insert (propertize
                                  (concat (agent-river--map-marker 'file) "…\n")
                                  'agent-river-map-face 'agent-river-stale
-                                 'agent-river-map-name name))))))))
+                                 'agent-river-map-name name)))))))
               ;; An empty listing has to say which kind of empty it is.
               ;; Filtered, the tree may be full of files nobody has been
               ;; near, and a blank section then reads as though the map had
