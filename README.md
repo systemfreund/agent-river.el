@@ -50,15 +50,13 @@ If you take one rule from this document, take that one: **you never `setf` a
 state.** To put a fact into the state you emit an event; see
 [Putting your own facts in](#putting-your-own-facts-in).
 
-The key is `session_id`, or `session_id/agent_id` for a subagent. Subagent hook
-calls arrive with the *parent's* session id, so keying on the session alone
-folds a subagent's steps and failure streaks into its parent —
-`agent-river-key` builds the right one.
+The key is the `session_id`, and nothing else. A subagent's calls arrive with
+its parent's session id and fold onto that session; see
+[Subagents](#subagents).
 
 ```elisp
 agent-river-registry                ; the hash itself: key -> agent-river-state
 (agent-river-state "<session-id>")  ; address one, creating it if needed
-(agent-river-key session agent)     ; build a key, subagent-aware
 (agent-river-reset)                 ; forget every fold
 (agent-river-clear)                 ; only empty the HUD buffer
 ```
@@ -338,12 +336,31 @@ PreToolUse   Bash   -                  -
 PreToolUse   Read   a37409f14b2a9aa55  Explore
 ```
 
-Hence the composite key. A subagent is counted on its parent and **aggregated on
-demand** via `agent-river-children` rather than mirrored, so the two cannot
-drift. `:status` distinguishes three things on purpose: `done` comes from
-`SubagentStop` and is a fact; `stale` means the TTL expired with no end event —
-something went away without saying so; only `running` is a claim that it is
-still working. Inferring "finished" from silence is how a registry starts lying.
+**A subagent is not a session, so it is not in the registry.** It has no
+prompt, no working directory, no place and nothing that can be told to it; it
+used to get an entry of its own keyed `session_id/agent_id`, and every reader
+of the registry then began by sorting it back out again. What it is is a
+*tally* on the session that spawned it — what was set in motion, how far it
+got, whether it finished — read with `agent-river-children`:
+
+```elisp
+(agent-river-children "<session-id>")
+;; ((:agent "a1" :type "Explore" :steps 12 :failures 0 :status "running" …))
+```
+
+Three consequences worth knowing if you consume this.
+
+- **A delegated step is the session's step**, and a delegated touch lands in
+  the session's own artifact tables — which is what `agent-river-touching` and
+  the map read. You do not have to range over a family to find it.
+- **A delegated failure does not raise the session's streak.** Three
+  subagents failing once each is not one line of work failing three times, and
+  the streak is what a signal is built from. It is counted everywhere else: the
+  task tally, the tool tally, and the child's own entry.
+- **`:status` distinguishes three things on purpose.** `done` comes from
+  `SubagentStop` and is a fact; `stale` means the TTL expired with no end event
+  — something went away without saying so; only `running` claims it is still
+  working. Inferring "finished" from silence is how a registry starts lying.
 
 ## From inside a session
 

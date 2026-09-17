@@ -165,11 +165,25 @@ derived from the state, never accumulated separately.
 
 These are load-bearing; the tests enforce most of them.
 
-- **Registry key is `session_id`, or `session_id/agent_id` for a subagent**
-  (`agent-river-key`). Subagent hook calls arrive with the *parent's* session id;
-  keying on session alone folds a subagent's steps and failure streaks into its
-  parent. Subagents get no panel line — they are counted on the parent, aggregated
-  on demand via `agent-river-children` rather than mirrored (so the two cannot drift).
+- **Registry key is `session_id`, and a subagent is not a session.** Subagent
+  hook calls arrive with the *parent's* session id and an `agent_id` of their
+  own, and that `agent_id` used to make a registry entry beside the parent. It
+  failed the definition of a session in four ways — no prompt, no working
+  directory, no place, nothing that can be told to it — so every reader of the
+  registry began by sorting it back out again, and
+  `agent-river--family-in-file` existed for no other purpose than to reach
+  back across the split the split had made. It is a **tally on the session**
+  now (`agent-river--delegate`, read by `agent-river-children`): what this
+  session set in motion, how far it got, whether it is finished. A delegated
+  step is a step the session took, and a delegated touch lands in the
+  session's own artifact tables, which is what `agent-river-touching` and the
+  map already read.
+- **The one measurement a delegated failure stays out of is the streak**
+  (`agent-river--delegated-p`). Three subagents failing once each is not one
+  line of work failing three times, and the streak is what a signal is built
+  from — so a merged streak would put a false statement into the session's own
+  context. Everything else about the failure is counted: the task tally, the
+  tool tally, and the child's own entry, which says whose it was.
 - **Two frames, always labelled.** `artifacts`/session-wide survives a new prompt;
   `task-artifacts`/`steps`/`task-failures` reset on `prompt`. Report keys say which
   (`:task-hottest` vs `:session-hottest`). The panel uses the task frame;
@@ -482,20 +496,15 @@ Three things a producer owes:
   `agent-river--agent-in-flight-p` is the guard here, and it is deliberately
   narrow: it suppresses only while a tool call is open on that exact file.
   Widening it before there is evidence of noise would be tuning on a guess.
-- **The family, not the session** (`agent-river--family-in-file`). A delegated
-  file lands in the *subagent's* task frame and never in its parent's, so
-  asking the root alone produced no note at all when a subagent held the file
-  — silence in the case with the least supervision in it. Both the relevance
-  filter and the provenance guard therefore range over the root and its live
-  children.
+There used to be a third — *the family, not the session* — because a
+delegated file landed in the subagent's task frame and never in its parent's,
+so asking the session alone produced no note at all when a subagent held the
+file, which was silence in the case with the least supervision in it. That
+function is gone with the split that made it necessary: the touch is the
+session's, so there is one frame to ask and one guard to apply.
 
-Where a note is **addressed** is forced by the invariant above: only a root can
-be told anything, so the note goes to the root even when a subagent holds the
-file — which is exactly why it has to name the holder. Addressed to the parent
-and silent about the child, "shared.el saved outside the session" reads as a
-statement about the parent's own work. Say which frame the count came from too
-(`agent-river--frame-word`); the text used to read "this task" whatever
-`agent-river-foreign-save-scope` was set to.
+Say which frame the count came from (`agent-river--frame-word`); the text used
+to read "this task" whatever `agent-river-foreign-save-scope` was set to.
 
 Reading notes back and deciding what to tell the agent is a separate step, and
 is deliberately not built: `agent-river--signal` still fires on fail streaks
