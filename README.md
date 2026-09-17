@@ -374,9 +374,9 @@ state is allowed to contradict it.
 # Reacting to the state
 
 Five places to hang your own code, and the choice between them is mostly the
-answer to one question: *who is the subject?*
+answer to one question: *what is it about?*
 
-| You want to… | Hang it on | Subject |
+| You want to… | Hang it on | About |
 |---|---|---|
 | react to what an agent did | `agent-river-observers` | a session |
 | react to something arriving | `agent-river-artifact-observers` | an artifact |
@@ -384,6 +384,10 @@ answer to one question: *who is the subject?*
 | report something no session owns | `agent-river-appeared` | an artifact |
 | annotate the map's lines | `agent-river-map-contributors` | a path or key |
 | say where a session belongs | `agent-river-panel-place-functions` | a session |
+
+The first four hang off a **subject** — the thing an event is folded onto, of
+which there are exactly two. The last two are views: they are handed something
+to annotate and fold nothing, so a path or a key there is not a third subject.
 
 The two observer hooks are separate so that a consumer never has to begin by
 asking which kind of subject it was handed. A consumer that reads no subject at
