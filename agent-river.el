@@ -1128,8 +1128,11 @@ have been four lines and is exactly the shape this package keeps getting
 wrong: those three rules are the whole of what a consumer inherits, each
 of them is a mistake already made here once, and a second copy is a second
 place for one of them to be quietly dropped.  `agent-river--run-observers'
-takes the hook symbol for that reason alone -- it is not an abstraction
-reaching for a third caller.
+takes the hook symbol for that reason: the rules are load-bearing, and both
+hooks want the same three.  Not because two callers are a threshold -- a
+count decides by arithmetic what has to be decided by looking, which is the
+convention in AGENTS.md about merging only where there is something to
+merge.
 
 A separate hook rather than the same one, because the subject differs.
 One hook carrying either an `agent-river-state' or an
