@@ -326,8 +326,15 @@ map's shading already travels as an overlay because tree-sitter owns
   ;; recorded: a key that resolves under the cwd is anchored by the cwd
   ;; already, and storing it twice gives the two a way to disagree.
   anchors
-  parent            ; key of the session that spawned this one, nil at a root
-  agent-type        ; "Explore", "general-purpose", ... nil at a root
+  ;; hash: agent_id -> (:type TYPE :steps N :failures N :started T :last T
+  ;; :done BOOL), for the work this session delegated.  A dimension of the
+  ;; session rather than a peer beside it in the registry: a subagent has no
+  ;; prompt, no working directory, no user and nothing that can be told to
+  ;; it, and it dies with the turn that spawned it -- it fails the definition
+  ;; of a session in four ways, which is why every consumer of the registry
+  ;; used to begin by sorting it back out again.  What it is is a tally of
+  ;; what this session set in motion, and that is what is kept.
+  subagents
   started last-seen ; last-seen is the liveness clock a registry needs
   task task-started ; the current prompt, and when it arrived
   step steps        ; the in-flight step, and how many this turn
@@ -346,7 +353,6 @@ map's shading already travels as an overlay because tree-sitter owns
   ;; ground truth left in it.  They never feed a signal.
   intent intent-at intent-step intent-hottest
   tasks             ; finished tasks, newest first
-  done              ; set by SubagentStop: finished, as a fact not a guess
   signals           ; observations handed back, newest first
   ;; Observations made outside the hook stream, newest first -- see
   ;; `agent-river-note'.  A third category next to the measurements above and
@@ -355,17 +361,6 @@ map's shading already travels as an overlay because tree-sitter owns
   ;; carried rather than derived.
   notes)
 
-(defun agent-river-key (session &optional agent)
-  "Return the registry key for SESSION, or for AGENT running under it.
-
-A subagent's tool calls arrive with their parent's `session_id' and
-`transcript_path', and are distinguished only by an extra `agent_id'.
-Keying on the session alone would therefore fold a subagent's work into
-its parent -- inflating the parent's step count and, worse, letting one
-subagent's failures raise a streak reported against the parent."
-  (if (and agent (not (string-empty-p agent)))
-      (concat session "/" agent)
-    session))
 
 (defvar agent-river--current nil
   "Key of the root session that most recently folded an event.
@@ -536,17 +531,15 @@ uniquifies buffers, and the way the session list already displays them."
           (setq n (1+ n)))
         (format "%s<%d>" label n)))))
 
-(defun agent-river-state (id &optional label parent agent-type)
+(defun agent-river-state (id &optional label)
   "Return the state keyed by ID, creating it if needed.
 LABEL names it for a human and is refreshed on every call, so a session
-that changes directory does not keep a stale name.  PARENT and
-AGENT-TYPE are set once, when the state is created."
+that changes directory does not keep a stale name."
   (let ((state (or (gethash id agent-river-registry)
                    (puthash id
                             (agent-river--state-create
                              :id id
-                             :parent parent
-                             :agent-type agent-type
+                             :subagents (make-hash-table :test 'equal)
                              :started (current-time)
                              :artifacts (make-hash-table :test 'equal)
                              :task-artifacts (make-hash-table :test 'equal)
@@ -558,7 +551,7 @@ AGENT-TYPE are set once, when the state is created."
                             agent-river-registry))))
     ;; agent-shell's own name wins where it exists: it is stable across a
     ;; change of working directory, and already numbered.
-    (let ((hosted (and (null parent) (agent-river--shell-label id))))
+    (let ((hosted (agent-river--shell-label id)))
       (cond
        (hosted (setf (agent-river-state-label state) hosted))
        ;; Refresh so a session that moves does not keep a stale name, but
@@ -580,8 +573,8 @@ A finished subagent says so via SubagentStop, which is authoritative.
 For a root session we have seen agent-shell hosting, the buffer settles
 it: the process runs in this Emacs, so whether it is alive is a fact and
 not an estimate.  The TTL is what is left for everything else --
-subagents, and sessions nobody here owns -- and it was only ever a way of
-guessing at something we could not see.
+sessions nobody here owns -- and it was only ever a way of guessing at
+something we could not see.
 
 Asked of `agent-river--shell-hosted', which is per session, where this
 used to ask a flag that went sticky as soon as agent-shell had hosted
@@ -590,9 +583,7 @@ died, which the index does properly; what it cost was every session run
 from a terminal, which has no buffer here and never did and was called
 inactive for it."
   (cond
-   ((agent-river-state-done state) nil)
-   ((and (null (agent-river-state-parent state))
-         (agent-river--shell-hosted (agent-river-state-id state)))
+   ((agent-river--shell-hosted (agent-river-state-id state))
     (and (agent-river--shell-buffer (agent-river-state-id state)) t))
    (t (let ((seen (agent-river-state-last-seen state)))
         (and seen (< (float-time (time-subtract (current-time) seen))
@@ -616,17 +607,12 @@ not merely on there being no buffer: a session run from a terminal with
 hooks wired has no buffer here and never did, and calling that gone would
 take its name and its marker off the map while it was still working.
 
-A subagent goes with its root as well, since a child of a session that no
-longer exists cannot still be running -- and the TTL, which is all a
-subagent otherwise has, would take minutes to notice."
-  (cond
-   ((agent-river-state-parent state)
-    (or (and (agent-river-state-done state) t)
-        (let ((root (gethash (agent-river-state-parent state)
-                             agent-river-registry)))
-          (and root (agent-river--gone-p root)))))
-   ((agent-river--shell-hosted (agent-river-state-id state))
-    (not (agent-river--shell-buffer (agent-river-state-id state))))))
+Subagents do not appear here at all any more.  They are a tally on their
+session (`agent-river--delegate') rather than a registry entry beside it,
+so there is nothing for this to retire on their behalf -- a delegated step
+was the session's, and the session is gone exactly when the session is."
+  (and (agent-river--shell-hosted (agent-river-state-id state))
+       (not (agent-river--shell-buffer (agent-river-state-id state)))))
 
 (defun agent-river--state-working-p (state)
   "Return non-nil while STATE is mid-turn, as opposed to merely alive.
@@ -652,19 +638,60 @@ Subagents count: while one is running, the view has to say who acted."
     n))
 
 (defun agent-river-children (key)
-  "Return the states spawned by the session registered under KEY.
-Derived by walking the registry rather than maintained as a list on the
-parent: a subagent's activity then has exactly one home, and a parent's
-view of it cannot drift out of step with the child's own state."
-  (let (kids)
-    (maphash (lambda (_k state)
-               (when (equal (agent-river-state-parent state) key)
-                 (push state kids)))
-             agent-river-registry)
-    kids))
+  "Return what the session registered under KEY delegated, newest first.
+
+A list of plists -- `:agent', `:type', `:steps', `:failures', `:status'
+and `:elapsed'.  Read off the session's own tally rather than by walking
+the registry for entries that name it as a parent: a subagent is not a
+session, so it is not in the registry, so there is nothing there to walk.
+
+`:status' distinguishes three things on purpose.  `done' comes from
+`SubagentStop' and is a fact.  `stale' means nothing has been heard for
+`agent-river-session-ttl' and no end event ever came -- something went
+away without saying so.  Only `running' claims it is still working, and
+inferring \"finished\" from silence is how a registry starts lying."
+  (let ((state (gethash key agent-river-registry))
+        kids)
+    (when state
+      (maphash
+       (lambda (agent cell)
+         (push (list :agent agent
+                     :type (plist-get cell :type)
+                     :steps (or (plist-get cell :steps) 0)
+                     :failures (or (plist-get cell :failures) 0)
+                     :last (plist-get cell :last)
+                     :elapsed (and (plist-get cell :started)
+                                   (agent-river--ago (plist-get cell :started)))
+                     :status (cond
+                              ((plist-get cell :done) "done")
+                              ((agent-river--delegate-live-p cell) "running")
+                              (t "stale")))
+               kids))
+       (agent-river-state-subagents state)))
+    (sort kids (lambda (a b)
+                 (agent-river--map-later (plist-get b :last) (plist-get a :last))))))
+
+(defun agent-river--delegate-live-p (cell)
+  "Return non-nil while subagent CELL has been heard from recently enough.
+The TTL is all there is for a subagent -- it has no buffer of its own and
+no process this Emacs can see -- which is why silence is reported as
+`stale' rather than as finished."
+  (let ((last (plist-get cell :last)))
+    (and last (< (float-time (time-subtract (current-time) last))
+                 agent-river-session-ttl))))
 
 
 ;;; The fold
+
+(defun agent-river--delegated-p (event)
+  "Return non-nil when EVENT reports a call a subagent made.
+
+The payload says so -- a subagent's hook call carries its parent's session
+id and an agent_id of its own -- which is the whole of what this ever
+needed to know.  It used to be answered by looking for a registry entry
+that existed only so that there would be something to ask."
+  (let ((agent (plist-get event :agent)))
+    (and agent (not (string-empty-p agent)) t)))
 
 (defun agent-river--writing-p (tool)
   "Return non-nil when TOOL is one that changes a file.
@@ -726,6 +753,30 @@ stale anchor would go on claiming the outside directory forever."
                (string-prefix-p (file-name-as-directory cwd) path))
           (remhash key table)
         (puthash key (directory-file-name (file-name-directory path)) table)))))
+
+(defun agent-river--delegate (state agent type &optional step failed done)
+  "Record what subagent AGENT of TYPE did, on STATE's own tally.
+
+The whole of what the split into separate registry entries was for, at the
+size the question actually is: what did this session set in motion, how far
+has it got, and is it finished.  A plist rather than an `agent-river-state'
+because a subagent has none of the things a state carries -- no prompt, no
+working directory, no place, no intent, nothing that can be told to it --
+and giving it one meant every reader of the registry began by sorting it
+back out."
+  (let* ((table (agent-river-state-subagents state))
+         (cell (and table agent (gethash agent table))))
+    (when (and table agent (not (string-empty-p agent)))
+      (puthash agent
+               (list :type (or type (plist-get cell :type) "subagent")
+                     :steps (+ (or (plist-get cell :steps) 0) (if step 1 0))
+                     :failures (+ (or (plist-get cell :failures) 0) (if failed 1 0))
+                     :started (or (plist-get cell :started) (current-time))
+                     :last (current-time)
+                     ;; Said by `SubagentStop', which is a fact rather than a
+                     ;; guess -- the only thing here that is.
+                     :done (or done (plist-get cell :done)))
+               table))))
 
 (defun agent-river--record-tool (state tool ms failed)
   "Fold one completed call of TOOL taking MS into STATE.
@@ -805,7 +856,13 @@ replaying a session's events from the start."
                             (agent-river-state-recent state))))
         (when window (setcdr window nil)))
       (agent-river--touch state file (agent-river--writing-p tool))
-      (agent-river--anchor state file path))
+      (agent-river--anchor state file path)
+      ;; Counted on the session, not beside it.  A delegated step is a step
+      ;; this session took -- it asked for it -- and the file it touched lands
+      ;; in the session's own frames, which a separate function used to have
+      ;; to reach across the registry to find.
+      (agent-river--delegate state (plist-get event :agent)
+                             (plist-get event :agent-type) t))
 
      ((equal kind "think")
       (agent-river--record-tool state tool ms nil)
@@ -816,25 +873,35 @@ replaying a session's events from the start."
 
      ((equal kind "fail")
       (agent-river--record-tool state tool ms t)
-      ;; A failure that follows a success opens a new run.  Counted because
-      ;; the streak value alone cannot tell two runs apart: a session that
-      ;; recovers and then fails three times again is in a new predicament,
-      ;; not still in the old one, and an observation about it must not be
-      ;; suppressed as a repeat of the first.  Never reset, so the id built
-      ;; from it stays unique for the life of the session -- a new prompt
-      ;; clears the streak but must not make old ids collide with new ones.
-      (when (zerop (agent-river-state-fail-streak state))
-        (setf (agent-river-state-fail-runs state)
-              (1+ (or (agent-river-state-fail-runs state) 0))))
       (setf (agent-river-state-step state) nil
             (agent-river-state-task-failures state)
-            (1+ (or (agent-river-state-task-failures state) 0))
-            (agent-river-state-fail-streak state)
-            (1+ (agent-river-state-fail-streak state)))
-      (let ((cell (assoc tool (agent-river-state-fail-tools state))))
-        (if cell
-            (setcdr cell (1+ (cdr cell)))
-          (push (cons tool 1) (agent-river-state-fail-tools state)))))
+            (1+ (or (agent-river-state-task-failures state) 0)))
+      (agent-river--delegate state (plist-get event :agent)
+                             (plist-get event :agent-type) nil t)
+      ;; The streak is the one measurement a delegated failure stays out of,
+      ;; and it is the one a signal is built from.  Three subagents failing
+      ;; once each is not one line of work failing three times, and a signal
+      ;; saying so would put a false statement into the session's own
+      ;; context.  Everything else about the failure is counted above: the
+      ;; task tally has it, the tool tally has it, and the child's own tally
+      ;; says whose it was.
+      (unless (agent-river--delegated-p event)
+        ;; A failure that follows a success opens a new run.  Counted because
+        ;; the streak value alone cannot tell two runs apart: a session that
+        ;; recovers and then fails three times again is in a new predicament,
+        ;; not still in the old one, and an observation about it must not be
+        ;; suppressed as a repeat of the first.  Never reset, so the id built
+        ;; from it stays unique for the life of the session -- a new prompt
+        ;; clears the streak but must not make old ids collide with new ones.
+        (when (zerop (agent-river-state-fail-streak state))
+          (setf (agent-river-state-fail-runs state)
+                (1+ (or (agent-river-state-fail-runs state) 0))))
+        (setf (agent-river-state-fail-streak state)
+              (1+ (agent-river-state-fail-streak state)))
+        (let ((cell (assoc tool (agent-river-state-fail-tools state))))
+          (if cell
+              (setcdr cell (1+ (cdr cell)))
+            (push (cons tool 1) (agent-river-state-fail-tools state))))))
 
      ;; The edge on its own: a session reached something without a tool call
      ;; this package could see -- see `agent-river-reach'.  Deliberately as
@@ -902,15 +969,13 @@ replaying a session's events from the start."
 
      ((equal kind "done")
       (setf (agent-river-state-step state) nil)
-      ;; Only ever retires a subagent.  SubagentStop does carry an agent_id --
-      ;; measured on 2026-09-13 by tracing the argv against the folded event,
-      ;; where the done arrived addressed to the subagent's own key -- so this
-      ;; guard no longer stands in for an unknown.  It stays because it still
-      ;; holds the line that matters and costs nothing: were the event ever to
-      ;; address a root key, marking a live session finished would poison
-      ;; every reading taken from it.
-      (when (agent-river-state-parent state)
-        (setf (agent-river-state-done state) t))))
+      ;; `SubagentStop' carries an agent_id -- measured on 2026-09-13 by
+      ;; tracing the argv against the folded event -- so this retires the
+      ;; child it names and never the session.  An event that named no child
+      ;; would otherwise mark a live session finished, which poisons every
+      ;; reading taken from it.
+      (agent-river--delegate state (plist-get event :agent)
+                             (plist-get event :agent-type) nil nil t)))
     state))
 
 
@@ -1542,8 +1607,8 @@ SCOPE is `session' for the whole session, or nil for the current task."
     (when (and best (> best-n 1))
       (format "%s (%d touches)" (file-name-nondirectory best) best-n))))
 
-(defun agent-river--answerable-p (state)
-  "Return non-nil when an observation folded into STATE can reach an agent.
+(defun agent-river--answerable-p (event)
+  "Return non-nil when an observation produced for EVENT can reach an agent.
 
 Measured rather than assumed.  A subagent's hook call carries its parent's
 session id and its own agent_id, `PostToolUseFailure' is wired
@@ -1559,14 +1624,15 @@ reads, and counting it in `signals' would repeat the very lie the gate on
 is to make \"how often was the agent told something\" observable,
 reporting conversations that never happened.
 
-Dropped rather than redirected to the parent.  A child's failures are a
-statement about a different subject, and minting it here would be this
-function deciding what a parent should make of its children --
-`agent-river-children' aggregates them on demand and says whose they are.
+Asked of the EVENT rather than of the state, which is the whole of what
+this needed to know all along: the payload says whether a subagent made
+the call, and the session it belongs to is answerable either way.  It used
+to ask a registry entry that existed only so that this question had
+something to ask, and that entry is gone.
 
 Claude Code as measured on 2026-09-13; nothing is known about whether
 Codex or Gemini CLI behave the same way."
-  (null (agent-river-state-parent state)))
+  (not (agent-river--delegated-p event)))
 
 (defun agent-river--signalled-p (state id)
   "Return non-nil when ID has already been handed to the agent in STATE.
@@ -2919,9 +2985,7 @@ properties, which is where a row becomes a button."
   "Return how many sessions are mid-turn right now."
   (let ((n 0))
     (maphash (lambda (_key state)
-               (when (and (null (agent-river-state-parent state))
-                          (agent-river--state-working-p state))
-                 (setq n (1+ n))))
+               (when (agent-river--state-working-p state) (setq n (1+ n))))
              agent-river-registry)
     n))
 
@@ -3315,15 +3379,15 @@ non-nil value into `additionalContext'.
 An emitted observation is folded back in as a `signal' event, so how
 often the agent had to be told something is itself part of the state."
   (let* ((session (or (plist-get event :session) "unknown"))
-         (agent (plist-get event :agent))
-         (type (plist-get event :agent-type))
-         (id (agent-river-key session agent))
-         ;; A subagent is named by what it is, which says more than the
-         ;; directory it inherited from its parent.
-         (state (agent-river-state id
-                                   (or type (plist-get event :label))
-                                   (and agent (not (string-empty-p agent)) session)
-                                   type))
+         ;; The session, whoever acted within it.  A subagent's hook call
+         ;; carries its parent's session id and an agent_id of its own, and
+         ;; the agent_id used to make a registry entry beside the parent --
+         ;; which every reader then had to sort back out, because a subagent
+         ;; has no prompt, no directory, no place and nothing that can be
+         ;; told to it.  It is a tally on the session now, folded by
+         ;; `agent-river--delegate'.
+         (id session)
+         (state (agent-river-state id (plist-get event :label)))
          (kind (or (plist-get event :kind) "act"))
          (detail (or (plist-get event :detail) "")))
     ;; Before anything that can fail: where agent-shell hosts this session the
@@ -3368,7 +3432,7 @@ often the agent had to be told something is itself part of the state."
       ;; the agent told something" observable must not be the thing that
       ;; misreports it.
       (let ((signal (and (member kind agent-river-answering-kinds)
-                         (agent-river--answerable-p state)
+                         (agent-river--answerable-p event)
                          (agent-river--signal state))))
         (when signal
           ;; Through the fold, not around it.  This used to push straight onto
@@ -3526,17 +3590,17 @@ and through the main checkout counts as one artifact."
      agent-river-registry)
     hits))
 
-(defun agent-river--child-digest (state)
-  "Return a compact summary of subagent STATE for its parent's report."
-  (list (or (agent-river-state-agent-type state) "agent")
-        :steps (agent-river-state-steps state)
-        :fail-streak (agent-river-state-fail-streak state)
-        :hottest (agent-river--hottest state 'session)
-        :status (cond ((agent-river-state-done state) "done")
-                      ((agent-river--active-p state) "running")
-                      ;; Neither an end event nor recent activity: something
-                      ;; went away without saying so.
-                      (t "stale"))))
+(defun agent-river--child-digest (child)
+  "Return a compact summary of CHILD, one entry of `agent-river-children'.
+
+No `:hottest'.  A delegated file lands in the session's own artifact
+tables now, where `agent-river-touching' and the map already find it, and
+a second per-child copy of that reading would be the one that could
+disagree with them."
+  (list (or (plist-get child :type) "agent")
+        :steps (plist-get child :steps)
+        :failures (plist-get child :failures)
+        :status (plist-get child :status)))
 
 ;;;###autoload
 (defun agent-river-report (&optional id)
@@ -3582,9 +3646,12 @@ and through the main checkout counts as one artifact."
          ;; parent still has to be able to see what it set in motion.
          (when kids
            (list :subagents
-                 (list :running (length (seq-filter #'agent-river--active-p kids))
+                 (list :running (seq-count (lambda (c)
+                                             (equal (plist-get c :status) "running"))
+                                           kids)
                        :total (length kids)
-                       :steps (apply #'+ (mapcar #'agent-river-state-steps kids))
+                       :steps (apply #'+ (mapcar (lambda (c) (plist-get c :steps))
+                                                 kids))
                        :each (mapcar #'agent-river--child-digest kids)))))))))
 
 ;;; Handing the state out -- Markdown, for where it is going to be read
@@ -3649,30 +3716,18 @@ answers would let a snapshot disagree with the view it is a snapshot of."
               (if (> (length files) (length shown)) " · …" "")))))
 
 (defun agent-river--md-child (child)
-  "Return one Markdown line for subagent CHILD, indented under its parent.
+  "Return one Markdown line for subagent CHILD, indented under its session.
 
-Read off the child's own state rather than through
-`agent-river--child-digest', whose `:hottest' is a string already
-formatted for a plist a human reads.  Re-formatting that would mean taking
-a file name back out of prose, and the name is the one thing on this line
-that has to come out as a code span like every other name in the export."
-  (let* ((steps (agent-river-state-steps child))
-         (streak (agent-river-state-fail-streak child))
-         (hottest (car (agent-river--artifact-list child 'session))))
-    (format "    - %s — %s · %d step%s%s%s"
-            (agent-river--md-code (or (agent-river-state-agent-type child) "agent"))
-            (cond ((agent-river-state-done child) "done")
-                  ((agent-river--active-p child) "running")
-                  ;; Neither an end event nor recent activity: something went
-                  ;; away without saying so, and the export should say that
-                  ;; rather than quietly count it as running.
-                  (t "stale"))
+CHILD is one entry of `agent-river-children'.  No hottest file: a
+delegated file lands in the session's own tables now and is already named
+above, and a second reading of it here is the one that could disagree."
+  (let ((steps (plist-get child :steps))
+         (failures (plist-get child :failures)))
+    (format "    - %s — %s · %d step%s%s"
+            (agent-river--md-code (or (plist-get child :type) "agent"))
+            (plist-get child :status)
             steps (if (= steps 1) "" "s")
-            (if hottest
-                (format " · hottest %s ×%d"
-                        (agent-river--md-code (car hottest)) (cdr hottest))
-              "")
-            (if (> streak 0) (format " · %d failing" streak) ""))))
+            (if (> failures 0) (format " · %d failed" failures) ""))))
 
 (defun agent-river--md-session (state)
   "Return the Markdown for root STATE, its subagents folded in under it.
@@ -3736,15 +3791,15 @@ two cannot drift."
       (when parts
         (push (concat "- **handed back** — " (string-join parts " · ")) lines)))
     (when kids
-      (push (format "- **subagents** — %d of %d running · %d step%s"
-                    (seq-count #'agent-river--active-p kids) (length kids)
-                    (apply #'+ (mapcar #'agent-river-state-steps kids))
-                    (if (= (apply #'+ (mapcar #'agent-river-state-steps kids)) 1)
-                        "" "s"))
-            lines)
+      (let ((steps (apply #'+ (mapcar (lambda (c) (plist-get c :steps)) kids))))
+        (push (format "- **subagents** — %d of %d running · %d step%s"
+                      (seq-count (lambda (c) (equal (plist-get c :status) "running"))
+                                 kids)
+                      (length kids) steps (if (= steps 1) "" "s"))
+              lines))
       (dolist (child (sort kids (lambda (a b)
-                                  (string< (or (agent-river-state-agent-type a) "")
-                                           (or (agent-river-state-agent-type b) "")))))
+                                  (string< (or (plist-get a :type) "")
+                                           (or (plist-get b :type) "")))))
         (push (agent-river--md-child child) lines)))
     (string-join (nreverse lines) "\n")))
 
@@ -3763,8 +3818,7 @@ a group heading in it would be structure the reader cannot fold.  Each
 session's own section names it anyway."
   (let (states)
     (maphash (lambda (key state)
-               (when (and (null (agent-river-state-parent state))
-                          (agent-river--active-p state)
+               (when (and (agent-river--active-p state)
                           (or (null id) (equal key id)))
                  (push state states)))
              agent-river-registry)
@@ -3932,7 +3986,8 @@ question an onlooker actually has.
 LEVEL defaults to 1, which is where a session line sits until the block
 draws a place heading over it."
   (let* ((kids (agent-river-children (agent-river-state-id state)))
-         (running (seq-count #'agent-river--active-p kids))
+         (running (seq-count (lambda (c) (equal (plist-get c :status) "running"))
+                             kids))
          (task (agent-river-state-task state))
          (streak (agent-river-state-fail-streak state))
          (phase (agent-river--phase state))
@@ -4410,9 +4465,7 @@ show whichever acted last, and the step count would jump between them
 with nothing to say they were different agents."
   (let (states)
     (maphash (lambda (_key state)
-               (when (and (null (agent-river-state-parent state))
-                          (agent-river--active-p state))
-                 (push state states)))
+               (when (agent-river--active-p state) (push state states)))
              agent-river-registry)
     (when states
       (let* ((cells (agent-river--panel-places states))
@@ -4434,13 +4487,10 @@ with nothing to say they were different agents."
 
 (defun agent-river--update-panel (state)
   "Note STATE as the session that last acted, for `agent-river-set-intent'.
-A subagent resolves to its parent: the session stays the subject, and the
-child shows up in the subagent count instead."
-  (let* ((parent (and (agent-river-state-parent state)
-                      (gethash (agent-river-state-parent state)
-                               agent-river-registry)))
-         (shown (or parent state)))
-    (setq agent-river--current (agent-river-state-id shown))))
+No resolving to a parent any more: a subagent folds onto the session it
+was spawned from, so the session was already the state that was handed
+here."
+  (setq agent-river--current (agent-river-state-id state)))
 
 (defun agent-river--buffer ()
   "Return the HUD buffer, creating and initialising it if needed."
@@ -4896,7 +4946,7 @@ the state out of reach of exactly the onlookers it was built for."
             (insert "No sessions folded yet.\n")
           (maphash
            (lambda (key state)
-             (unless (agent-river-state-parent state)
+             (progn
                (let ((report (agent-river-report key)))
                  (insert (propertize (format "%s  [%s]\n"
                                              (agent-river-state-label state) key)
@@ -5362,26 +5412,28 @@ entry carrying no `:last' time, this is the plain count."
 (defun agent-river--party-label (state)
   "Return the name STATE goes by in a view that shows several of them.
 
-A subagent is named under its root -- `alpha/Explore' -- because its
-artifacts are its own and never its parent's.  A view that folded them
-into the parent's name would state that the parent worked in a file it
-never opened; one that showed the bare agent type would leave an onlooker
-with two `Explore' lines and no way to tell whose."
-  (if (agent-river-state-parent state)
-      (let ((root (gethash (agent-river-state-parent state) agent-river-registry)))
-        (format "%s/%s"
-                (if root (or (agent-river-state-label root) "?") "?")
-                (or (agent-river-state-agent-type state) "subagent")))
-    (or (agent-river-state-label state) "?")))
+The session's label, and nothing else.  This used to name a subagent under
+its root -- `alpha/Explore' -- because a delegated file was in the child's
+artifact tables and never in the parent's, so naming the parent would have
+claimed it worked in a file it never opened.  A delegated touch lands in
+the session's own tables now, so the party is the session and the map is
+one name per agent rather than one per agent plus one per thing it
+delegated to."
+  (or (agent-river-state-label state) "?"))
 
 (defun agent-river--gone-parties ()
   "Return a hash of party label to whether every session behind it has ended.
 
-A party is a label, not a session, and two sessions can share one: two
-`Explore' subagents of the same root are both `alpha/Explore'.  So the
-answer is a fold over all of them rather than a lookup -- one live
-sibling keeps the party alive, and asking per session would have buried
-it with the finished one.
+A party is a label, not a session, so the answer is a fold over every
+session behind it rather than a lookup: one live sibling keeps the party
+alive, and asking per session would have buried it with the finished one.
+
+The case that used to make this vivid is gone -- two `Explore' subagents
+of one root were both `alpha/Explore' -- because a subagent is no longer a
+session.  The fold stays because the rule it implements is about labels
+and not about subagents, and `agent-river--unique-label' is a convention
+rather than a guarantee: it is what stops two sessions sharing a label,
+and a lookup here would make this depend on that holding.
 
 Kept apart from `agent-river--heat-entries': who still exists is a fact
 about the registry and not about the artifact tables, and pushing a copy
@@ -8576,8 +8628,7 @@ map there would show that module and label it the project.  With nothing
 folded yet, this buffer's own directory."
   (let (best)
     (maphash (lambda (_id state)
-               (when (and (null (agent-river-state-parent state))
-                          (agent-river-state-cwd state)
+               (when (and (agent-river-state-cwd state)
                           (or (null best)
                               (time-less-p (agent-river-state-last-seen best)
                                            (agent-river-state-last-seen state))))
@@ -9203,43 +9254,9 @@ one of the two settings put a number under the wrong heading."
       "this session"
     "this task"))
 
-(defun agent-river--touch-phrase (who touches)
-  "Return TOUCHES by WHO as a phrase, WHO nil for the session itself."
-  (format "%s%d touch%s"
-          (if who (concat who " ") "")
-          touches
-          (if (= touches 1) "" "es")))
-
-(defun agent-river--family-in-file (state name)
-  "Return who in STATE's family is working in the file called NAME.
-
-A list of plists -- the session itself first, its subagents after -- each
-carrying `:who' (nil for the session, the agent type for a subagent),
-`:touches' and `:in-flight'.
-
-The family rather than the session alone, because a delegated file lands
-in the *subagent's* task frame and never in its parent's.  Asking the root
-only meant that a human saving a file a subagent was editing produced no
-note whatsoever -- silence in the case with the least supervision in it.
-
-Finished and stale subagents drop out: the question is who is in the file
-now, and a child that has stopped cannot be about to overwrite anything."
-  (let ((scope agent-river-foreign-save-scope)
-        parties)
-    (let ((own (agent-river--frame-touches state name scope)))
-      (when own
-        (push (list :who nil :touches own
-                    :in-flight (agent-river--agent-in-flight-p state name))
-              parties)))
-    (dolist (child (agent-river-children (agent-river-state-id state)))
-      (when (agent-river--active-p child)
-        (let ((touches (agent-river--frame-touches child name scope)))
-          (when touches
-            (push (list :who (or (agent-river-state-agent-type child) "subagent")
-                        :touches touches
-                        :in-flight (agent-river--agent-in-flight-p child name))
-                  parties)))))
-    (nreverse parties)))
+(defun agent-river--touch-phrase (touches)
+  "Return TOUCHES as a phrase."
+  (format "%d touch%s" touches (if (= touches 1) "" "es")))
 
 (defun agent-river-note-foreign-save (file)
   "Note FILE as saved outside any session, or subagent, working in it.
@@ -9260,28 +9277,21 @@ Returns the ids noted, so the caller can tell silence from a miss.  Takes
 the name rather than reading `buffer-file-name' itself: that makes the
 whole decision testable without a buffer, a file on disk or a save."
   (let ((name (file-name-nondirectory file))
+        (scope agent-river-foreign-save-scope)
         noted)
     (maphash
      (lambda (id state)
-       (when (and (null (agent-river-state-parent state))
-                  (agent-river--active-p state))
-         (let ((parties (agent-river--family-in-file state name)))
-           ;; An open call on this file anywhere in the family makes the save
-           ;; ambiguous -- it may be that agent's own write landing -- and the
-           ;; family is the right scope for the guard now that it is the scope
-           ;; for the question.
-           (when (and parties
-                      (not (seq-some (lambda (party) (plist-get party :in-flight))
-                                     parties)))
+       (when (agent-river--active-p state)
+         (let ((touches (agent-river--frame-touches state name scope)))
+           ;; An open call on this file makes the save ambiguous -- it may be
+           ;; that agent's own write landing -- so it is suppressed, and only
+           ;; while a call is open on this exact file.
+           (when (and touches
+                      (not (agent-river--agent-in-flight-p state name)))
              (agent-river-note
               (format "%s saved outside the session (%s: %s)"
-                      name
-                      (agent-river--frame-word)
-                      (mapconcat (lambda (party)
-                                   (agent-river--touch-phrase
-                                    (plist-get party :who)
-                                    (plist-get party :touches)))
-                                 parties ", "))
+                      name (agent-river--frame-word)
+                      (agent-river--touch-phrase touches))
               id file)
              (push id noted)))))
      agent-river-registry)

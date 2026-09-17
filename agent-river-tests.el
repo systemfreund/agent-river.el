@@ -1159,16 +1159,6 @@ stubbed here so the tests do not depend on agent-shell being installed."
             (should (eq (agent-river--shell-buffer "late") buffer)))
         (kill-buffer buffer)))))
 
-(ert-deftest agent-river-test-subagents-still-use-the-ttl ()
-  (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-session-ttl 300))
-    (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
-      (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
-        ;; A subagent has no buffer of its own, so it keeps the fallback.
-        (should (agent-river--active-p child))
-        (setf (agent-river-state-last-seen child) (time-subtract (current-time) 600))
-        (should-not (agent-river--active-p child))))))
-
 (ert-deftest agent-river-test-gone-is-narrower-than-inactive ()
   ;; Inactive is an estimate wherever the TTL answers it, and a view that
   ;; withdraws a name or a marker has to act on facts: a buffer that was
@@ -1181,8 +1171,7 @@ stubbed here so the tests do not depend on agent-shell being installed."
       ;; session with a buffer here is recorded as having had one.
       (agent-river--ensure-shell-teardown "s1")
       (let ((hosted (agent-river-state "s1" "repo"))
-            (elsewhere (agent-river-state "cli" "repo"))
-            (child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
+            (elsewhere (agent-river-state "cli" "repo")))
         (should-not (agent-river--gone-p hosted))
         ;; A session run from a terminal never had a buffer to lose, so its
         ;; silence says nothing -- where `agent-river--active-p', which takes
@@ -1191,17 +1180,14 @@ stubbed here so the tests do not depend on agent-shell being installed."
         (setf (agent-river-state-last-seen elsewhere) (time-subtract (current-time) 9999))
         (should-not (agent-river--active-p elsewhere))
         (should-not (agent-river--gone-p elsewhere))
-        ;; A subagent is gone when it says so, and when its root is.
-        (setf (agent-river-state-last-seen child) (time-subtract (current-time) 9999))
-        (should-not (agent-river--gone-p child))
-        (agent-river-fold child '(:kind "done"))
-        (should (agent-river--gone-p child))
+        ;; Subagents no longer appear here at all: they are a tally on the
+        ;; session rather than an entry beside it, so there is nothing for
+        ;; this to retire on their behalf.
         (kill-buffer (agent-river--shell-buffer "s1"))
         ;; The kill hook the registration installed schedules a block redraw
         ;; there is no buffer for here.
         (cancel-function-timers #'agent-river--redraw-block)
-        (should (agent-river--gone-p hosted))
-        (should (agent-river--gone-p (agent-river-state "s1/a2" "Explore" "s1" "Explore")))))))
+        (should (agent-river--gone-p hosted))))))
 
 (ert-deftest agent-river-test-a-killed-session-marks-the-map-dirty ()
   ;; Nothing else can say so.  A killed session sends no further events, so
@@ -1527,14 +1513,15 @@ stubbed here so the tests do not depend on agent-shell being installed."
     (should (agent-river--label-column "alpha"))))
 
 ;;; Subagents
+;;
+;; A subagent is a dimension of the session that spawned it, not a peer beside
+;; it in the registry.  It has no prompt, no working directory, no place and
+;; nothing that can be told to it -- it failed the definition of a session in
+;; four ways, and every reader of the registry used to begin by sorting it back
+;; out again.  What it is is a tally of what a session set in motion, and these
+;; hold what that tally still owes.
 
-(ert-deftest agent-river-test-key-composes-session-and-agent ()
-  (should (equal (agent-river-key "s1") "s1"))
-  (should (equal (agent-river-key "s1" nil) "s1"))
-  (should (equal (agent-river-key "s1" "") "s1"))
-  (should (equal (agent-river-key "s1" "a9") "s1/a9")))
-
-(ert-deftest agent-river-test-subagent-work-stays-out-of-the-parent ()
+(ert-deftest agent-river-test-a-subagent-folds-onto-its-session ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
     (agent-river-observe '(:kind "act" :session "s1" :label "repo"
@@ -1543,57 +1530,20 @@ stubbed here so the tests do not depend on agent-shell being installed."
       (agent-river-observe '(:kind "act" :session "s1" :agent "a9"
                                    :agent-type "Explore"
                                    :tool "Read" :file "x.el" :detail "Read x.el")))
-    (let ((parent (gethash "s1" agent-river-registry))
-          (child (gethash "s1/a9" agent-river-registry)))
-      ;; Subagent calls carry the parent session id, so keying on that alone
-      ;; would report five steps here instead of one.
-      (should (= (agent-river-state-steps parent) 1))
-      (should (= (agent-river-state-steps child) 4))
-      (should (equal (agent-river-state-parent child) "s1"))
-      (should (equal (agent-river-state-label child) "Explore")))))
+    ;; One registry entry, because there is one session.  The agent_id used to
+    ;; make a second one beside it.
+    (should (= (hash-table-count agent-river-registry) 1))
+    (let ((state (gethash "s1" agent-river-registry)))
+      ;; A delegated step is a step this session took -- it asked for it -- so
+      ;; the panel says five rather than one and an onlooker sees the work.
+      (should (= (agent-river-state-steps state) 5))
+      ;; And the file is in the session's own tables, which is what
+      ;; `agent-river-touching' and the map read.  It used to be in the
+      ;; child's and nowhere else.
+      (should (gethash "x.el" (agent-river-state-artifacts state)))
+      (should (agent-river-touching "x.el")))))
 
-(ert-deftest agent-river-test-subagent-failures-do-not-signal-the-parent ()
-  (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-auto-display nil)
-        (agent-river-fail-streak-threshold 3)
-        (signals nil))
-    (dotimes (_ 3)
-      (push (agent-river-observe '(:kind "fail" :session "s1" :agent "a9"
-                                         :agent-type "Explore"
-                                         :tool "Read" :detail "Read"))
-            signals))
-    ;; The child hit the threshold and is told nothing, because nothing it
-    ;; is told arrives -- see `agent-river--answerable-p'.  This assertion
-    ;; used to read the other way round on the assumption that a subagent's
-    ;; synchronous hook could answer it; measuring said otherwise.
-    (should-not (car signals))
-    ;; What the test was always really about: the parent, which did nothing
-    ;; wrong, keeps its own streak and its own silence.
-    (should (= 0 (agent-river-state-fail-streak
-                  (agent-river-state "s1" "repo"))))
-    (should-not (agent-river--signal (agent-river-state "s1" "repo")))))
-
-(ert-deftest agent-river-test-a-subagent-is-never-signalled ()
-  (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-auto-display nil)
-        (agent-river-fail-streak-threshold 1))
-    (agent-river-observe '(:kind "fail" :session "s1" :agent "a9"
-                                 :agent-type "Explore" :tool "Read" :detail "Read"))
-    (let ((child (gethash "s1/a9" agent-river-registry)))
-      ;; The streak is measured either way -- the HUD still shows the child
-      ;; failing, and the parent's report still aggregates it.
-      (should (= (agent-river-state-fail-streak child) 1))
-      ;; But nothing is handed over, and nothing is recorded as handed over.
-      ;; additionalContext returned from a subagent's hook reaches neither the
-      ;; subagent nor the parent, so counting it would make the signals tally
-      ;; report a conversation that never happened -- the same lie
-      ;; `agent-river-answering-kinds' was added to stop, in the other
-      ;; dimension: not which event, but which state.
-      (should-not (agent-river-state-signals child))
-      (should (agent-river--answerable-p (agent-river-state "s1" "repo")))
-      (should-not (agent-river--answerable-p child)))))
-
-(ert-deftest agent-river-test-parent-sees-subagents-aggregated ()
+(ert-deftest agent-river-test-a-session-still-says-what-it-delegated ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
     (agent-river-observe '(:kind "act" :session "s1" :label "repo"
@@ -1606,19 +1556,51 @@ stubbed here so the tests do not depend on agent-shell being installed."
                                  :agent-type "Plan" :detail "Read"))
     (let* ((report (agent-river-report "s1"))
            (subs (plist-get report :subagents)))
-      (should (= (plist-get report :task-steps) 1))
+      ;; What the session set in motion is the question the tally answers, and
+      ;; it survived the collapse intact.
       (should (= (plist-get subs :total) 2))
       (should (= (plist-get subs :running) 2))
       (should (= (plist-get subs :steps) 3))
       (should (equal (sort (mapcar #'car (plist-get subs :each)) #'string<)
-                     '("Explore" "Plan"))))))
+                     '("Explore" "Plan")))
+      ;; The session's own step count is everything, delegated included.
+      (should (= (plist-get report :task-steps) 4)))))
 
-(ert-deftest agent-river-test-report-omits-subagents-when-there-are-none ()
+(ert-deftest agent-river-test-a-subagent-is-never-signalled ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-auto-display nil))
-    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
-                                 :tool "Bash" :detail "Bash"))
-    (should-not (plist-member (agent-river-report "s1") :subagents))))
+        (agent-river-auto-display nil)
+        (agent-river-fail-streak-threshold 1))
+    (let ((answer (agent-river-observe
+                   '(:kind "fail" :session "s1" :agent "a9"
+                           :agent-type "Explore" :tool "Read" :detail "Read"))))
+      ;; `additionalContext' returned from a subagent's hook reaches neither
+      ;; the subagent nor the session -- measured, not assumed.  So nothing is
+      ;; handed over and nothing is recorded as handed over: counting it would
+      ;; make the tally report a conversation that never happened.
+      (should-not answer)
+      (should-not (agent-river-state-signals (gethash "s1" agent-river-registry))))
+    ;; The gate reads the event now.  It used to read a registry entry that
+    ;; existed so that this question had something to ask.
+    (should (agent-river--answerable-p '(:kind "fail" :session "s1")))
+    (should-not (agent-river--answerable-p '(:kind "fail" :session "s1" :agent "a9")))
+    (should (agent-river--answerable-p '(:kind "fail" :session "s1" :agent "")))))
+
+(ert-deftest agent-river-test-a-delegated-failure-is-counted-not-streaked ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil)
+        (agent-river-fail-streak-threshold 3))
+    (dotimes (_ 3)
+      (agent-river-observe '(:kind "fail" :session "s1" :agent "a9"
+                                   :agent-type "Explore" :tool "Read" :detail "Read")))
+    (let ((state (gethash "s1" agent-river-registry)))
+      ;; Three subagents failing once each is not one line of work failing
+      ;; three times, and the streak is what a signal is built from -- so the
+      ;; streak stays the session's own.  The failures are counted all the
+      ;; same, on the tally and in the task.
+      (should (= (agent-river-state-fail-streak state) 0))
+      (should-not (agent-river--signal state))
+      (should (= (agent-river-state-task-failures state) 3))
+      (should (= (plist-get (car (agent-river-children "s1")) :failures) 3)))))
 
 (ert-deftest agent-river-test-subagent-stop-marks-it-done ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -1626,18 +1608,23 @@ stubbed here so the tests do not depend on agent-shell being installed."
     (agent-river-observe '(:kind "act" :session "s1" :label "repo" :detail "Bash"))
     (agent-river-observe '(:kind "act" :session "s1" :agent "a1"
                                  :agent-type "Explore" :detail "Read"))
-    (let ((subs (plist-get (agent-river-report "s1") :subagents)))
-      (should (= (plist-get subs :running) 1))
-      (should (equal (plist-get (cdr (car (plist-get subs :each))) :status)
-                     "running")))
+    (should (equal (plist-get (car (agent-river-children "s1")) :status) "running"))
     ;; Finishing is an event, not something inferred from going quiet: a
     ;; subagent that just returned is still well inside the TTL.
     (agent-river-observe '(:kind "done" :session "s1" :agent "a1"
                                  :agent-type "Explore" :detail "Explore finished"))
-    (let ((subs (plist-get (agent-river-report "s1") :subagents)))
-      (should (= (plist-get subs :running) 0))
-      (should (equal (plist-get (cdr (car (plist-get subs :each))) :status)
-                     "done")))))
+    (should (equal (plist-get (car (agent-river-children "s1")) :status) "done"))))
+
+(ert-deftest agent-river-test-a-done-without-an-agent-retires-nothing ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo" :detail "Bash"))
+    ;; If `SubagentStop' ever arrives naming no child, there is nothing for it
+    ;; to retire -- and it must not reach for the session, which is alive.
+    (agent-river-observe '(:kind "done" :session "s1" :detail "finished"))
+    (should-not (agent-river-children "s1"))
+    (should (agent-river--active-p (gethash "s1" agent-river-registry)))
+    (should-not (agent-river-state-step (gethash "s1" agent-river-registry)))))
 
 (ert-deftest agent-river-test-subagent-without-end-event-goes-stale ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -1646,32 +1633,21 @@ stubbed here so the tests do not depend on agent-shell being installed."
     (agent-river-observe '(:kind "act" :session "s1" :label "repo" :detail "Bash"))
     (agent-river-observe '(:kind "act" :session "s1" :agent "a1"
                                  :agent-type "Explore" :detail "Read"))
-    (setf (agent-river-state-last-seen (gethash "s1/a1" agent-river-registry))
-          (time-subtract (current-time) 600))
-    ;; Distinguished from "done" on purpose: this one vanished without
-    ;; saying so, and a report that called it finished would be guessing.
-    (let ((subs (plist-get (agent-river-report "s1") :subagents)))
-      (should (= (plist-get subs :running) 0))
-      (should (equal (plist-get (cdr (car (plist-get subs :each))) :status)
-                     "stale")))))
+    (let* ((state (gethash "s1" agent-river-registry))
+           (cell (gethash "a1" (agent-river-state-subagents state))))
+      (puthash "a1" (plist-put cell :last (time-subtract (current-time) 600))
+               (agent-river-state-subagents state)))
+    ;; Distinguished from "done" on purpose: this one vanished without saying
+    ;; so, and a report that called it finished would be guessing.  The TTL is
+    ;; all a subagent has -- it never had a buffer of its own.
+    (should (equal (plist-get (car (agent-river-children "s1")) :status) "stale"))))
 
-(ert-deftest agent-river-test-done-clears-the-in-flight-step ()
-  (let ((agent-river-registry (make-hash-table :test 'equal)))
-    (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
-      (agent-river-fold child '(:kind "act" :tool "Read" :file "a.el"))
-      (should (agent-river-state-step child))
-      (agent-river-fold child '(:kind "done"))
-      (should-not (agent-river-state-step child))
-      (should (agent-river-state-done child)))))
-
-(ert-deftest agent-river-test-done-never-retires-a-root-session ()
-  (agent-river-test--with-session state
-    ;; If SubagentStop turns out not to carry an agent_id, the event lands on
-    ;; the parent key.  Marking a live session finished would make every
-    ;; later reading wrong, so a done without a parent is dropped.
-    (agent-river-fold state '(:kind "done"))
-    (should-not (agent-river-state-done state))
-    (should (agent-river--active-p state))))
+(ert-deftest agent-river-test-report-omits-subagents-when-there-are-none ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :tool "Bash" :detail "Bash"))
+    (should-not (plist-member (agent-river-report "s1") :subagents))))
 
 (ert-deftest agent-river-test-observe-returns-signal-and-folds-it-back ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -2886,30 +2862,30 @@ AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
     (agent-river-observe '(:kind "think" :session "s1" :agent "a1"
                                  :tool "Edit" :detail "Edit"))))
 
-(ert-deftest agent-river-test-a-file-a-subagent-holds-is-noted-to-the-root ()
+(ert-deftest agent-river-test-a-file-a-subagent-holds-is-noted-to-the-session ()
   (agent-river-test--with-observers
     (agent-river-test--delegating-session "shared.el")
-    ;; A delegated file lands in the subagent's task frame and never in its
-    ;; parent's, so asking the root alone produced no note at all -- silence
-    ;; in the case with the least supervision in it.
+    ;; A delegated file used to land in the subagent's task frame and never
+    ;; in its parent's, so asking the session alone produced no note at all
+    ;; -- silence in the case with the least supervision in it.  It is the
+    ;; session's own touch now, so there is one frame to ask and no family
+    ;; to range over.
     (should (equal (agent-river-note-foreign-save "/repo/shared.el") '("s1")))
-    (let ((root (gethash "s1" agent-river-registry))
-          (child (gethash "s1/a1" agent-river-registry)))
-      ;; Addressed to the root, because a root is the only thing that can be
-      ;; told anything -- and never to the subagent, which cannot.
-      (should (= (length (agent-river-state-notes root)) 1))
-      (should-not (agent-river-state-notes child)))))
+    (should (= (hash-table-count agent-river-registry) 1))
+    (should (= (length (agent-river-state-notes (gethash "s1" agent-river-registry)))
+               1))))
 
-(ert-deftest agent-river-test-a-note-says-who-is-in-the-file ()
+(ert-deftest agent-river-test-a-note-counts-the-session-s-touches ()
   (agent-river-test--with-observers
     (agent-river-test--delegating-session "main.el")
     (agent-river-note-foreign-save "/repo/main.el")
     (let ((text (cdr (car (agent-river-state-notes
                            (gethash "s1" agent-river-registry))))))
-      ;; Addressed to the parent and silent about the child, this would read
-      ;; as a statement about the parent's own work.
-      (should (string-match-p "1 touch," text))
-      (should (string-match-p "Explore 1 touch" text))
+      ;; The note used to name the child separately, because the touches were
+      ;; the child's and saying "the session" would have claimed work it had
+      ;; not done.  They are the session's now -- its own and its delegated
+      ;; one -- so there is one number and it is right.
+      (should (string-match-p "2 touches" text))
       ;; And it labels the frame rather than saying "this task" whatever the
       ;; scope happens to be.
       (should (string-match-p "this task" text)))))
@@ -2928,12 +2904,12 @@ AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
         (should (string-match-p "this session" text))
         (should-not (string-match-p "this task" text))))))
 
-(ert-deftest agent-river-test-an-open-call-anywhere-in-the-family-suppresses ()
+(ert-deftest agent-river-test-an-open-delegated-call-suppresses ()
   (agent-river-test--with-observers
     (agent-river-test--delegating-session "shared.el")
-    ;; The subagent opens a call on the file and does not close it: the save
-    ;; may be that write landing, and the guard has to reach the whole family
-    ;; now that the question does.
+    ;; A subagent opens a call on the file and does not close it: the save may
+    ;; be that write landing.  The guard used to have to range over the family
+    ;; to see it; the open call is on the session's own step now.
     (agent-river-observe '(:kind "act" :session "s1" :agent "a1"
                                  :agent-type "Explore" :file "shared.el"
                                  :detail "Edit"))
@@ -2941,16 +2917,6 @@ AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
     (agent-river-observe '(:kind "think" :session "s1" :agent "a1"
                                  :tool "Edit" :detail "Edit"))
     (should (agent-river-note-foreign-save "/repo/shared.el"))))
-
-(ert-deftest agent-river-test-a-finished-subagent-holds-nothing ()
-  (agent-river-test--with-observers
-    (agent-river-test--delegating-session "shared.el")
-    (agent-river-observe '(:kind "done" :session "s1" :agent "a1"
-                                 :agent-type "Explore" :detail "Explore finished"))
-    ;; The question is who is in the file now.  A child that has stopped
-    ;; cannot be about to overwrite anything, and SubagentStop says so as a
-    ;; fact rather than a guess.
-    (should-not (agent-river-note-foreign-save "/repo/shared.el"))))
 
 (ert-deftest agent-river-test-watching-saves-is-off-until-asked-for ()
   (should-not (default-value 'agent-river-watch-saves-mode))
@@ -3378,23 +3344,22 @@ first line from a survey."
   (should (equal (agent-river--md-code "a`b.el") "`` a`b.el ``"))
   (should (equal (agent-river--md-code "a``b.el") "``` a``b.el ```")))
 
-(ert-deftest agent-river-test-the-export-folds-subagents-under-the-parent ()
+(ert-deftest agent-river-test-the-export-folds-subagents-under-the-session ()
   (agent-river-test--with-export
-    (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
+    (let ((state (agent-river-state "s1" "alpha")))
       (dotimes (_ 3)
-        (agent-river-fold child '(:kind "act" :cwd "/repo" :tool "Read"
+        (agent-river-fold state '(:kind "act" :cwd "/repo" :tool "Read"
+                                        :agent "a1" :agent-type "Explore"
                                         :file "README.md"))))
     (let ((markdown (agent-river-markdown)))
-      ;; No section of its own, exactly as it gets no panel line: the work
-      ;; is counted on the parent and aggregated on demand, so the two
-      ;; cannot drift.
+      ;; No section of its own, exactly as it gets no panel line.
       (should-not (string-match-p "^### .*Explore" markdown))
       (should (string-match-p "\\*\\*subagents\\*\\* — 1 of 1 running" markdown))
       (should (string-match-p "    - `Explore` — running · 3 steps" markdown))
-      ;; The name comes out as a code span like every other name here, which
-      ;; is why this is read off the child's state rather than out of
-      ;; `agent-river--child-digest's already-formatted string.
-      (should (string-match-p "hottest `README\\.md` ×3" markdown)))))
+      ;; And no hottest file of its own.  The delegated file is in the
+      ;; session's own tables now and is already named above; a second
+      ;; reading of it here is the one that could disagree.
+      (should (string-match-p "README\\.md" markdown)))))
 
 (ert-deftest agent-river-test-the-export-mirrors-the-block-not-the-registry ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -3527,14 +3492,21 @@ first line from a survey."
                            (agent-river--map-reach "/repo" 'session))
                    '("src/a.el")))))
 
-(ert-deftest agent-river-test-a-subagent-is-named-under-its-root ()
+(ert-deftest agent-river-test-a-party-is-the-session-that-delegated ()
   (agent-river-test--with-session state
-    (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
-      ;; Folded into the parent's name it would say the parent worked in a
-      ;; file it never opened; shown as the bare agent type, two `Explore'
-      ;; lines would be indistinguishable.
-      (should (equal (agent-river--party-label state) "alpha"))
-      (should (equal (agent-river--party-label child) "alpha/Explore")))))
+    (agent-river-fold state '(:kind "act" :cwd "/repo" :agent "a1"
+                                    :agent-type "Explore" :file "src/a.el"))
+    ;; This used to read `alpha/Explore', because the file was in the
+    ;; child's artifact tables and never in the parent's -- so naming the
+    ;; parent would have claimed it worked in a file it never opened.  The
+    ;; touch lands on the session now, so the party is the session and the
+    ;; map shows one name per agent rather than one per agent plus one per
+    ;; thing it delegated to.
+    (should (equal (agent-river--party-label state) "alpha"))
+    (should (equal (mapcar (lambda (p) (plist-get p :party))
+                           (plist-get (car (agent-river--map-reach "/repo" 'session))
+                                      :parties))
+                   '("alpha")))))
 
 
 ;;; Directory heat -- the aggregate a dired line can carry
@@ -3868,46 +3840,6 @@ is how a test asks what the view looks like once the work has moved on."
           ;; And a root the exemption was the only reason to draw goes too,
           ;; rather than heading a section with nothing under it.
           (should-not (agent-river--map-all-roots)))))))
-
-(ert-deftest agent-river-test-a-finished-subagent-stops-being-pointed-at ()
-  ;; SubagentStop is authoritative, so a child that has ended is gone in the
-  ;; same sense a killed buffer is.  Its last file says where it was, and
-  ;; there is nobody left for the marker to be about.
-  (let ((agent-river-heat-half-life 120)
-        (agent-river-map-party-floor 0.25)
-        (agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
-          (agent-river-fold child (list :kind "act" :cwd root :file "common/c.el"))
-          (agent-river-test--cool child "common/c.el" 3600)
-          (should (agent-river--map-entries root))
-          (agent-river-fold child '(:kind "done"))
-          (should-not (agent-river--map-entries root)))))))
-
-(ert-deftest agent-river-test-a-live-sibling-keeps-the-party-named ()
-  ;; A party is a label and two sessions can share one -- both `Explore'
-  ;; subagents of alpha are `alpha/Explore'.  So whether it has ended is a
-  ;; fold over all of them: asked per session, a finished sibling would have
-  ;; taken the marker off a party that is still running.
-  (let ((agent-river-heat-half-life 120)
-        (agent-river-map-party-floor 0.25)
-        (agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (let ((live (agent-river-state "s1/a1" "Explore" "s1" "Explore"))
-              (done (agent-river-state "s1/a2" "Explore" "s1" "Explore")))
-          (agent-river-fold live (list :kind "act" :cwd root :file "docs/d.el"))
-          ;; Enough to order the two touches without cooling either past the
-          ;; floor, so the party's newest file is the finished one's.
-          (agent-river-test--cool live "docs/d.el" 10)
-          (agent-river-fold done (list :kind "act" :cwd root :file "common/c.el"))
-          (agent-river-fold done '(:kind "done"))
-          (let ((common (seq-find (lambda (e) (equal (plist-get e :name) "common"))
-                                  (agent-river--map-entries root))))
-            (should (equal (plist-get (car (plist-get common :parties)) :party)
-                           "alpha/Explore"))
-            (should (plist-get (car (plist-get common :parties)) :current))))))))
 
 (ert-deftest agent-river-test-a-quiet-session-keeps-its-name-and-marker ()
   ;; The TTL is a guess at a process we cannot see, and a name is not thrown
@@ -4399,21 +4331,6 @@ its members behind for the next one."
           (should gone)
           (should (plist-get gone :missing))
           (should (plist-get gone :parties)))))))
-
-(ert-deftest agent-river-test-a-subagent-is-named-on-the-map ()
-  (let ((agent-river-heat-half-life nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (let ((child (agent-river-state "s1/a1" "Explore" "s1" "Explore")))
-          (agent-river-fold child (list :kind "act" :cwd root :file "common/c.el"))
-          (let ((common (seq-find (lambda (e) (equal (plist-get e :name) "common"))
-                                  (agent-river--map-entries root))))
-            ;; The note the map is addressed to a human rather than to the
-            ;; agent, but the reasoning is the same as a foreign save's: a
-            ;; file a child holds, reported under the parent's name, reads
-            ;; as a statement about the parent's own work.
-            (should (equal (plist-get (car (plist-get common :parties)) :party)
-                           "alpha/Explore"))))))))
 
 (ert-deftest agent-river-test-a-map-fold-made-by-hand-wins ()
   (let ((agent-river--map-folds nil))
