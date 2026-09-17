@@ -23,7 +23,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (377 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (383 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -703,7 +703,10 @@ and rides the fine grain. A place heading is a map *section* heading, and it
 rides both the fine grain and the coarse one for the reason that one does:
 the coarse motion is about the block's own structure, not about sessions in
 particular, and a heading reachable only by walking every detail line under
-the session above it is a heading nobody navigates to. `>` is `agent-river-notable-kinds` in the HUD, "some
+the session above it is a heading nobody navigates to. `>` is `agent-river-notable-kinds` in the HUD —
+which includes `artifact`, because a record arriving is one step further out
+than a note (nobody in the session saw it) and it lands when nothing else is
+happening, which is when a log is worth scanning at all — "some
 agent is under this" on the map, and in the queue it coincides with `M-n` —
 bound all the same, because a reader arriving from either of the others
 presses it expecting the next thing that wants them, and getting it is the
@@ -1355,6 +1358,23 @@ together:
   estimated. These degrade to the TTL-based path when agent-shell is absent — keep
   that optional. The reasoning lines below are the one exception: they have no
   fallback.
+- **A draw derives once and reads everything else off that**
+  (`agent-river--heat-memo`, `agent-river--section-memo`,
+  `agent-river--newest-memo`). Three boxes, one shape, all bound by
+  `agent-river--map-draw` and thrown away with it -- a draw is synchronous
+  Lisp, nothing on that path folds or declares, so the binding cannot
+  outlive the walk it was made for and there is no invalidation to get
+  wrong. Outside a draw they are nil and every call reads what is there,
+  which is what a caller outside a draw is asking about. The entry list
+  came first; the two added after it are readings *of* that list, and both
+  were being taken once per node rather than once per draw. Measured on
+  2026-09-17, 3000 artifacts and 200 records: 697 walks of the artifact
+  table and 3 of the entry list, down to one each, and the draw from ~205 ms
+  to ~145 ms. At 20 records it is inside the noise -- the win is in the
+  count of records, not in the mechanism -- which is the honest way round
+  for a cache whose cost is a variable somebody has to remember to bind.
+  Each memo has a test that pins both halves: one read inside a draw, and a
+  full read outside one.
 - **Which buffer hosts a session is indexed, never searched**
   (`agent-river--shell-sessions`, read through `agent-river--shell-buffer`).
   Every redraw asks this of every session three times over — label, is the

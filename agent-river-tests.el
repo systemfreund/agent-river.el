@@ -5587,6 +5587,34 @@ first."
       (should (= (plist-get (car inc) :reached) 1))
       (should (equal (alist-get 'severity (plist-get (car inc) :context)) "P1")))))
 
+(ert-deftest agent-river-test-a-record-says-when-in-one-language ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (let ((record (car (agent-river-artifacts-list 'inc))))
+      ;; One list, one way of saying when.  `:last' came out as a raw
+      ;; timestamp beside a formatted `:appeared', and the only reason for
+      ;; the odd one out was that the sort read it -- which the sort now does
+      ;; on the records instead.
+      (should (stringp (plist-get record :appeared)))
+      (should (stringp (plist-get record :ago)))
+      (should-not (plist-member record :last)))))
+
+(ert-deftest agent-river-test-a-record-under-no-key-is-refused ()
+  (agent-river-test--with-artifacts
+    ;; Addressable by nobody: it could not be reached, found, ended or
+    ;; dropped, and it would head a map section answering to nothing.
+    (should-error (agent-river-appeared "") :type 'user-error)
+    (should-error (agent-river-appeared nil) :type 'user-error)
+    (should (= (hash-table-count agent-river-artifacts) 0))))
+
+(ert-deftest agent-river-test-a-record-arriving-is-worth-stopping-on ()
+  (agent-river-test--with-artifacts
+    ;; `>' is for what broke, what the agent was told, and what was seen
+    ;; outside the hook stream.  A record arriving is one step further out
+    ;; again -- nobody in the session saw it -- and it lands when nothing
+    ;; else is happening, which is when the log is worth scanning at all.
+    (should (member "artifact" agent-river-notable-kinds))))
+
 (ert-deftest agent-river-test-an-artifact-line-is-its-own-kind ()
   (agent-river-test--with-artifacts
     (agent-river-appeared "inc:INC-444" :text "INC-444 routed to you")
@@ -6034,6 +6062,81 @@ first."
               (should (= walks 2))))
         (advice-mapc (lambda (f _p) (advice-remove 'agent-river--heat-walk f))
                      'agent-river--heat-walk)))))
+
+(ert-deftest agent-river-test-one-draw-reads-the-artifact-table-once ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-1" :domain 'inc)
+    (agent-river-appeared "rev:pr-1" :domain 'review)
+    (let ((reads 0))
+      (advice-add 'agent-river-domains :before
+                  (lambda (&rest _) (setq reads (1+ reads))))
+      (unwind-protect
+          (progn
+            ;; Outside a draw, every call reads the table: a caller there is
+            ;; asking about now, the same bargain `agent-river--heat-memo'
+            ;; strikes one derivation up.
+            (agent-river--map-domain "inc:")
+            (agent-river--map-domain "inc:")
+            (should (= reads 2))
+            ;; Inside one, the question is asked once per node -- three times
+            ;; over for every line -- and the answer cannot change while the
+            ;; draw runs, because nothing on that path declares an artifact.
+            (setq reads 0)
+            (let ((agent-river--section-memo (cons nil nil)))
+              (should (eq (agent-river--map-domain "inc:") 'inc))
+              ;; The root is built from the domain, never from the key's own
+              ;; prefix: `rev:pr-1' is a `review' record and its section is
+              ;; `review:'.
+              (should-not (agent-river--map-domain "rev:"))
+              (should (eq (agent-river--map-domain "review:") 'review))
+              (should-not (agent-river--map-domain "/repo"))
+              (should (equal (agent-river--map-live-domains) '(inc review)))
+              (should (= reads 1))))
+        (advice-mapc (lambda (f _p) (advice-remove 'agent-river-domains f))
+                     'agent-river-domains)))))
+
+(ert-deftest agent-river-test-a-domain-with-no-records-is-no-section ()
+  (agent-river-test--with-artifacts
+    ;; The memo has to tell "asked and the answer is none" from "not asked
+    ;; yet", or a map with no records at all reads the table once per node
+    ;; for ever -- which is the shape with the least to gain and the most
+    ;; lines to spend it on.
+    (let ((reads 0))
+      (advice-add 'agent-river-domains :before
+                  (lambda (&rest _) (setq reads (1+ reads))))
+      (unwind-protect
+          (let ((agent-river--section-memo (cons nil nil)))
+            (should-not (agent-river--map-domain "inc:"))
+            (should-not (agent-river--map-domain "inc:"))
+            (should (= reads 1)))
+        (advice-mapc (lambda (f _p) (advice-remove 'agent-river-domains f))
+                     'agent-river-domains)))))
+
+(ert-deftest agent-river-test-one-draw-places-the-parties-once ()
+  (agent-river-test--with-artifacts
+    (let ((state (agent-river-state "s1" "alpha")) (walks 0))
+      (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"
+                                      :path "/repo/a.el" :cwd "/repo"))
+      (advice-add 'agent-river--map-newest-1 :before
+                  (lambda (&rest _) (setq walks (1+ walks))))
+      (unwind-protect
+          (let* ((agent-river--heat-memo (cons 'none nil))
+                 (agent-river--newest-memo (cons nil nil))
+                 (entries (agent-river--heat-entries 'session)))
+            ;; Three readers ask where each party is now -- the roots, each
+            ;; tree's reach, each domain's parties -- about one set of
+            ;; artifacts at one moment.  Each ask walked the registry again
+            ;; for `agent-river--gone-parties' and looked up a buffer per
+            ;; session.
+            (agent-river--map-newest entries)
+            (agent-river--map-newest entries)
+            (should (= walks 1))
+            ;; Keyed on the list itself, so a different frame is a different
+            ;; object and gets its own answer rather than the first one's.
+            (agent-river--map-newest (agent-river--heat-entries 'task))
+            (should (= walks 2)))
+        (advice-mapc (lambda (f _p) (advice-remove 'agent-river--map-newest-1 f))
+                     'agent-river--map-newest-1)))))
 
 (ert-deftest agent-river-test-the-shared-entry-list-is-never-mutated ()
   (agent-river-test--with-artifacts
