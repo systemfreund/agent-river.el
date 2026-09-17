@@ -6158,5 +6158,97 @@ first."
         (agent-river--map-newest first)
         (should (equal first snapshot))))))
 
+;;; What the party aggregation owes
+;;
+;; Three functions merge party cells and sort them heaviest first, and two of
+;; them answer the same question.  These pin what any shared version has to
+;; keep -- and, in the last test, the one thing it must not swallow.
+
+(ert-deftest agent-river-test-parties-come-back-heaviest-first ()
+  ;; The row order is the same reading as the shading, so it cannot contradict
+  ;; it: `agent-river--rows-parties' names them in the order it is handed, and
+  ;; a line shaded for the heaviest party with the lightest named first would
+  ;; be two answers to one question.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor nil))
+    (agent-river-test--with-session state
+      (let ((other (agent-river-state "s2" "beta")))
+        (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/c.el"))
+        (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/c.el"))
+        (agent-river-fold other '(:kind "act" :cwd "/repo" :file "src/c.el"))
+        ;; alpha has two touches to beta's one, so alpha is heavier.
+        (let ((parties (plist-get (car (agent-river--map-reach "/repo" 'session))
+                                  :parties)))
+          (should (equal (mapcar (lambda (p) (plist-get p :party)) parties)
+                         '("alpha" "beta")))
+          (should (> (plist-get (nth 0 parties) :weight)
+                     (plist-get (nth 1 parties) :weight))))))))
+
+(ert-deftest agent-river-test-nodes-come-back-heaviest-first ()
+  ;; What the map draws first, and what `agent-river-map-detail-files' keeps
+  ;; when it caps the list: cut from an unsorted list, the tail dropped would
+  ;; be whichever files happened to hash late.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor nil))
+    (agent-river-test--with-session state
+      (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/cold.el"))
+      (dotimes (_ 3)
+        (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/hot.el")))
+      (should (equal (mapcar (lambda (n) (plist-get n :rel))
+                             (agent-river--map-reach "/repo" 'session))
+                     '("src/hot.el" "src/cold.el"))))))
+
+(ert-deftest agent-river-test-a-party-is-named-with-the-tree-of-its-later-touch ()
+  ;; A party is a session and a session has one cwd, so reaching one name from
+  ;; two trees is a tie-break rather than a merge: an agent that has moved from
+  ;; one worktree to another is named with the one it is in now, not with
+  ;; whichever touch was folded first.
+  (let* ((old (list :party "alpha" :weight 5.0 :writes 0 :tree "old"
+                    :last (time-subtract (current-time) 600) :current nil))
+         (new (list :party "alpha" :weight 1.0 :writes 1 :tree "new"
+                    :last (current-time) :current nil))
+         ;; The heavier touch is the older one, so a merge that took the tree
+         ;; off the heavier party rather than the later one would pick "old".
+         (merged (agent-river--map-merge-parties
+                  (list (list :parties (list old)) (list :parties (list new))))))
+    (should (= (length merged) 1))
+    (should (equal (plist-get (car merged) :tree) "new"))
+    (should (= (plist-get (car merged) :weight) 6.0))
+    (should (= (plist-get (car merged) :writes) 1))))
+
+(ert-deftest agent-river-test-a-directory-is-current-when-any-child-is ()
+  ;; The seam.  `agent-river--map-reach' and `agent-river--domain-parties'
+  ;; decide `:current' by identity -- is this the file the party touched last
+  ;; -- and this one decides it by disjunction, because a directory is where
+  ;; the agent is when anything beneath it is.  Same merge, different
+  ;; question, so a shared aggregation must not swallow this one: folded in,
+  ;; every directory above the agent's file would quietly stop being marked.
+  (let* ((here (list :party "alpha" :weight 1.0 :writes 0 :last (current-time)
+                     :current t))
+         (there (list :party "alpha" :weight 9.0 :writes 0
+                      :last (time-subtract (current-time) 600) :current nil))
+         (merged (agent-river--map-merge-parties
+                  (list (list :parties (list there)) (list :parties (list here))))))
+    (should (plist-get (car merged) :current))))
+
+(ert-deftest agent-river-test-the-domain-path-applies-the-same-floor ()
+  ;; The floor is half of what the two aggregations share, and it was only
+  ;; ever tested on the file side.  A party too cold to name is not reached
+  ;; any more, whichever kind of key it reached.
+  (let ((agent-river-heat-half-life 120)
+        (agent-river-map-party-floor 0.25))
+    (agent-river-test--with-artifacts
+      (let ((state (agent-river-state "s1" "alpha")))
+        (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+        (agent-river-reach "inc:INC-444" "s1")
+        (should (gethash "inc:INC-444" (agent-river--domain-parties 'inc 'session)))
+        (agent-river-test--cool state "inc:INC-444" 3600)
+        ;; Cold, and no longer the party's most recent reach either -- the
+        ;; exemption that keeps a name on the one file an agent is on cannot
+        ;; apply, because there is nothing else it could be on.
+        (agent-river-fold state '(:kind "act" :cwd "/repo" :file "a.el"))
+        (should-not (gethash "inc:INC-444"
+                             (agent-river--domain-parties 'inc 'session)))))))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here
