@@ -8,9 +8,13 @@ reads `AGENTS.md` see the same text.
 
 An Emacs package that folds the Claude Code hook event stream into a per-session
 *state* (what the agent is working on, which files it revisits, how its tools are
-faring) and renders it into `*agent-river*`. `README.md` is the design document —
-it explains the reasoning behind nearly every decision here and is worth reading
-before changing behaviour.
+faring) and renders it into `*agent-river*`.
+
+`README.md` is the integration guide — the data model, the entry points and the
+extension protocols, written for somebody wiring their own application to this.
+It is deliberately *not* the design document any more: **this file is**. The
+reasoning behind a decision, and the failure it prevents, lives here and in the
+code comments. A change that moves behaviour updates both.
 
 Four files, no build system: `agent-river.el` (everything), `agent-river-tests.el`
 (ERT), `agent-river-hook.sh` (the bridge), and one example hook wiring per host —
@@ -1297,6 +1301,32 @@ together:
   reload does not demand `agent-river-reset`. The hooks carry no thinking text, so
   a session agent-shell does not host gets no `◇` lines; that is accepted, not a
   bug to route around.
+- **The phase is read from the last `agent-river-phase-window` steps**, by
+  three rules in order. **`waiting` outranks everything** — the tool window
+  still holds the steps of a finished turn, so without it the panel announces
+  `exploring` above a log line saying the turn is over, describing what the
+  work *was* while presenting it as what the work *is*. **`blocked` comes
+  from failures, not tools**, and its threshold (2) is deliberately lower
+  than the one for interrupting the agent (3): an onlooker may see a rough
+  patch early, the agent should only be told once it looks like more than bad
+  luck. **Otherwise the dominant tool bucket wins**, and only with at least
+  two classified steps — one is noise, two is a tendency. Shell calls stay
+  unclassified unless they match `agent-river-verify-regexp`, because the
+  same tool runs the test suite, a git query and a directory listing; the
+  practical consequence is that shell-heavy work often shows *no* phase at
+  all, and abstaining beats guessing. The pattern is applied only to shell
+  tools — matched against every step, it once classified reading a file
+  called `Cask` as verification.
+- **The block's fold is a flag, not an overlay.** The block is erased and
+  rebuilt on every event, so an outline fold would spring open on the next
+  tool call. A flag means the rebuilt block is drawn already open and stays
+  that way until it is asked to close. Same rule as `agent-river-map-toggle`,
+  which folds by deciding what gets drawn, and for the same reason.
+- **The blank line between block and log is the whole divider.** There was a
+  `* -- eventlog` heading there once, and it was removed: a divider that
+  exists to be a fold handle earns its line from nobody who is reading, and a
+  blank one separates just as well at no cost in labels. It belongs to the
+  block and is redrawn with it, so a session ending cannot leave it behind.
 - **The buffer is newest-first** with the state block pinned at the top
   (`agent-river--block-end`), so nothing has to be tailed and trimming takes from
   the bottom. The block is deliberately *not* `header-line-format` (single-line,
