@@ -436,11 +436,10 @@ answer to one question: *what is it about?*
 | report what only Emacs can see | `agent-river-note` | a session |
 | report something no session owns | `agent-river-appeared` | an artifact |
 | annotate the map's lines | `agent-river-map-contributors` | a path or key |
-| say where a session belongs | `agent-river-panel-place-functions` | a session |
 
 The first four hang off a **subject** — the thing an event is folded onto, of
-which there are exactly two. The last two are views: they are handed something
-to annotate and fold nothing, so a path or a key there is not a third subject.
+which there are exactly two. The last is a view: it is handed something to
+annotate and folds nothing, so a path or a key there is not a third subject.
 
 The two observer hooks are separate so that a consumer never has to begin by
 asking which kind of subject it was handed. A consumer that reads no subject at
@@ -552,31 +551,6 @@ with a view attached — and expect to be **retired on the first error**, like a
 observer. The diffstat (`agent-river--rows-vc`) is the asynchronous, batched and
 aggregating case at once; read it before writing anything that shells out.
 
-## Where a session belongs
-
-A place function is called with one state and answers nil ("not mine") or a
-plist of `:key` (identity, compared with `equal`), `:name` and an optional
-`:visit`. The first to answer wins, so the list reads from the most specific
-question to the most general.
-
-```elisp
-(add-to-list 'agent-river-panel-place-functions
-             (lambda (state)
-               (when-let* ((team (agent-river-state-label state)))
-                 (list :key (concat "team:" team)
-                       :name (concat "team " team)
-                       :visit (lambda () (browse-url "https://…"))))))
-```
-
-**The working directory is the default anchor, not the only one.** It is what
-the hooks happen to report, not something a session fundamentally has: this
-already folds sessions that touch no file, and a session with no disk at all is
-not thereby unplaceable — it is placed by something the fold does not know,
-which is what the extension point is for.
-
-A place function is asked on every redraw, so it answers from what it already
-has, and one that throws is retired on the spot.
-
 ## Domains
 
 Registering a domain in `agent-river-map-domains` is optional and only ever
@@ -655,8 +629,8 @@ every fold, over a **newest-first** log.
 One tool call is **one line**: the outcome is written onto the line that opened
 it, so the timestamp stays the one the call began at. Pairing is by
 `tool_use_id`, never by nearness or tool name — two parallel `Bash` calls would
-otherwise complete each other. The block groups sessions by place once there is
-more than one place to be. `◇` lines are the agent's own reasoning and `“` lines
+otherwise complete each other. The block is one line per live session, ordered
+by label. `◇` lines are the agent's own reasoning and `“` lines
 what it said at the end of a turn; neither is in any hook payload, so both come
 from the session's agent-shell buffer where there is one.
 
