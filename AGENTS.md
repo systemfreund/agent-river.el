@@ -23,7 +23,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (389 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (394 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -976,6 +976,18 @@ Four things about the map are load-bearing:
   later; `agent-river--git-run` is the process without the diffstat's
   in-flight counting around it, because a `rev-parse` holding that counter
   open would stop a tree being read for a question it was not asking.
+- **Six facts per line, each on its own channel**, and the two a contributor
+  may reach are at opposite ends of it for opposite readings. `:summary` earns
+  the fixed-width column at the end, which is read by running an eye *down* the
+  listing. `:badge` earns one glyph in the gutter, against the name, which is
+  read at the moment the name is — what a queue of things carrying a state (red
+  or green, blocked or free) is actually scanned for. One column wide and
+  refused otherwise, because the gutter is the indentation of every name in the
+  buffer; first contributor in registration order wins, since there is one slot
+  and no arithmetic that could merge two glyphs; and the slot is opened for the
+  whole buffer or for none of it (`agent-river--map-badged-p`), the same
+  decision the column makes and for the same reason. A reading belongs in one
+  of the two, never both.
 - **Depth only where there is activity.** A whole tree unfolded is unreadable
   in a monorepo, so RET descends (`agent-river-map-descend`) rather than
   widening, and a file five directories down is shown under the one entry the

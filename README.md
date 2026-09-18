@@ -553,6 +553,27 @@ or point lands on the wrong row after one), `:rank` (low first) and optionally
 a contributor earns the line's fixed-width column, and it must be a reading *of
 the rows*, the same data smaller, never a second account of it.
 
+`:badge` is the other reading a contributor may put on the line, and the only
+one that goes **before the name**: one glyph, in the gutter, against the thing
+it is about. The column at the end of the line is read by running an eye down
+it; a badge is read at the moment the name is, which is what a queue of things
+with a state — red or green, blocked or free — actually wants. It takes the
+same rows and answers a glyph:
+
+```elisp
+(list :name 'ci :read #'my/rows :badge (lambda (rows) (plist-get (car rows) :badge)))
+```
+
+Three rules. It must be **exactly one column wide** or it is refused rather
+than truncated — the gutter is what every name in the buffer is indented by, so
+a wide badge moves one name out of step with all of them. **The first
+contributor with one wins**, in registration order: there is one slot and no
+arithmetic that could combine two glyphs, and `:rank` deliberately does not
+decide it, since that orders rows and a badge is not a row. And like the
+column, the slot is **opened for the whole buffer or for none of it**, so it
+stays in the same place down the listing. Say it once: a contributor that
+badges a reading should not also put it in the column.
+
 Batch per root — thirty lines with a subprocess each, every TTL, is a fork bomb
 with a view attached — and expect to be **retired on the first error**, like an
 observer. The diffstat (`agent-river--rows-vc`) is the asynchronous, batched and

@@ -8437,8 +8437,18 @@ now, rather than whoever was registered last."
     (dolist (pair contributed)
       (unless (agent-river--map-said-p pair column)
         (setq rows (append rows (cdr pair)))))
-    (sort rows (lambda (a b) (< (or (plist-get a :rank) 0)
-                                (or (plist-get b :rank) 0))))))
+    ;; Sorted on a copy.  `append' shares the last list it is given, so the
+    ;; tail of this one is the row list a contributor still holds -- and
+    ;; `sort' rewrites the cells it is handed.  Sorting in place therefore
+    ;; reached back into `agent-river--map-rows'' table and left that
+    ;; contributor's own entry pointing at somebody else's rows, which the
+    ;; summary then read: the line lost its column while the rows underneath
+    ;; it were perfectly correct.  It takes a contributor ranking ahead of an
+    ;; earlier-registered one to show, which is why no shipping contributor
+    ;; ever did -- all four of them rank 0.
+    (sort (copy-sequence rows)
+          (lambda (a b) (< (or (plist-get a :rank) 0)
+                           (or (plist-get b :rank) 0))))))
 
 (defun agent-river--map-summarised-p (rows)
   "Return non-nil when anything in ROWS would put a reading on a line."
@@ -8448,6 +8458,57 @@ now, rather than whoever was registered last."
                  (when (and (plist-get (car pair) :summary)
                             (funcall (plist-get (car pair) :summary) (cdr pair)))
                    (setq found t))))
+             rows)
+    found))
+
+(defun agent-river--map-glyph (glyph)
+  "Return GLYPH when it may stand in the gutter, nil otherwise.
+
+Exactly one column wide, and refused rather than truncated when it is
+not.  The gutter is what every name on the map is indented by, so a badge
+two columns wide does not merely look wrong on its own line -- it moves
+that name out of step with every other name in the buffer, which is the
+one thing the tree cannot survive.  A contributor that wants to say more
+than a glyph has the column at the end of the line and the rows beneath
+it; this slot is a flag, and a flag that is not one character is not one."
+  (and (stringp glyph)
+       (= (string-width glyph) 1)
+       glyph))
+
+(defun agent-river--map-badge (contributed badges)
+  "Return the glyph CONTRIBUTED earns before the name, given BADGES.
+
+BADGES says whether the buffer reserves the slot at all -- nil when no
+contributor under this map has a badge for anything, in which case no line
+holds it open and every name moves one column left.  With it on, a node
+with nothing to flag still returns a space, so the slot stays where it was
+on the line above; the same bargain the column makes, for the same reason.
+
+The first contributor with something to say wins, in registration order.
+There is exactly one slot and no arithmetic that could combine two glyphs,
+so the alternative to a rule is a line that changes its mind between
+redraws -- and registration order is the one ordering a consumer can see
+and act on.  `:rank' deliberately does not decide it: that orders the rows
+a node draws, and a badge is not one of them."
+  (and badges
+       (or (seq-some (lambda (pair)
+                       (let ((badge (plist-get (car pair) :badge)))
+                         (and badge
+                              (agent-river--map-glyph (funcall badge (cdr pair))))))
+                     contributed)
+           " ")))
+
+(defun agent-river--map-badged-p (rows)
+  "Return non-nil when anything in ROWS would put a glyph before a name."
+  (let (found)
+    (maphash (lambda (_path contributed)
+               (unless found
+                 (let ((badge (agent-river--map-badge contributed t)))
+                   ;; A space is the reserved-but-empty answer, which is what
+                   ;; every node returns once the slot is open.  Asking with
+                   ;; BADGES on and then refusing that answer is what makes
+                   ;; this the question of whether to open it at all.
+                   (setq found (and badge (not (equal badge " ")))))))
              rows)
     found))
 
@@ -8593,7 +8654,7 @@ indentation -- hidden, a directory and the files under it start in the
 same column and the tree stops being one."
   (pcase level (1 "# ") (2 "## ") (3 "### ") (_ "- ")))
 
-(defun agent-river--map-line (level name parties &optional missing stat rows)
+(defun agent-river--map-line (level name parties &optional missing stat rows badge)
   "Return one map line: NAME at LEVEL, annotated with PARTIES.
 MISSING marks a name only the state knows about, which is struck through
 rather than shaded -- there is no file on disk for the shading to be
@@ -8614,7 +8675,14 @@ anything to put in it.
 
 ROWS is `open' or `closed' when this node has contributed rows, nil when
 it has none.  A folded node used to look exactly like a node with nothing
-under it, which made the fold a way of losing things quietly."
+under it, which made the fold a way of losing things quietly.
+
+BADGE is one glyph a contributor earned for this node, drawn in the gutter
+against the name.  It is the only reading that goes *before* the name, and
+that is what it is for: the column at the end of the line is read by
+running an eye down it, and a badge is read at the same moment as the
+thing it is about.  Nil leaves the slot out for every line in the buffer,
+the way STAT leaves out the column -- see `agent-river--map-badge'."
   (let* ((marker (agent-river--map-marker level))
          (face (if missing
                    'agent-river-gone
@@ -8632,6 +8700,11 @@ under it, which made the fold a way of losing things quietly."
                   (if (> (length parties) 1) agent-river-map-contended-marker " ")
                   (if (seq-some (lambda (party) (plist-get party :current)) parties)
                       agent-river-map-here-marker " ")
+                  ;; Last in the gutter, so it sits against the name: the
+                  ;; markers before it are this view's own and belong with
+                  ;; each other, and a badge is about the thing the line
+                  ;; names.
+                  (or badge "")
                   " "))
          (pad (max 1 (- agent-river-map-name-width
                         (length marker) (string-width gutter)
@@ -8917,6 +8990,13 @@ nothing."
                                         (agent-river--map-summarised-p (nth 2 section)))
                                       sections)
                             t))
+               ;; The same decision for the badge slot, and for the same
+               ;; reason: a gutter one column wider on some lines than on
+               ;; others is a tree drawn out of step with itself.
+               (badges (and (seq-some (lambda (section)
+                                        (agent-river--map-badged-p (nth 2 section)))
+                                      sections)
+                            t))
                (split (> (length sections) 1))
                (level (if split 3 2)))
           (erase-buffer)
@@ -8944,7 +9024,8 @@ nothing."
                                              entries))
                                     nil
                                     (agent-river--map-summary (gethash root rows) column)
-                                    (and (gethash root rows) 'open))
+                                    (and (gethash root rows) 'open)
+                                    (agent-river--map-badge (gethash root rows) badges))
                                    "\n")
                            ;; A root is a place like any other line's, so RET
                            ;; zooms into it and the motions stop on it.  A domain
@@ -8984,7 +9065,8 @@ nothing."
                                     (plist-get entry :parties)
                                     (plist-get entry :missing)
                                     (agent-river--map-summary mine column)
-                                    (and shown (if open 'open 'closed)))
+                                    (and shown (if open 'open 'closed))
+                                    (agent-river--map-badge mine badges))
                                    "\n")
                            'agent-river-map-name name
                            'agent-river-map-path path
@@ -9024,7 +9106,8 @@ nothing."
                                             ;; all.
                                             (not (file-exists-p fpath))
                                             (agent-river--map-summary frows column)
-                                            (and fshown (if fopen 'open 'closed)))
+                                            (and fshown (if fopen 'open 'closed))
+                                            (agent-river--map-badge frows badges))
                                            "\n")
                                    'agent-river-map-name name
                                    'agent-river-map-rel (plist-get file :rel)
