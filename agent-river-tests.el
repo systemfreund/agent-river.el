@@ -1941,7 +1941,7 @@ CALL overrides fields of the tool call record."
       ;; a dozen events out of one thing said.
       (should-not seen)
       (should-not (gethash "s1" agent-river-registry))
-      (agent-river--say-ended "s1" "end_turn" "/repo")
+      (agent-river--say-ended "s1" "end_turn")
       (should (= (length seen) 1))
       (should (equal (plist-get (car seen) :text)
                      "Rewrote the parser and the tests pass."))
@@ -1953,13 +1953,13 @@ CALL overrides fields of the tool call record."
   (agent-river-test--with-say
     ;; An agent that answers with tool calls alone has said nothing, and a
     ;; line in the log for the absence of one is worse than no line.
-    (should-not (agent-river--say-ended "s1" "end_turn" "/repo"))
+    (should-not (agent-river--say-ended "s1" "end_turn"))
     (should-not (gethash "s1" agent-river-registry))
     (agent-river--say-arrived "s1" "   ")
-    (should-not (agent-river--say-ended "s1" "end_turn" "/repo"))
+    (should-not (agent-river--say-ended "s1" "end_turn"))
     ;; A block that is not text -- an image -- carries no chunk at all.
     (agent-river--say-arrived "s1" nil)
-    (should-not (agent-river--say-ended "s1" "end_turn" "/repo"))
+    (should-not (agent-river--say-ended "s1" "end_turn"))
     (should-not (gethash "s1" agent-river-registry))))
 
 (ert-deftest agent-river-test-the-state-keeps-an-excerpt-of-what-was-said ()
@@ -1968,7 +1968,7 @@ CALL overrides fields of the tool call record."
            (seen nil)
            (agent-river-observers (list (lambda (_state event) (push event seen)))))
       (agent-river--say-arrived "s1" long)
-      (agent-river--say-ended "s1" "end_turn" "/repo")
+      (agent-river--say-ended "s1" "end_turn")
       ;; The event carries the whole of it.  A dialogue act cannot be read
       ;; off a first sentence, which is where this parts company with the
       ;; `◇' lines: what they show is an aside.
@@ -1981,7 +1981,7 @@ CALL overrides fields of the tool call record."
 (ert-deftest agent-river-test-what-was-said-is-kept-raw-and-on-one-line ()
   (agent-river-test--with-say
     (agent-river--say-arrived "s1" "Fixed the *parser*.\n\n- one\n- two")
-    (agent-river--say-ended "s1" "end_turn" "/repo")
+    (agent-river--say-ended "s1" "end_turn")
     (let ((said (agent-river-state-said (gethash "s1" agent-river-registry))))
       ;; Squished, because a turn's output is paragraphs and every reader of
       ;; the slot is line-based -- a newline in the log makes one entry and a
@@ -2023,7 +2023,7 @@ CALL overrides fields of the tool call record."
     (agent-river--say-arrived "s2" "Beta is done")
     ;; Two agents answer side by side; one accumulator would produce a
     ;; sentence neither of them said.
-    (agent-river--say-ended "s1" "end_turn" "/repo")
+    (agent-river--say-ended "s1" "end_turn")
     (should (equal (agent-river-state-said (gethash "s1" agent-river-registry))
                    "Alpha is done"))
     (should-not (gethash "s2" agent-river-registry))))
@@ -2070,6 +2070,97 @@ CALL overrides fields of the tool call record."
   ;; handful of lines somebody scanning a long log is looking for, and a
   ;; kind that fires once a turn is the log's bulk rather than its landmarks.
   (should-not (member "say" agent-river-notable-kinds)))
+
+(ert-deftest agent-river-test-a-turn-that-failed-says-nothing-into-the-next ()
+  (agent-river-test--with-say
+    (agent-river-test--with-shell '(("*alpha*" "s1"))
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        (agent-river--listen (agent-river-test--chunk "I was about to say"))
+        ;; `session/prompt' failed.  agent-shell answers that through its
+        ;; error handler, which emits `error' and never `turn-complete' --
+        ;; its own comment there says the turn may have stopped mid message
+        ;; chunk.  Left in the table the fragment is glued, with no
+        ;; separator, onto the front of the next turn's text, which is the
+        ;; hazard `agent-river--say-runs' names.
+        (agent-river--listen '((:event . error)
+                               (:data . ((:code . -32000) (:message . "boom")))))
+        (should-not (gethash "s1" agent-river--say-runs))
+        (agent-river--listen (agent-river-test--chunk "Second turn."))
+        (agent-river--listen (agent-river-test--turn-complete)))
+      (should (equal (agent-river-state-said (gethash "s1" agent-river-registry))
+                     "Second turn.")))))
+
+(ert-deftest agent-river-test-a-restored-session-does-not-say-its-history-again ()
+  (agent-river-test--with-say
+    (agent-river-test--with-shell '(("*alpha*" "s1"))
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        ;; A restore replays the stored turns through the ordinary
+        ;; notification path, so their chunks arrive here exactly as live
+        ;; ones do.  What a replay has no prompt response behind it, so no
+        ;; `turn-complete' follows; `session-restored' is what says the
+        ;; replay has settled.  Yesterday's answer is not something this
+        ;; session said today.
+        (agent-river--listen (agent-river-test--chunk "Old answer from yesterday."))
+        (agent-river--listen '((:event . session-restored)))
+        (should-not (gethash "s1" agent-river--say-runs))
+        (agent-river--listen (agent-river-test--chunk "Fresh answer."))
+        (agent-river--listen (agent-river-test--turn-complete)))
+      (should (equal (agent-river-state-said (gethash "s1" agent-river-registry))
+                     "Fresh answer.")))))
+
+(ert-deftest agent-river-test-what-was-said-does-not-move-a-session-the-hooks-anchor ()
+  (agent-river-test--with-say
+    (agent-river-test--with-shell '(("*alpha*" "s1"))
+      (should (agent-river--claim "s1" 'hooks))
+      ;; The hooks report the path as the agent's process sees it, links
+      ;; resolved...
+      (agent-river-observe
+       (agent-river--event "act" '((session_id . "s1") (cwd . "/private/tmp/repo")
+                                   (tool_name . "Edit")
+                                   (tool_input . ((file_path . "/private/tmp/repo/a.el"))))))
+      (should (equal (agent-river-state-cwd (gethash "s1" agent-river-registry))
+                     "/private/tmp/repo"))
+      ;; ...and the shell buffer sits on the spelling the user typed.  A
+      ;; `say' reached no file, so it carries no cwd at all and the fold has
+      ;; nothing to re-anchor from: keys were relativised against the hooks'
+      ;; anchor, and a turn end flipping it to the other spelling would have
+      ;; `agent-river--heat-absolute' resolve them where no file is.
+      (with-current-buffer (agent-river--shell-buffer "s1")
+        (setq default-directory "/tmp/repo/")
+        (agent-river--listen (agent-river-test--chunk "done"))
+        (agent-river--listen (agent-river-test--turn-complete)))
+      (let ((state (gethash "s1" agent-river-registry)))
+        (should (equal (agent-river-state-said state) "done"))
+        (should (equal (agent-river-state-cwd state) "/private/tmp/repo"))
+        ;; And the one key it folded still resolves where the file is.
+        (should (equal (agent-river--heat-absolute
+                        (list :cwd (agent-river-state-cwd state) :file "a.el"))
+                       "/private/tmp/repo/a.el"))))))
+
+(ert-deftest agent-river-test-a-turn-that-did-not-finish-is-marked ()
+  (agent-river-test--with-say
+    (agent-river--say-arrived "s1" "As far as I got")
+    (agent-river--say-ended "s1" "cancelled")
+    ;; `turn-complete' fires whatever the stop reason, so without this a
+    ;; cancelled turn's fragment reads as the answer -- where an interrupted
+    ;; tool call is marked `✗' on its own line.
+    (should (string-match-p "As far as I got ✗" (agent-river-test--hud)))
+    ;; A reason we were not given is "do not know", not "interrupted": the
+    ;; hosts that report none would otherwise have every turn marked.
+    (should-not (agent-river--unfinished-p '((message . "x"))))
+    (should-not (agent-river--unfinished-p '((stop_reason . "end_turn"))))
+    (should (agent-river--unfinished-p '((stop_reason . "refusal"))))))
+
+(ert-deftest agent-river-test-the-report-hands-over-what-was-said ()
+  (agent-river-test--with-say
+    (agent-river--say-arrived "s1" "Parser fixed, tests green.")
+    (agent-river--say-ended "s1" "end_turn")
+    ;; The report is how the state is asked things, including by a session
+    ;; about itself over MCP.  A measurement rather than a claim, so it is
+    ;; not named as one -- and task-framed like `:claimed-intent', which is
+    ;; also unprefixed.
+    (should (equal (plist-get (agent-river-report "s1") :said)
+                   "Parser fixed, tests green."))))
 
 (ert-deftest agent-river-test-listening-stops-with-the-mode ()
   (agent-river-test--with-say
@@ -3368,6 +3459,23 @@ first line from a survey."
                  (string-match "\\*\\*said\\*\\*" markdown)))
       (should (< (string-match "\\*\\*said\\*\\*" markdown)
                  (string-match "\\*\\*this task\\*\\*" markdown))))))
+
+(ert-deftest agent-river-test-what-was-said-belongs-to-the-prompt-it-answered ()
+  (agent-river-test--with-export
+    (agent-river-fold state '(:kind "say" :text "Parser fixed, tests green."))
+    (should (equal (agent-river-state-said state) "Parser fixed, tests green."))
+    (agent-river-fold state '(:kind "prompt" :cwd "/repo" :text "Now add a cache"))
+    ;; The export sits `said' directly under `prompt' because the two are
+    ;; one exchange, and a new prompt has not been answered yet -- so the
+    ;; slot is in the task frame and resets with the steps and the task
+    ;; artifacts.  Otherwise the previous answer is filed under a question
+    ;; it never heard, which is the mislabelling the two frames exist to
+    ;; stop.  The words are still in the log; it is the claim that they are
+    ;; current that goes.
+    (should-not (agent-river-state-said state))
+    (let ((markdown (agent-river-markdown)))
+      (should (string-match-p "\\*\\*prompt\\*\\* — Now add a cache" markdown))
+      (should-not (string-match-p "\\*\\*said\\*\\*" markdown)))))
 
 (ert-deftest agent-river-test-a-name-cannot-break-out-of-its-code-span ()
   ;; A file name will almost never hold a backtick, and the one that does
