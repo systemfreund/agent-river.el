@@ -2194,6 +2194,32 @@ CALL overrides fields of the tool call record."
                                     "Shall I push?")
                             60))))
 
+(ert-deftest agent-river-test-an-excerpt-cuts-into-a-long-ending-rather-than-drop-it ()
+  ;; Measured against the HUD of a live session rather than reasoned about:
+  ;; every `“' line drawn by the first version of this was a plain prefix
+  ;; cut, because an answer that ends in one long paragraph -- which is most
+  ;; of them -- had its closing rejected for not fitting whole, and the
+  ;; fallback was the head alone.  That is the cut this function exists to
+  ;; stop, arrived at by a longer road.
+  (let ((said (concat "Weggeräumt.\n\n- the worktree is gone\n- the branch is gone\n\n"
+                      "Nebenbei aufgefallen, ungefragt und unangetastet: es liegen "
+                      "noch vier ältere Worktrees herum, und lokale Branches dazu "
+                      "— sag Bescheid, wenn ich da auch durchgehen soll.")))
+    (let ((short (agent-river--excerpt said 72)))
+      (should (string-prefix-p "Weggeräumt." short))
+      (should (string-match-p " … " short))
+      (should (string-suffix-p "durchgehen soll." short))))
+  ;; But a message with no end distinguishable from its body has no closing
+  ;; to cut into: one line, no sentence inside it, so its last words are its
+  ;; middle wearing an ellipsis.  Head alone is the honest answer there.
+  (let ((blob (make-string 300 ?x)))
+    (should-not (string-match-p " … " (agent-river--excerpt blob 72))))
+  (should-not (string-match-p
+               " … " (agent-river--excerpt
+                      (concat "A single very long sentence that simply runs on "
+                              "and on without ever reaching a full stop at all")
+                      72))))
+
 (ert-deftest agent-river-test-an-excerpt-cuts-where-something-ends ()
   ;; A sentence boundary if there is one worth taking, a word boundary
   ;; otherwise, and the hard cut only where there is neither -- a path, a

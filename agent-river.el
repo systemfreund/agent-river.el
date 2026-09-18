@@ -1850,6 +1850,20 @@ is what a path, a URL or a base64 blob is."
          (let ((space (string-match " [^ ]*\\'" cut)))
            (if space (substring cut 0 space) cut)))))))
 
+(defun agent-river--clip-words-left (text width)
+  "Return the last WIDTH characters of TEXT, beginning at a word boundary.
+The mirror of `agent-river--clip-words\=', and it backs off by the same
+rule: only where the cut fell inside a word, since one that fell on a
+boundary already begins at a whole one."
+  (if (<= (length text) width)
+      text
+    (let ((cut (substring text (- (length text) width))))
+      (string-trim-left
+       (if (eq (aref text (- (length text) width 1)) ?\s)
+           cut
+         (let ((space (string-match " " cut)))
+           (if space (substring cut space) cut)))))))
+
 (defun agent-river--excerpt-tail (text width)
   "Return how TEXT closes, in at most WIDTH characters, or nil.
 
@@ -1869,14 +1883,33 @@ first went wrong, and the case it exists for."
              (opens (seq-filter (lambda (at) (< at (length one)))
                                 (agent-river--sentence-stops one)))
              (sentence (when opens
-                         (string-trim (substring one (car (last opens)))))))
-        (seq-find (lambda (candidate)
-                    (and candidate
-                         (<= (length candidate) width)
-                         ;; A closing `---' or a stray fence says nothing and
-                         ;; would spend the room that the head wants.
-                         (string-match-p "[[:alpha:]]" candidate)))
-                  (list one sentence))))))
+                         (string-trim (substring one (car (last opens))))))
+             ;; What to cut into where nothing whole fits.  A closing that is
+             ;; the whole message is not a closing -- a run-on with no line
+             ;; and no sentence inside it has no end distinguishable from its
+             ;; body, and taking its last words would be the middle of it
+             ;; wearing an ellipsis.  This is the case where head alone is
+             ;; the honest answer.
+             (closing (or sentence (when (cdr lines) one)))
+             (whole (seq-find (lambda (candidate)
+                                (and candidate
+                                     (<= (length candidate) width)
+                                     ;; A closing `---' or a stray fence says
+                                     ;; nothing and would spend the room the
+                                     ;; head wants.
+                                     (string-match-p "[[:alpha:]]" candidate)))
+                              (list one sentence))))
+        (or whole
+            ;; Nothing whole fits.  Cut into the closing from the left rather
+            ;; than give it up: an answer that ends in one long paragraph --
+            ;; which is most of them -- would otherwise fall back to the head
+            ;; alone, which is the prefix cut this function exists to stop,
+            ;; arrived at by a longer road.  The gap is marked either way, so
+            ;; a tail that starts mid-clause cannot be read as a quotation of
+            ;; how the message began.
+            (when (and closing (string-match-p "[[:alpha:]]" closing))
+              (let ((cut (agent-river--clip-words-left closing width)))
+                (and (string-match-p "[[:alpha:]]" cut) cut))))))))
 
 (defun agent-river--excerpt-head (text width)
   "Return how TEXT opens, in at most WIDTH characters.
