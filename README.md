@@ -67,8 +67,8 @@ registry needs no locking.
 
 ## Two frames, always labelled
 
-`artifacts` accumulate for the whole session; `steps`, `task-artifacts` and the
-task tally reset with every prompt. Reporting one while labelling it the other
+`artifacts` accumulate for the whole session; `steps`, `task-artifacts`, `said`
+and the task tally reset with every prompt. Reporting one while labelling it the other
 is how a panel starts misleading people, so **every key that leaves this package
 says which frame it is in** — `:task-steps`, `:task-hottest`,
 `:session-hottest`, `:session-elapsed`. Where you take a scope argument, pass
@@ -234,10 +234,16 @@ No hook carries the message text, so this reads agent-shell's own event stream �
 `agent-message-chunk` accumulated, flushed on `turn-complete` — and a session
 agent-shell does not host gets no `say` lines, exactly as it gets no `◇` ones.
 The event handed to observers carries the whole text and the stop reason; the
-state keeps a clipped, one-line excerpt, because this is the one value in it
-whose length the agent chooses. A `say` counts no step and touches no artifact
-table: no tool ran, and a file named in a sentence is not a file the agent
-reached.
+state keeps a clipped, one-line excerpt (`:said` in the report), because this is
+the one value in it whose length the agent chooses. It is in the **task frame**:
+it is the answer to the prompt above it, so a new prompt clears it, the way it
+clears `steps` — the log keeps every `“` line it drew. A turn that ended some
+other way than `end_turn` — cancelled, refused, out of tokens — is marked `✗`,
+the way an interrupted tool call is.
+
+A `say` counts no step, touches no artifact table and carries no working
+directory: no tool ran, a file named in a sentence is not a file the agent
+reached, and the anchor belongs to whoever folds the steps.
 
 ## One session, one source — per kind
 
@@ -308,6 +314,7 @@ to prevent. Note what happened, never what you think about it.
 ;;  :fail-streak 0 :history nil
 ;;  :session-hottest "supersonic.el (14 touches)" :session-elapsed "41m"
 ;;  :signals 1 :notes 0
+;;  :said "Queue position was stale because the seek handler ran early."
 ;;  :subagents (:running 0 :total 1 :steps 2
 ;;              :each (("Explore" :steps 2 :fail-streak 0 :status "done"))))
 

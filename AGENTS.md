@@ -23,7 +23,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (380 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (386 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -195,7 +195,7 @@ These are load-bearing; the tests enforce most of them.
   context. Everything else about the failure is counted: the task tally, the
   tool tally, and the child's own entry, which says whose it was.
 - **Two frames, always labelled.** `artifacts`/session-wide survives a new prompt;
-  `task-artifacts`/`steps`/`task-failures` reset on `prompt`. Report keys say which
+  `task-artifacts`/`steps`/`task-failures`/`said` reset on `prompt`. Report keys say which
   (`:task-hottest` vs `:session-hottest`). The panel uses the task frame;
   `agent-river-touching` uses the session frame.
 - **Claims are separate from measurements.** `intent*` slots come from
@@ -420,6 +420,36 @@ These are load-bearing; the tests enforce most of them.
   named in a sentence is not a file the agent reached. It is not in
   `agent-river-notable-kinds` — every turn has one, and `>` is for the lines
   that want attention.
+- **A run that is not said is dropped, and there are three ways to get one**
+  (`agent-river--listen`). The accumulator's own docstring names the hazard:
+  chunks left in the table are flushed by a turn that is not theirs, glued onto
+  the front of its text with no separator. `clean-up` is the buffer going
+  mid-sentence. `error` is the `session/prompt` failing — agent-shell answers
+  that through its error handler and never emits `turn-complete`, and the
+  comment there says the turn may have stopped mid message chunk. And
+  `session-restored` is the one that looks like nothing was wrong: a restore
+  replays the stored turns through the ordinary notification path, so
+  yesterday's chunks arrive exactly as live ones do, with no prompt response
+  behind them and hence no `turn-complete`. An *interrupted* turn is not one of
+  the three — cancelling resolves the pending prompt with a stop reason, so it
+  arrives as a `turn-complete` and is said, **marked** (`✗`,
+  `agent-river--unfinished-p`) the way an interrupted tool call is: only a
+  reason that was given and is not `end_turn` marks, because unset is "do not
+  know" rather than "interrupted".
+- **`said` is in the task frame, and a `say` carries no cwd.** The frame is
+  forced by the export, which sits the answer under the prompt because the two
+  are one exchange: kept across a `prompt` the old answer is filed under a
+  question it never heard, which is the mislabelling the frames exist to stop —
+  so it clears with `steps` and `task-artifacts`, and the words themselves stay
+  in the log. And no cwd, which puts a `say` with the events made inside Emacs
+  rather than with the steps: the fold refreshes the anchor from every event
+  that carries one, and carrying the shell buffer's `default-directory` had
+  every turn end re-anchor a session the *hooks* had anchored — the two
+  spellings need not agree, since `expand-file-name` does not resolve a symlink
+  and a host's reported cwd may, so keys relativised against one would then
+  resolve against the other. The configuration that loses something by it —
+  listen-mode alone, no hooks, no watch — has no artifact keys either, and an
+  anchor is only ever for those.
 - **The stream path builds payloads, not events** (`agent-river--shell-payload`).
   It goes through `agent-river--event` like everything else, so there is one
   place where a file argument can go uncounted rather than two. A tool call is

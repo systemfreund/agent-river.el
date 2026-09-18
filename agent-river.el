@@ -387,6 +387,12 @@ without the other.  The event carries the text unclipped.")
   ;; that a rendering decision does not end up in the state and the HUD, which
   ;; is deliberately not Markdown, does not show an escape it never needed.
   ;;
+  ;; In the *task* frame, cleared by `prompt' with the steps and the task
+  ;; artifacts: this is the answer to the prompt above it, which is how the
+  ;; export files it, and once a new prompt has arrived the old answer read as
+  ;; current is an answer filed under a question it never heard.  The words
+  ;; themselves are not lost -- the log keeps every `“' line it drew.
+  ;;
   ;; A measurement and not a claim, which is worth being exact about since the
   ;; words are the agent's either way: what is recorded is that the turn ended
   ;; with this being said, which the stream witnessed.  What must not happen is
@@ -867,6 +873,12 @@ replaying a session's events from the start."
               (agent-river-state-tasks state)))
       (setf (agent-river-state-task-failures state) 0)
       (setf (agent-river-state-idle state) nil)
+      ;; And so does it to the answer that ended the last one: the export
+      ;; sits `said' under the prompt because the two are one exchange, and a
+      ;; new prompt has not been answered yet.  Which frame it is in is the
+      ;; whole question here, and this is the answer -- the task frame, with
+      ;; the steps and the task artifacts beside it.
+      (setf (agent-river-state-said state) nil)
       ;; A new task makes any previous claim about the work meaningless.
       (setf (agent-river-state-intent state) nil
             (agent-river-state-intent-at state) nil
@@ -1918,6 +1930,17 @@ instead of counted."
     (and (consp response)
          (eq t (alist-get 'interrupted response)))))
 
+(defun agent-river--unfinished-p (payload)
+  "Return non-nil when PAYLOAD reports a turn that ended some other way.
+
+`end_turn' is the only stop reason that says the agent finished saying
+what it had to say; the rest -- `cancelled', `refusal', `max_tokens',
+`max_turn_requests' -- mean the words on the line are as far as it got.
+A missing reason answers nil: the hosts that report none would otherwise
+have every turn marked."
+  (let ((reason (alist-get 'stop_reason payload)))
+    (and reason (not (equal reason "end_turn")) t)))
+
 (defun agent-river--detail (kind payload)
   "Return the line KIND should show for PAYLOAD."
   (let* ((tool (or (alist-get 'tool_name payload) "tool"))
@@ -1933,7 +1956,17 @@ instead of counted."
      ;; it: this is the longest text that reaches the log, it is the agent's
      ;; own prose, and a newline in it would make one entry and a remainder
      ;; carrying none of the properties the motions read.
-     ((equal kind "say") (agent-river--log-text (alist-get 'message payload)))
+     ;;
+     ;; Marked where the turn did not finish, the way a `think' marks an
+     ;; interrupted call: `turn-complete' fires whatever the stop reason, so
+     ;; a turn that was cancelled, refused or cut off at the token limit
+     ;; arrives here as an ordinary one and its fragment would read as the
+     ;; answer.  Only a reason we were given and that is not `end_turn'
+     ;; marks -- no reason at all is a host that does not report one, and
+     ;; unset is "do not know" rather than "interrupted".
+     ((equal kind "say")
+      (concat (agent-river--log-text (alist-get 'message payload))
+              (if (agent-river--unfinished-p payload) " ✗" "")))
      ((equal kind "done")
       (concat (or (alist-get 'agent_type payload) "subagent") " finished"))
      ;; No inline marker on a failure: the kind already renders ✗ in the
@@ -2458,6 +2491,16 @@ ever supplies the sessions the first way in cannot reach."
 ;; event, which is where `agent-river--ensure-subscribed' runs: a session that
 ;; has folded nothing has no handler yet, and its first turn is exactly the
 ;; one worth hearing.
+;;
+;; One thing this cannot order.  For a session `agent-river-watch-mode' also
+;; folds, `turn-complete' reaches two subscriptions -- `idle' from one and
+;; `say' from the other -- and which goes first is the order the modes were
+;; turned on in, so the log may show the `“' above the `■' and read as having
+;; spoken after going quiet.  Left alone: for a hooked session the `idle'
+;; comes from an async `Stop' hook in another process and no ordering is
+;; available to have, and buying it for the other case would mean one
+;; subscription folding both, which is the shape #24 rejected for good
+;; reasons.  The timestamps are a second apart at most and both are true.
 
 (defvar agent-river--say-runs (make-hash-table :test 'equal)
   "Session id -> the chunks of the message in flight, newest first.
@@ -2476,8 +2519,8 @@ nothing to accumulate from one of those."
     (puthash session (cons chunk (gethash session agent-river--say-runs))
              agent-river--say-runs)))
 
-(defun agent-river--say-ended (session reason cwd)
-  "Fold what SESSION said this turn, which ended for REASON, anchored at CWD.
+(defun agent-river--say-ended (session reason)
+  "Fold what SESSION said this turn, which ended for REASON.
 
 Returns the text, or nil for a turn that said nothing -- which is an
 ordinary turn rather than an edge case: an agent that answers with tool
@@ -2486,14 +2529,25 @@ would put a line in the log for the absence of one.
 
 The whole of it goes on the event.  A dialogue act cannot be read off a
 first sentence, which is where this parts company with the `◇' lines: what
-they show is an aside, and clipping an aside loses an aside."
+they show is an aside, and clipping an aside loses an aside.
+
+No cwd, deliberately, which puts this with the events made inside Emacs
+rather than with the steps: the fold refreshes the anchor from every event
+that carries one, and a `say' reached no file.  Carrying the shell
+buffer\='s `default-directory' would have every turn end re-anchor a
+session the hooks anchored -- and the two spellings need not agree, since
+`expand-file-name' does not resolve a symlink and a host\='s reported cwd
+may, so keys relativised against one would then resolve against the
+other.  What that costs is a session folded from this path *alone* -- no
+hooks, `agent-river-watch-mode' off -- which has no cwd and so no place in
+the block.  It also has no artifact keys, which is the only thing an
+anchor is for, so there is nothing there to misplace."
   (let ((chunks (gethash session agent-river--say-runs)))
     (remhash session agent-river--say-runs)
     (let ((text (apply #'concat (nreverse chunks))))
       (unless (string-empty-p (string-trim text))
         (agent-river-observe
          (agent-river--event "say" `((session_id . ,session)
-                                     (cwd . ,(or cwd ""))
                                      (message . ,text)
                                      (stop_reason . ,reason))))
         text))))
@@ -2511,15 +2565,29 @@ is about who counts a session's steps, and nothing here counts one."
         ('agent-message-chunk
          (agent-river--say-arrived session (alist-get :text-chunk data)))
         ('turn-complete
-         (agent-river--say-ended session (alist-get :stop-reason data)
-                                 (directory-file-name
-                                  (expand-file-name default-directory))))
-        ;; The buffer is going.  A turn that never completed said nothing
-        ;; this can stand behind -- the agent was cut off mid-sentence --
-        ;; and the chunks would otherwise sit in the table for the rest of
-        ;; the Emacs session, to be flushed by a turn that is not theirs if
-        ;; the id ever came back.
-        ('clean-up (remhash session agent-river--say-runs))))))
+         (agent-river--say-ended session (alist-get :stop-reason data)))
+        ;; The three ways a run ends without being said, all dropped, and
+        ;; each one of them is the hazard `agent-river--say-runs' names:
+        ;; chunks left in the table are flushed by a turn that is not
+        ;; theirs, glued onto the front of its text with no separator.
+        ;;
+        ;; `clean-up' is the buffer going, mid-sentence.  `error' is the
+        ;; `session/prompt' failing: agent-shell answers that through its
+        ;; error handler and never emits `turn-complete', and its own
+        ;; comment there says the turn may have stopped mid message chunk.
+        ;; And `session-restored' is the one that says nothing was wrong:
+        ;; a restore replays the stored turns through the ordinary
+        ;; notification path, so yesterday's chunks arrive here exactly as
+        ;; live ones do -- with no prompt response behind them, hence no
+        ;; `turn-complete' -- and this is the event that marks the replay
+        ;; settled.  What a session said last week is not something it said
+        ;; today.
+        ;;
+        ;; An *interrupted* turn is not among them: cancelling resolves the
+        ;; pending `session/prompt' with a stop reason, so it arrives as a
+        ;; `turn-complete' and is said, marked.
+        ((or 'clean-up 'error 'session-restored)
+         (remhash session agent-river--say-runs))))))
 
 ;;;###autoload
 (defun agent-river-listen-shell (&optional buffer)
@@ -3883,7 +3951,15 @@ disagree with them."
                                       (agent-river-state-started state)))
                :fail-runs (or (agent-river-state-fail-runs state) 0)
                :signals (length (agent-river-state-signals state))
-               :notes (length (agent-river-state-notes state)))
+               :notes (length (agent-river-state-notes state))
+               ;; The end of this task's last turn, on the same clock as
+               ;; the `task-' keys above it and cleared by a prompt with
+               ;; them.  Unprefixed like `:claimed-intent', which is also
+               ;; task-framed: the prefixes are there for the values that
+               ;; exist in both frames, where two numbers side by side
+               ;; would read as comparable, and there is no session-wide
+               ;; reading of this to be confused with.
+               :said (agent-river-state-said state))
          ;; Subagents fold separately so their failures stay theirs, but the
          ;; parent still has to be able to see what it set in motion.
          (when kids
