@@ -23,7 +23,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (389 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (390 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -423,8 +423,16 @@ These are load-bearing; the tests enforce most of them.
   because these messages are written as a summary, a list of what was done and
   then the ask; squished to one line the bullets and the ask are one sentence,
   so a last-sentence rule answers with the whole tail and the ask is dropped
-  for being too long. It is kept only while it is worth the room (half the
-  width, and never where the head is left too short to state anything), and
+  for being too long. Where nothing whole fits it is **cut into from the
+  left** rather than given up — measured against a live HUD, not reasoned
+  about: every `“` line the first version drew was a plain prefix cut, because
+  an answer ending in one long paragraph had its closing rejected and fell
+  back to the head alone, which is the cut the function exists to stop
+  arrived at by a longer road. What has no closing to cut into is a message
+  with no end distinguishable from its body — one line, no sentence inside it
+  — and there the head alone is the honest answer. It is kept only while it is
+  worth the room (half the width, and never where the head is left too short
+  to state anything), and
   cuts fall on a sentence boundary where one lies late enough to be worth
   taking, on a word boundary otherwise, and hard only for a path, a URL or a
   blob. And the excerpt is
