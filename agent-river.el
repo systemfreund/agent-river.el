@@ -968,9 +968,26 @@ replaying a session's events from the start."
      ;;
      ;; The event carries the whole text, for whoever is listening on
      ;; `agent-river-observers'; the slot keeps an excerpt, because this is the
-     ;; one value here whose length the agent chooses.  Squished as well as
-     ;; clipped: a turn's output is paragraphs, and every reader of the slot is
-     ;; line-based.
+     ;; one value here whose length the agent chooses.  Every reader of the
+     ;; slot is a bounded one -- a bullet in the export, a value in the report,
+     ;; a line -- and the export's claim that only three values are the agent's
+     ;; is tractable only because this one arrives already clipped.  Squished
+     ;; as well: a turn's output is paragraphs, and a newline in a line-based
+     ;; reader makes one entry and a stray.
+     ;;
+     ;; Not a form the caller gets to choose, and the alternative is written
+     ;; down rather than merely not built.  A setting deciding what lands here
+     ;; would put a policy inside the fold, which is the one place this package
+     ;; keeps its extension points out of: an observer, a place function, a map
+     ;; contributor and a signal function all run outside it, each with its own
+     ;; guard and retiring on its first error, because an error in here is
+     ;; reported as `fold failed' and sends the user to `agent-river-reset'.
+     ;; It would also make the replay promise in this function's docstring
+     ;; depend on what a variable held at the time of the replay.  And it buys
+     ;; nothing that is not already there: a consumer that wants the whole text
+     ;; is handed it on the event, the same way `:path' is handed over, and
+     ;; keeps it in a table of its own rather than in the one table this
+     ;; package promises to own and every view reads.
      ((equal kind "say")
       (setf (agent-river-state-said state)
             (agent-river--clip
