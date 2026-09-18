@@ -145,6 +145,13 @@ and shows up in its tree as a name that is not on disk, which
 repairs it — the domain is read at every draw — but the order to write is
 `appeared`, then `reach`.
 
+By hand, those two are one command: **`M-x agent-river-link-artifact`**. Run in
+an agent-shell buffer it takes that buffer's session — the one context where
+*which session am I* has an exact answer — and completes over the artifacts on
+record; a key nothing answers to is declared first, asking for its domain, and
+reached after. The order cannot be got wrong there because both halves are one
+function. Elsewhere it asks which session, and never guesses.
+
 The `:context` is opaque — this package never reads a value out of it, which is
 what lets a record carry a severity, a body and a URL without agent-river having
 to learn about any of them. It renders as rows under the line. Text you pass in

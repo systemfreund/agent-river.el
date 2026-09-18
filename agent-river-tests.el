@@ -5527,6 +5527,64 @@ first."
     (should-error (agent-river-reach "inc:INC-444" "nobody") :type 'user-error)
     (should-error (agent-river-reach "" "s1") :type 'user-error)))
 
+(ert-deftest agent-river-test-linking-a-known-artifact-declares-nothing ()
+  (agent-river-test--with-artifacts
+    (agent-river-state "s1" "alpha")
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "disk full")
+    (agent-river-link-artifact "inc:INC-444" "s1")
+    ;; The record was already there, so linking is a reach and nothing else:
+    ;; a second declaration would be a second account of what the key means.
+    (should (= (hash-table-count agent-river-artifacts) 1))
+    (should (equal (agent-river-artifact-name
+                    (gethash "inc:INC-444" agent-river-artifacts))
+                   "disk full"))
+    (should (agent-river-reaching "inc:INC-444" 'session))))
+
+(ert-deftest agent-river-test-linking-an-unknown-key-declares-it-first ()
+  (agent-river-test--with-artifacts
+    (let ((state (agent-river-state "s1" "alpha")))
+      (agent-river-link-artifact "inc:INC-999" "s1" 'inc "cert expiring")
+      ;; Declared before reached, which is the order only the caller can get
+      ;; right -- and here it cannot be got wrong, because both halves are one
+      ;; function.  Reached first, the key would have been a file.
+      (should (eq (agent-river--key-domain "inc:INC-999") 'inc))
+      (should (gethash "inc:INC-999" (agent-river-state-artifacts state)))
+      ;; And no tool ran, so the reach costs no step.
+      (should (zerop (agent-river-state-steps state))))))
+
+(ert-deftest agent-river-test-a-new-artifact-without-a-domain-is-refused ()
+  (agent-river-test--with-artifacts
+    (agent-river-state "s1" "alpha")
+    ;; `file' is what a key is when nobody has said otherwise, so declaring
+    ;; without an answer would put `inc:INC-999' in the session's tree as a
+    ;; name that is not on disk -- which `agent-river-forget-gone-files' then
+    ;; offers to sweep.  Refused for every caller, not just the prompt.
+    (should-error (agent-river-link-artifact "inc:INC-999" "s1")
+                  :type 'user-error)
+    (should-error (agent-river-link-artifact "some.el" "s1" 'file)
+                  :type 'user-error)
+    (should (zerop (hash-table-count agent-river-artifacts)))))
+
+(ert-deftest agent-river-test-a-refused-link-declares-nothing-first ()
+  (agent-river-test--with-artifacts
+    ;; Everything is checked before anything is folded.  Declaring and then
+    ;; failing to reach would leave a record nobody asked for, and only
+    ;; `agent-river-drop-artifact' takes one back.
+    (should-error (agent-river-link-artifact "inc:INC-999" "nobody" 'inc)
+                  :type 'user-error)
+    (should (zerop (hash-table-count agent-river-artifacts)))
+    (should-error (agent-river-link-artifact "" "s1" 'inc) :type 'user-error)))
+
+(ert-deftest agent-river-test-a-shell-buffer-answers-which-session-it-is ()
+  (agent-river-test--with-artifacts
+    (agent-river-state "acp-1" "alpha")
+    ;; The one context where "which session am I" is exact rather than a
+    ;; guess: the buffer carries the id the hooks use.  Outside one this
+    ;; prompts, and must never fall back to whichever session acted last.
+    (cl-letf (((symbol-function 'agent-river--shell-session)
+               (lambda () "acp-1")))
+      (should (equal (agent-river--read-session) "acp-1")))))
+
 (ert-deftest agent-river-test-an-artifact-observer-sees-the-artifact ()
   (agent-river-test--with-artifacts
     (let (seen)

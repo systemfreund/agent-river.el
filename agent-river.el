@@ -1507,6 +1507,157 @@ SCOPE is `session' for the whole session, `task' or nil for this task."
      agent-river-registry)
     hits))
 
+;; Linking by hand -- the user as the producer
+;;
+;; `agent-river-reach' has had no shipping caller: the edge between a session
+;; and an artifact can only be reported by whoever performed the dispatch, and
+;; nothing in this package performs one.  A user does, all the time, and knows
+;; it -- so the gesture below is that report, made where the answer to "which
+;; session" is not a guess.
+;;
+;; It is the first caller of `agent-river-appeared' and `agent-river-reach'
+;; together, which makes it the first place the order between them can be got
+;; wrong.  It cannot be got wrong here: both halves are one function, and the
+;; session is checked before either runs.
+
+(defun agent-river--read-session ()
+  "Return the session a gesture is about, asked only where it is in doubt.
+
+In an agent-shell buffer there is nothing to ask: `agent-shell--state'
+carries the id the hooks use, so the buffer the command was typed in is
+itself the answer -- which is the one context where \"which session am I\"
+has an exact answer rather than an estimate.
+
+Anywhere else this prompts, and deliberately does not fall back to
+`agent-river--current' the way `agent-river-reach' does when handed no id.
+That default is whichever session acted most recently; with several
+running it is quite possibly not the one meant, and the misattribution
+would be silent -- a wrong edge in the artifact tables reads exactly like
+a right one."
+  (or (agent-river--shell-session)
+      (let (cands)
+        (maphash (lambda (id state)
+                   ;; The id rides along in the candidate because a label need
+                   ;; not be unique -- agent-shell uniquifies the ones it
+                   ;; hosts, and nothing uniquifies the rest.  Two candidates
+                   ;; spelled alike would make the choice unanswerable.
+                   (push (cons (format "%s [%s]"
+                                       (or (agent-river-state-label state) "?")
+                                       id)
+                               id)
+                         cands))
+                 agent-river-registry)
+        (unless cands (user-error "No session to link to"))
+        (setq cands (sort cands (lambda (a b) (string< (car a) (car b)))))
+        (cdr (assoc (completing-read "Session: " cands nil t) cands)))))
+
+(defun agent-river--read-artifact-key ()
+  "Read an artifact key, offering the ones already on record.
+
+The candidates are the keys themselves, never a \"KEY -- NAME\" display
+string: the key is the identity `agent-river-reaching' matches on, so a
+display string would have to be parsed back into one, and a parse is a
+second account of what the user picked.  The name rides along as an
+annotation, where nothing has to read it back.
+
+No match is required.  Typing a key nothing answers to is how a new
+artifact gets declared, which is the whole of what this reading is for."
+  (let ((keys nil)
+        (names (make-hash-table :test 'equal)))
+    (maphash (lambda (key artifact)
+               (push key keys)
+               (puthash key (agent-river-artifact-name artifact) names))
+             agent-river-artifacts)
+    (let ((completion-extra-properties
+           (list :annotation-function
+                 (lambda (key)
+                   (let ((name (gethash key names)))
+                     (and name (not (equal name key)) (concat "  " name)))))))
+      (string-trim (completing-read "Artifact key: " (sort keys #'string<))))))
+
+(defun agent-river--read-domain ()
+  "Read the domain a newly declared artifact key belongs to.
+
+Asked every time rather than defaulted, because there is no default that
+is right often enough to be worth the one time it is not.  `file' is what
+a key is when nobody has said otherwise, so a key declared without an
+answer here is a file: `inc:INC-444' resolved against the session cwd
+becomes a name that is not on disk, which the map lists and
+`agent-river-forget-gone-files' then offers to sweep.  Reading the domain
+off the key's own spelling instead is the prefix rule
+`agent-river--key-domain' exists to refuse.
+
+No match is required: a domain nothing here has heard of is still drawn,
+and something that has arrived must not wait for configuration before it
+can be seen.  `file' is refused outright -- the artifact table is not a
+mirror of the session tables, so a file reached by an agent needs no
+record here and one made anyway would say nothing its session's own table
+does not already say.
+
+The candidates are `agent-river-domains', which is what the table has,
+and pointedly not `agent-river-map-domains', which is what somebody
+configured.  That one is documented as purely presentational, so reading
+it here would make a view's settings decide what a producer may declare
+-- and it would offer a domain nothing has ever arrived under while the
+domains that did arrive went unlisted, which is the wrong way round for a
+list whose job is to save typing."
+  (let ((answer (string-trim
+                 (completing-read
+                  "Domain: " (mapcar #'symbol-name
+                                     (delq 'file (agent-river-domains)))))))
+    (if (string-empty-p answer)
+        (user-error "A new artifact needs a domain")
+      (intern answer))))
+
+;;;###autoload
+(defun agent-river-link-artifact (key session &optional domain name)
+  "Record that SESSION is working on artifact KEY, declaring it when new.
+
+The hand-made half of what a webhook does: KEY already on record is simply
+reached, and KEY nothing answers to is declared with DOMAIN and NAME first
+and reached after.  Called interactively from an agent-shell buffer the
+session is that buffer's; anywhere else it is asked for.
+
+DOMAIN is required for a key that is new and refused for one that is not:
+a record already says what its key means, and a second answer here would
+be a way for the two to disagree.  It may not be `file' -- see
+`agent-river--read-domain'.
+
+Everything is checked before anything is folded.  Declaring an artifact
+and then failing to reach it would leave a record nobody asked for, which
+only `agent-river-drop-artifact' takes back -- so the session is looked up
+first, while there is still nothing to take back.
+
+Returns KEY.  No step is counted and the phase does not move: no tool ran,
+which is `agent-river-reach's rule and this only passes it on."
+  (interactive
+   (let* ((session (agent-river--read-session))
+          (key (agent-river--read-artifact-key)))
+     (if (agent-river-artifact-known-p key)
+         (list key session)
+       (list key session
+             (agent-river--read-domain)
+             (read-string (format "Name (%s): " key) nil nil key)))))
+  (let* ((key (string-trim (or key "")))
+         (fresh (not (agent-river-artifact-known-p key))))
+    (cond
+     ((string-empty-p key) (user-error "No artifact to link"))
+     ((null (gethash session agent-river-registry))
+      (user-error "No session %s to link to" session))
+     ((and fresh (null domain))
+      (user-error "A new artifact needs a domain"))
+     ((and fresh (eq domain 'file))
+      (user-error "A file needs no record: its session's table already has it"))
+     (t
+      (when fresh
+        (agent-river-appeared key :domain domain :name name
+                              :text (format "%s declared by hand" key)))
+      (agent-river-reach key session)
+      (when (called-interactively-p 'interactive)
+        (message "agent-river: %s %s"
+                 (if fresh "declared and linked" "linked") key))
+      key))))
+
 (defun agent-river-domains ()
   "Return every domain with a record in `agent-river-artifacts\=', in arrival order.
 

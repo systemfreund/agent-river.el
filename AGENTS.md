@@ -23,7 +23,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (384 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (389 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -331,7 +331,10 @@ These are load-bearing; the tests enforce most of them.
   the prefix rule the invariant below exists to refuse. What holds instead
   is that the window closes by itself -- the domain is read at every draw,
   so a record landing late repairs the placement -- and that the docstrings
-  at both ends say so. A test pins both halves.
+  at both ends say so. A test pins both halves. `agent-river-link-artifact`
+  is the one caller that *cannot* get it wrong, and not because it is
+  careful: both halves are one function, so there is no order left for a
+  caller to choose.
 - **A key belongs to a domain, read off the table and never parsed out of the
   key** (`agent-river--key-domain`). `file` is what a key is when nobody said
   otherwise. A prefix rule would have to decide what `c:/tmp/x` means and
@@ -753,6 +756,47 @@ export's claim to be a snapshot of the block true: two orderings would be two
 accounts of one question, right only for as long as somebody kept them in
 step. Ordered by label rather than by whichever session acted last, so a line
 does not move under the eye because another agent took a step.
+
+### Linking a session to an artifact by hand
+
+`agent-river-link-artifact` is the user as the producer: it declares an
+artifact if the key is new and reaches it from a session, which is the pair of
+calls the README tells an integrator to make in that order. It is the first
+shipping caller of either, and it exists because `agent-river-reach` had none
+-- the edge between a session and an artifact can only be reported by whoever
+performed the dispatch, and nothing in this package performs one. A user does.
+
+- **The agent-shell buffer is the one place "which session am I" is exact.**
+  `agent-river--shell-session` reads the id the hooks use straight off
+  `agent-shell--state`, so typed there the command asks nothing. Typed
+  anywhere else it *prompts*, and pointedly does not fall back to
+  `agent-river--current` the way `agent-river-reach` does when handed no id:
+  that default is whichever session acted most recently, and a wrong edge in
+  the artifact tables reads exactly like a right one. The session prompt
+  carries the id beside the label, because a label need not be unique --
+  agent-shell uniquifies the ones it hosts and nothing uniquifies the rest.
+- **The completion candidates are keys, and the name is an annotation**
+  (`agent-river--read-artifact-key`). The key is the identity
+  `agent-river-reaching` matches on, so a `KEY -- NAME` display string would
+  have to be parsed back into one, and that parse is a second account of what
+  the user picked. It is also why the user types the *key* rather than a name
+  the command mints one from: a minted key will not match what a webhook
+  producer later declares for the same subject, and then the table holds two
+  records for one thing.
+- **The domain is asked every time, never defaulted**
+  (`agent-river--read-domain`). There is no default right often enough to be
+  worth the one time it is not, and the one time it is not is the failure the
+  invariant above describes. `file` is refused for every caller and not only
+  at the prompt, because the table is not a mirror. The candidates come from
+  `agent-river-domains` -- what the table has -- and pointedly not from
+  `agent-river-map-domains`, which is documented as purely presentational: a
+  view's settings must not decide what a producer may declare, and reading it
+  would have offered domains nothing ever arrived under while the ones that
+  did went unlisted.
+- **Everything is checked before anything is folded.** Declaring and then
+  failing to reach leaves a record nobody asked for, which only
+  `agent-river-drop-artifact` takes back -- so the session is looked up while
+  there is still nothing to take back. A test pins it.
 
 ### One set of motions, every buffer
 
