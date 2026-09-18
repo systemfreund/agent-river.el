@@ -8437,8 +8437,18 @@ now, rather than whoever was registered last."
     (dolist (pair contributed)
       (unless (agent-river--map-said-p pair column)
         (setq rows (append rows (cdr pair)))))
-    (sort rows (lambda (a b) (< (or (plist-get a :rank) 0)
-                                (or (plist-get b :rank) 0))))))
+    ;; Sorted on a copy.  `append' shares the last list it is given, so the
+    ;; tail of this one is the row list a contributor still holds -- and
+    ;; `sort' rewrites the cells it is handed.  Sorting in place therefore
+    ;; reached back into `agent-river--map-rows'' table and left that
+    ;; contributor's own entry pointing at somebody else's rows, which the
+    ;; summary then read: the line lost its column while the rows underneath
+    ;; it were perfectly correct.  It takes a contributor ranking ahead of an
+    ;; earlier-registered one to show, which is why no shipping contributor
+    ;; ever did -- all four of them rank 0.
+    (sort (copy-sequence rows)
+          (lambda (a b) (< (or (plist-get a :rank) 0)
+                           (or (plist-get b :rank) 0))))))
 
 (defun agent-river--map-summarised-p (rows)
   "Return non-nil when anything in ROWS would put a reading on a line."

@@ -4939,6 +4939,29 @@ its members behind for the next one."
       (should (string-match-p "second" (buffer-string)))
       (should-not (string-match-p "third" (buffer-string))))))
 
+(ert-deftest agent-river-test-sorting-the-rows-leaves-the-contributors-alone ()
+  ;; `append' shares the last list it is given and `sort' rewrites what it is
+  ;; handed, so sorting the flattened rows in place used to reach back into
+  ;; the table they were read from.  The symptom was not a wrong row but a
+  ;; missing column: the contributor's own entry ended up pointing at another
+  ;; contributor's rows, and the summary read those instead.  It takes a
+  ;; contributor whose rows rank ahead of an earlier-registered one's, which
+  ;; is why no shipping contributor ever found it.
+  (let* ((late-rows (list (list :key "late" :text "late" :rank -1 :column "!")))
+         (contributed (list (cons '(:name early) (list (list :key "early" :text "early")))
+                            (cons (list :name 'late
+                                        :summary (lambda (rows)
+                                                   (plist-get (car rows) :column)))
+                                  late-rows)))
+         (shown (agent-river--map-shown-rows contributed t)))
+    (should (equal (mapcar (lambda (row) (plist-get row :text)) shown)
+                   '("late" "early")))
+    ;; What the contributor still holds, after the sort has run.
+    (should (equal (cdr (nth 1 contributed)) late-rows))
+    (should (equal (plist-get (car (cdr (nth 1 contributed))) :key) "late"))
+    ;; And therefore the line still gets its reading.
+    (should (equal (agent-river--map-summary contributed t) "!"))))
+
 (ert-deftest agent-river-test-a-refresh-is-offered-on-its-own-clock ()
   ;; The redraw fires every few seconds; a contributor that spawns work
   ;; must not be asked to spawn it again each time.
