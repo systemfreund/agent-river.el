@@ -1054,9 +1054,21 @@ Four things about the map are load-bearing:
   is a projection of the rows, never a second account of them** — the same
   rule the listing follows one grain up, where a directory's reading is the
   aggregate of what lies beneath it so the two cannot disagree. Rows are
-  **enrichment and detail at once**: drawn by default wherever there are any,
-  hidden by the same TAB that hides a directory's files, so there is one
-  mechanism rather than two and no disclosure twisty to invent.
+  **detail, and wait to be asked for**: a node whose only children are rows
+  draws closed, and the same TAB that hides a directory's files opens it, so
+  there is one mechanism rather than two and no disclosure twisty to invent.
+  They were enrichment and detail at once — drawn wherever there were any —
+  and in a listing whose entries are mostly files that is a row or three
+  beneath every line the map has, so the view read as a stack of rows with
+  names threaded through it. What stays enrichment is a directory's *files*,
+  because those are the listing one grain down rather than an annotation on
+  it, and that is the whole of what `agent-river--map-open-p` now asks. The
+  price is that the party names are behind a keystroke, having just been
+  moved off the line: the gutter's `⏿` and `>`/`<` still say some agent is
+  here, and who it is is now a question you ask the line. Deliberately no
+  setting to put the old default back — TAB already asks per node, where a
+  reader is looking, and a buffer-wide answer to the same question is the
+  second mechanism this design spent its one fold avoiding.
 - **A contributor answers twice, and the split is forced by the timer.**
   `:read` is synchronous and instant, from whatever it already has; `:refresh`
   is where waiting is allowed and hands the answer back through

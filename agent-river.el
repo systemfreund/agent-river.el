@@ -8713,17 +8713,18 @@ next redraw, which is not a fold."
   (let ((cell (assoc path agent-river--map-folds)))
     (if cell (cdr cell) default)))
 
-(defun agent-river--map-open-p (entry root &optional rows)
+(defun agent-river--map-open-p (entry root)
   "Return non-nil when ENTRY's children are shown beneath it, under ROOT.
 
-An entry with something under it opens by default -- the files, and now
-the contributed ROWS, are the reason the entry is annotated at all -- and a
-toggle by hand wins from then on.  Rows counting here is what makes them
-enrichment and detail at once: drawn where there are any, hidden by the
-same TAB that hides the files."
+The files decide it, and only the files: they are the listing one grain
+down, and the reason the entry is annotated at all.  Contributed rows are
+detail and wait to be asked for -- a node whose only children are rows
+draws closed, with a twisty saying there is something there -- and the
+same TAB that hides the files is what asks.  A toggle by hand wins from
+then on."
   (agent-river--map-folded-p (agent-river--map-node-path
                               root (plist-get entry :name))
-                             (and (or (plist-get entry :files) rows) t)))
+                             (and (plist-get entry :files) t)))
 
 (defun agent-river--map-node-path (root name)
   "Return what identifies the line NAME draws under ROOT.
@@ -8942,9 +8943,20 @@ nothing."
                                      (mapcar (lambda (entry)
                                                (list :parties (plist-get entry :parties)))
                                              entries))
-                                    nil
-                                    (agent-river--map-summary (gethash root rows) column)
-                                    (and (gethash root rows) 'open))
+                                    ;; No reading and no twisty.  A
+                                    ;; contributor is asked about the nodes a
+                                    ;; section lists and never about the
+                                    ;; section, so a root has no rows -- and
+                                    ;; nothing here would insert them if it
+                                    ;; had.  Both were read off the row table
+                                    ;; anyway: a twisty promising an opening
+                                    ;; that cannot happen, and a column a
+                                    ;; section can never fill.  Nothing is
+                                    ;; lost by holding the width open here
+                                    ;; either, since an empty reading is
+                                    ;; trimmed off the end of the line with
+                                    ;; the padding before it.
+                                    )
                                    "\n")
                            ;; A root is a place like any other line's, so RET
                            ;; zooms into it and the motions stop on it.  A domain
@@ -8977,7 +8989,7 @@ nothing."
                        ;; under the line, and a node whose only row the line
                        ;; is already carrying has nothing to open onto.
                        (shown (agent-river--map-shown-rows mine column))
-                       (open (agent-river--map-open-p entry root shown)))
+                       (open (agent-river--map-open-p entry root)))
                   (insert (propertize
                            (concat (agent-river--map-line
                                     level (concat label (if dir "/" ""))
@@ -9009,7 +9021,10 @@ nothing."
                         (let* ((fpath (expand-file-name (plist-get file :rel) path))
                                (frows (gethash fpath rows))
                                (fshown (agent-river--map-shown-rows frows column))
-                               (fopen (agent-river--map-folded-p fpath (and fshown t))))
+                               ;; A file line's only children are rows, which
+                               ;; wait to be asked for -- so it is closed
+                               ;; until somebody says otherwise.
+                               (fopen (agent-river--map-folded-p fpath nil)))
                           (insert (propertize
                                    (concat (agent-river--map-line
                                             'file (plist-get file :rel)

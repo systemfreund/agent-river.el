@@ -5023,14 +5023,16 @@ its members behind for the next one."
     (should-not (agent-river--map-top-line-p))
     (should-not (agent-river--map-active-line-p))))
 
-(ert-deftest agent-river-test-a-node-with-rows-opens-and-folds ()
-  ;; Rows are enrichment and detail at once: drawn where there are any,
-  ;; hidden by the same TAB that hides the files.
+(ert-deftest agent-river-test-a-node-with-rows-folds-until-asked ()
+  ;; Rows are detail, not enrichment: a node whose only children are rows
+  ;; draws closed, and the same TAB that hides a directory's files opens it.
   (let ((agent-river--map-folds nil))
-    (should (agent-river--map-open-p '(:name "a.el") "/repo" '((nil . (1)))))
-    (should-not (agent-river--map-open-p '(:name "a.el") "/repo" nil))
-    (let ((agent-river--map-folds '(("/repo/a.el" . nil))))
-      (should-not (agent-river--map-open-p '(:name "a.el") "/repo" '((nil . (1))))))))
+    (should-not (agent-river--map-open-p '(:name "a.el") "/repo"))
+    (let ((agent-river--map-folds '(("/repo/a.el" . t))))
+      (should (agent-river--map-open-p '(:name "a.el") "/repo")))
+    ;; The files are the one thing that still opens a node without being
+    ;; asked: they are the listing one grain down, not an annotation on it.
+    (should (agent-river--map-open-p '(:name "dir" :files ((:rel "a.el"))) "/repo"))))
 
 (ert-deftest agent-river-test-the-step-row-is-present-tense ()
   ;; The parties say where an agent has been; this says what is happening
@@ -5817,10 +5819,16 @@ first."
          (agent-river--map-folds nil))
      ,@body))
 
-(defun agent-river-test--domain-map ()
-  "Draw the map and return it as text."
+(defun agent-river-test--domain-map (&optional folds)
+  "Draw the map and return it as text.
+FOLDS is what TAB would have left behind, an alist of node path to whether
+its children are drawn -- set after the buffer is opened, because opening
+it clears them."
   (agent-river-map)
   (with-current-buffer agent-river-map-buffer-name
+    (when folds
+      (setq agent-river--map-folds folds)
+      (agent-river--map-draw))
     (prog1 (buffer-substring-no-properties (point-min) (point-max))
       (kill-buffer))))
 
@@ -5887,7 +5895,9 @@ first."
   (agent-river-test--with-domain
     (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"
                           :context '((severity . "P1") (queue . "infra")))
-    (let ((map (agent-river-test--domain-map)))
+    ;; Opened by hand, because what is pinned here is what the rows say and
+    ;; not whether they are drawn unasked -- that is the test below.
+    (let ((map (agent-river-test--domain-map '(("inc:INC-444" . t)))))
       ;; Rendered as they arrived: this package has never read a value out of a
       ;; context and does not start here, which is what lets a record hold a
       ;; severity, a body and a URL without this file learning about any.
@@ -5899,10 +5909,27 @@ first."
     (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
     (agent-river-state "s1" "alpha")
     (agent-river-reach "inc:INC-444" "s1")
-    (let ((map (agent-river-test--domain-map)))
+    (let ((map (agent-river-test--domain-map '(("inc:INC-444" . t)))))
       ;; The association falls out of the ordinary parties derivation, which is
       ;; the point of the edge being a touch rather than a concept of its own.
       (should (string-match-p "alpha" map))
+      (should (string-match-p agent-river-map-here-marker map)))))
+
+(ert-deftest agent-river-test-a-row-waits-to-be-asked-for ()
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"
+                          :context '((severity . "P1")))
+    (agent-river-state "s1" "alpha")
+    (agent-river-reach "inc:INC-444" "s1")
+    (let ((map (agent-river-test--domain-map)))
+      ;; A node whose only children are rows draws closed: the line is the
+      ;; listing, the rows are what a reader asks a line about.
+      (should (string-match-p "INC-444" map))
+      (should-not (string-match-p "severity: P1" map))
+      (should-not (string-match-p "alpha" map))
+      ;; But the twisty promises they are there, and the line still carries
+      ;; what can be read down the listing.
+      (should (string-match-p (regexp-quote agent-river-map-closed-marker) map))
       (should (string-match-p agent-river-map-here-marker map)))))
 
 (ert-deftest agent-river-test-an-ended-artifact-is-struck-through-not-dropped ()
