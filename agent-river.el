@@ -975,6 +975,12 @@ replaying a session's events from the start."
      ;; as well: a turn's output is paragraphs, and a newline in a line-based
      ;; reader makes one entry and a stray.
      ;;
+     ;; Which end it keeps is `agent-river--excerpt's business rather than
+     ;; this branch's, and it is not the first WIDTH characters: the opening
+     ;; of an answer restates the question and the close says what was
+     ;; concluded or what is wanted, while the middle narrates the tool calls
+     ;; this state has already counted.
+     ;;
      ;; Not a form the caller gets to choose, and the alternative is written
      ;; down rather than merely not built.  A setting deciding what lands here
      ;; would put a policy inside the fold, which is the one place this package
@@ -990,9 +996,8 @@ replaying a session's events from the start."
      ;; package promises to own and every view reads.
      ((equal kind "say")
       (setf (agent-river-state-said state)
-            (agent-river--clip
-             (agent-river--squish (or (plist-get event :text) ""))
-             agent-river-said-width)))
+            (agent-river--excerpt (plist-get event :text)
+                                  agent-river-said-width)))
 
      ;; Both of the below record something that happened *to* the session
      ;; rather than something it did, which is why neither touches the step,
@@ -1815,6 +1820,112 @@ streaks are worth a word, the id decides that each of them gets one."
       (concat (substring text 0 width) "…")
     text))
 
+(defun agent-river--sentence-stops (text)
+  "Return the offsets in TEXT just past every sentence that ends inside it.
+
+A stop is a full stop, question or exclamation mark followed by a space or
+by the end -- the boundary `agent-river--first-sentence\=' has always used,
+two marks wider.  An abbreviation (\"e.g. \") makes a false one, and that
+is the whole of what it costs: a cut in a slightly odd place, which is
+what cutting by counting characters does everywhere."
+  (let ((stops nil) (start 0))
+    (while (string-match "[.!?][\"')]*\\(?: \\|\\'\\)" text start)
+      (push (match-end 0) stops)
+      (setq start (1+ (match-beginning 0))))
+    (nreverse stops)))
+
+(defun agent-river--clip-words (text width)
+  "Return at most WIDTH characters of TEXT, ending at a word boundary.
+Falls back to the hard cut where TEXT has no space to back off to, which
+is what a path, a URL or a base64 blob is."
+  (if (<= (length text) width)
+      text
+    (let ((cut (substring text 0 width)))
+      (string-trim-right
+       ;; Only where the cut landed inside a word.  Backing off from one
+       ;; that fell exactly on a boundary throws away the last whole word
+       ;; the budget paid for, which on a short budget is most of it.
+       (if (eq (aref text width) ?\s)
+           cut
+         (let ((space (string-match " [^ ]*\\'" cut)))
+           (if space (substring cut 0 space) cut)))))))
+
+(defun agent-river--excerpt-tail (text width)
+  "Return how TEXT closes, in at most WIDTH characters, or nil.
+
+The closing *line* first, and its last sentence where the line is too
+long.  Lines rather than sentences because of how these messages are
+actually written: a summary, a list of what was done, and then the ask or
+the verdict on a line of its own.  Squished into one line the bullets and
+the ask become a single sentence, so asking for the last sentence there
+answers with the whole tail of the message -- which is how this heuristic
+first went wrong, and the case it exists for."
+  (let* ((lines (seq-remove #'string-empty-p
+                            (mapcar #'string-trim
+                                    (split-string (or text "") "\n"))))
+         (line (car (last lines))))
+    (when line
+      (let* ((one (agent-river--squish line))
+             (opens (seq-filter (lambda (at) (< at (length one)))
+                                (agent-river--sentence-stops one)))
+             (sentence (when opens
+                         (string-trim (substring one (car (last opens)))))))
+        (seq-find (lambda (candidate)
+                    (and candidate
+                         (<= (length candidate) width)
+                         ;; A closing `---' or a stray fence says nothing and
+                         ;; would spend the room that the head wants.
+                         (string-match-p "[[:alpha:]]" candidate)))
+                  (list one sentence))))))
+
+(defun agent-river--excerpt-head (text width)
+  "Return how TEXT opens, in at most WIDTH characters.
+At a sentence boundary where one falls late enough to be worth taking --
+a boundary in the first few words would spend the budget on an opening
+like \"Done.\" and drop the whole of what followed -- and at a word
+boundary otherwise."
+  (let* ((stops (seq-filter (lambda (at) (<= at width))
+                            (agent-river--sentence-stops text)))
+         (stop (car (last stops))))
+    (if (and stop (>= stop (/ width 2)))
+        (string-trim (substring text 0 stop))
+      (agent-river--clip-words text width))))
+
+(defun agent-river--excerpt (text width)
+  "Return TEXT as one line of about WIDTH characters, cut where it means something.
+
+For the agent\\='s own prose, which is the one text here whose length and
+shape it chooses.  `agent-river--clip\\=' takes the first WIDTH characters,
+and on a turn\\='s output those are the least informative ones it has: an
+answer opens by restating the question and closes on what it concluded or
+what it wants from you, and the middle is a prose account of the tool
+calls -- which is the part this state has already measured, in steps,
+files and failures.  So both ends are kept and the middle is the gap.
+
+The gap is marked, because the result is then a quotation with a hole in
+it rather than something the agent said, and the two must not look alike.
+The closing is kept only while it is worth the room -- no more than half
+the width, and never where the head would be left too short to say
+anything -- since two fragments are worse than one sentence."
+  (let ((one (agent-river--squish
+              (replace-regexp-in-string "[[:cntrl:]]+" " " (or text "")))))
+    (if (<= (length one) width)
+        one
+      (let* ((tail (agent-river--excerpt-tail text (/ width 2)))
+             ;; Three for the ellipsis and the spaces that set it off.
+             (budget (if tail (- width (length tail) 3) width))
+             ;; Below this the head is a phrase rather than a statement, and
+             ;; a pair of phrases says less than one clipped sentence.
+             (tail (and tail (>= budget 24) tail))
+             (head (agent-river--excerpt-head one (if tail budget width))))
+        ;; The two ends meet in the middle of a short message: the head
+        ;; already reaches into the closing, and a quotation that says a
+        ;; thing twice with an ellipsis between the halves is worse than one
+        ;; that simply stops.
+        (if (and tail (<= (+ (length head) (length tail)) (length one)))
+            (concat head " … " tail)
+          (concat head "…"))))))
+
 (defun agent-river--log-text (text)
   "Return TEXT as something one log line can hold.
 
@@ -1982,7 +2093,8 @@ have every turn marked."
      ;; marks -- no reason at all is a host that does not report one, and
      ;; unset is "do not know" rather than "interrupted".
      ((equal kind "say")
-      (concat (agent-river--log-text (alist-get 'message payload))
+      (concat (agent-river--excerpt (alist-get 'message payload)
+                                    agent-river-detail-width)
               (if (agent-river--unfinished-p payload) " ✗" "")))
      ((equal kind "done")
       (concat (or (alist-get 'agent_type payload) "subagent") " finished"))

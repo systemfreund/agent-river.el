@@ -2162,6 +2162,55 @@ CALL overrides fields of the tool call record."
     (should (equal (plist-get (agent-river-report "s1") :said)
                    "Parser fixed, tests green."))))
 
+(ert-deftest agent-river-test-an-excerpt-keeps-both-ends-of-what-was-said ()
+  (let ((said (concat "I rewrote the queue handler so the seek position updates"
+                      " before the fragment renders, which was the actual bug."
+                      " All 386 tests pass. Should I also update the docs?")))
+    ;; The first WIDTH characters of an answer are the least informative it
+    ;; has: the opening restates the question and the middle narrates the
+    ;; tool calls, which is the part the state has already measured.  What
+    ;; the fold has no other reading of is how the turn ended -- a verdict
+    ;; or an ask -- so the close is kept and the middle is the gap.
+    (let ((short (agent-river--excerpt said 72)))
+      (should (string-prefix-p "I rewrote the queue handler" short))
+      (should (string-suffix-p "Should I also update the docs?" short))
+      (should (string-match-p " … " short))
+      (should (<= (length short) 73)))))
+
+(ert-deftest agent-river-test-an-excerpt-closes-on-the-closing-line ()
+  ;; How these messages are actually written: a summary, a list of what was
+  ;; done, then the ask on a line of its own.  Squished into one line the
+  ;; bullets and the ask are a single sentence, so asking for the last
+  ;; *sentence* answers with the whole tail of the message and the ask is
+  ;; dropped for being too long -- which is how this first went wrong.
+  (let ((said "Done.\n\n- rewrote the handler\n- added six tests\n\nThe suite is green; shall I push?"))
+    (should (string-suffix-p "The suite is green; shall I push?"
+                             (agent-river--excerpt said 72))))
+  ;; With no line to take it from, the last sentence still answers.
+  (should (string-suffix-p "Shall I push?"
+                           (agent-river--excerpt
+                            (concat "I fixed the parser and rewrote the tests "
+                                    "that covered the old behaviour of it. "
+                                    "Shall I push?")
+                            60))))
+
+(ert-deftest agent-river-test-an-excerpt-cuts-where-something-ends ()
+  ;; A sentence boundary if there is one worth taking, a word boundary
+  ;; otherwise, and the hard cut only where there is neither -- a path, a
+  ;; URL, a blob.
+  (should (equal (agent-river--excerpt "One sentence. Then a much longer second one here." 20)
+                 "One sentence.…"))
+  ;; ...but not a boundary in the first few words, which would spend the
+  ;; budget on "Done." and drop everything that followed.
+  (should (equal (agent-river--excerpt "Done. And then a good deal more text than fits." 30)
+                 "Done. And then a good deal…"))
+  (should (equal (agent-river--excerpt "aaaa bbbb cccc dddd" 11) "aaaa bbbb…"))
+  (should (equal (agent-river--excerpt "aaaaaaaaaaaaaaaaaaaaaa" 8) "aaaaaaaa…"))
+  ;; Shorter than the budget: whole, and no ellipsis claiming otherwise.
+  (should (equal (agent-river--excerpt "All done." 72) "All done."))
+  ;; One line, control characters gone, whatever arrived.
+  (should (equal (agent-river--excerpt "a\n\nb\tc" 72) "a b c")))
+
 (ert-deftest agent-river-test-listening-stops-with-the-mode ()
   (agent-river-test--with-say
     (agent-river--say-arrived "s1" "Half a sen")

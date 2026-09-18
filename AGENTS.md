@@ -23,7 +23,7 @@ Four files, no build system: `agent-river.el` (everything), `agent-river-tests.e
 ## Commands
 
 ```sh
-# Full suite (386 tests). -L . is required: the tests (require 'agent-river).
+# Full suite (389 tests). -L . is required: the tests (require 'agent-river).
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -412,7 +412,22 @@ These are load-bearing; the tests enforce most of them.
   **The event carries the whole text and the slot an excerpt**
   (`agent-river-said-width`): a dialogue act cannot be read off a first
   sentence, which is where this parts from the `◇` line, and the slot is the
-  one value in the state whose length the agent chooses. And the excerpt is
+  one value in the state whose length the agent chooses. **Which end it keeps
+  is a question of its own** (`agent-river--excerpt`, used for the slot and for
+  the `“` line): the first WIDTH characters are the least informative an answer
+  has, since it opens by restating the question and the middle narrates the
+  tool calls the state has already counted in steps, files and failures. So
+  both ends are kept and the middle is the gap, marked — the result is a
+  quotation with a hole in it and must not read as something the agent said.
+  The closing is taken from the last *line* rather than the last sentence,
+  because these messages are written as a summary, a list of what was done and
+  then the ask; squished to one line the bullets and the ask are one sentence,
+  so a last-sentence rule answers with the whole tail and the ask is dropped
+  for being too long. It is kept only while it is worth the room (half the
+  width, and never where the head is left too short to state anything), and
+  cuts fall on a sentence boundary where one lies late enough to be worth
+  taking, on a word boundary otherwise, and hard only for a path, a URL or a
+  blob. And the excerpt is
   **stored raw, escaped where it is rendered**, the way an intent is — storing
   it escaped would put a rendering decision in the state and show backslashes
   in a HUD that is deliberately not Markdown. A `say` counts no step and warms
