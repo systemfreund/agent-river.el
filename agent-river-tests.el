@@ -814,7 +814,35 @@
                   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make test\",\"description\":\"Run the suite\"}}")))
     ;; Bash and Task carry a human-written line; it reads better than the
     ;; shell it expands to.
-    (should (equal (agent-river--detail "act" payload) "Bash  Run the suite"))))
+    (let ((agent-river-shell-glyph nil))
+      (should (equal (agent-river--detail "act" payload) "Bash  Run the suite")))))
+
+(ert-deftest agent-river-test-a-shell-call-is-drawn-as-a-glyph ()
+  "The glyph stands in for the name, and only for a shell tool's name."
+  (let ((agent-river-shell-glyph "💻")
+        (bash (agent-river-test--payload
+               "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make test\"}}"))
+        (grep (agent-river-test--payload
+               "{\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"defun foo\"}}")))
+    (should (equal (agent-river--detail "act" bash) "💻  make test"))
+    ;; A tool whose name is the most specific thing the line can say keeps it.
+    (should (equal (agent-river--detail "act" grep) "Grep  defun foo"))
+    ;; Nil is the answer for a font without the glyph, and it gives the name
+    ;; back rather than leaving the line with nothing where the tool was.
+    (let ((agent-river-shell-glyph nil))
+      (should (equal (agent-river--detail "act" bash) "Bash  make test")))))
+
+(ert-deftest agent-river-test-the-glyph-is-drawn-and-never-folded ()
+  "The state keeps the host's own word; only the log line is redrawn.
+Every reader of a step -- the tool tally, the phase bucket, the write
+count -- matches on the name, so a glyph folded into `:tool' would
+quietly stop all three matching."
+  (let ((agent-river-shell-glyph "💻")
+        (payload (agent-river-test--payload
+                  "{\"session_id\":\"s1\",\"cwd\":\"/repo\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make test\"}}")))
+    (let ((event (agent-river--event "act" payload)))
+      (should (equal (plist-get event :tool) "Bash"))
+      (should (equal (plist-get event :detail) "💻  make test")))))
 
 (ert-deftest agent-river-test-detail-falls-back-through-the-ladder ()
   (should (equal (agent-river--detail
@@ -833,12 +861,12 @@
   (should (equal (agent-river--detail
                   "think" (agent-river-test--payload
                            "{\"tool_name\":\"Bash\",\"duration_ms\":12,\"tool_response\":{\"interrupted\":false}}"))
-                 "Bash ✓  12ms"))
+                 "💻 ✓  12ms"))
   ;; An interrupted call must not claim success.
   (should (equal (agent-river--detail
                   "think" (agent-river-test--payload
                            "{\"tool_name\":\"Bash\",\"duration_ms\":2100,\"tool_response\":{\"interrupted\":true}}"))
-                 "Bash ✗  2.1s"))
+                 "💻 ✗  2.1s"))
   ;; A failure line carries no inline marker: the kind renders ✗ already.
   (should (equal (agent-river--detail
                   "fail" (agent-river-test--payload
