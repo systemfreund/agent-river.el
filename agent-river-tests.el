@@ -814,22 +814,32 @@
                   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make test\",\"description\":\"Run the suite\"}}")))
     ;; Bash and Task carry a human-written line; it reads better than the
     ;; shell it expands to.
-    (let ((agent-river-shell-glyph nil))
+    (let ((agent-river-tool-glyphs nil))
       (should (equal (agent-river--detail "act" payload) "Bash  Run the suite")))))
 
-(ert-deftest agent-river-test-a-shell-call-is-drawn-as-a-glyph ()
-  "The glyph stands in for the name, and only for a shell tool's name."
-  (let ((agent-river-shell-glyph "💻")
+(ert-deftest agent-river-test-a-glyphed-tool-is-drawn-by-name ()
+  "The table answers per name, which is what lets two tools differ.
+`Edit' and `Write' are not a class sharing one mark the way the three
+hosts' names for a shell call are, so a class-keyed table could not have
+drawn them apart.  A tool absent from the table keeps its own word."
+  (let ((agent-river-tool-glyphs '(("Bash" . "💻") ("Edit" . "✏️")
+                                   ("Write" . "📄")))
         (bash (agent-river-test--payload
                "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make test\"}}"))
+        (edit (agent-river-test--payload
+               "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/repo/a.el\"}}"))
+        (write (agent-river-test--payload
+                "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/repo/b.el\"}}"))
         (grep (agent-river-test--payload
                "{\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"defun foo\"}}")))
     (should (equal (agent-river--detail "act" bash) "💻  make test"))
+    (should (equal (agent-river--detail "act" edit) "✏️  a.el"))
+    (should (equal (agent-river--detail "act" write) "📄  b.el"))
     ;; A tool whose name is the most specific thing the line can say keeps it.
     (should (equal (agent-river--detail "act" grep) "Grep  defun foo"))
-    ;; Nil is the answer for a font without the glyph, and it gives the name
-    ;; back rather than leaving the line with nothing where the tool was.
-    (let ((agent-river-shell-glyph nil))
+    ;; An empty table gives every name back, which is the answer for a font
+    ;; that has none of these glyphs.
+    (let ((agent-river-tool-glyphs nil))
       (should (equal (agent-river--detail "act" bash) "Bash  make test")))))
 
 (ert-deftest agent-river-test-the-glyph-is-drawn-and-never-folded ()
@@ -837,7 +847,7 @@
 Every reader of a step -- the tool tally, the phase bucket, the write
 count -- matches on the name, so a glyph folded into `:tool' would
 quietly stop all three matching."
-  (let ((agent-river-shell-glyph "💻")
+  (let ((agent-river-tool-glyphs '(("Bash" . "💻")))
         (payload (agent-river-test--payload
                   "{\"session_id\":\"s1\",\"cwd\":\"/repo\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make test\"}}")))
     (let ((event (agent-river--event "act" payload)))
@@ -868,13 +878,19 @@ quietly stop all three matching."
                            "{\"tool_name\":\"Bash\",\"duration_ms\":2100,\"tool_response\":{\"interrupted\":true}}"))
                  "💻 ✗  2.1s"))
   ;; A failure line carries no inline marker: the kind renders ✗ already.
-  (should (equal (agent-river--detail
-                  "fail" (agent-river-test--payload
-                          "{\"tool_name\":\"Edit\",\"duration_ms\":30}"))
-                 "Edit  30ms")))
+  ;; Named rather than drawn, because this is about the marker and not about
+  ;; how a tool is written; `agent-river-tool-glyphs' has its own test.
+  (let ((agent-river-tool-glyphs nil))
+    (should (equal (agent-river--detail
+                    "fail" (agent-river-test--payload
+                            "{\"tool_name\":\"Edit\",\"duration_ms\":30}"))
+                   "Edit  30ms"))))
 
 (ert-deftest agent-river-test-event-carries-structured-fields ()
-  (let ((event (agent-river--event
+  ;; The glyph table is off here: this is about the fields the event carries,
+  ;; and a detail drawn as a glyph would make the assertion about rendering.
+  (let* ((agent-river-tool-glyphs nil)
+         (event (agent-river--event
                 "act" (agent-river-test--payload
                        "{\"session_id\":\"s1\",\"cwd\":\"/home/x/repo\",\"agent_id\":\"a9\",\"agent_type\":\"Explore\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/home/x/repo/a.el\"}}"))))
     (should (equal (plist-get event :session) "s1"))
