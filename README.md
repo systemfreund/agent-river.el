@@ -234,8 +234,12 @@ No hook carries the message text, so this reads agent-shell's own event stream �
 `agent-message-chunk` accumulated, flushed on `turn-complete` — and a session
 agent-shell does not host gets no `say` lines, exactly as it gets no `◇` ones.
 The event handed to observers carries the whole text and the stop reason; the
-state keeps a clipped, one-line excerpt (`:said` in the report), because this is
-the one value in it whose length the agent chooses. It is in the **task frame**:
+state keeps a one-line excerpt (`:said` in the report), because this is the one
+value in it whose length the agent chooses. The excerpt keeps **both ends** —
+the opening and the closing line, with the middle as a marked gap — because the
+first N characters of an answer are its least informative: it opens by
+restating the question, and the middle narrates the tool calls the state has
+already counted. It is in the **task frame**:
 it is the answer to the prompt above it, so a new prompt clears it, the way it
 clears `steps` — the log keeps every `“` line it drew. A turn that ended some
 other way than `end_turn` — cancelled, refused, out of tokens — is marked `✗`,
