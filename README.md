@@ -553,6 +553,11 @@ or point lands on the wrong row after one), `:rank` (low first) and optionally
 a contributor earns the line's fixed-width column, and it must be a reading *of
 the rows*, the same data smaller, never a second account of it.
 
+Rows are detail: a node whose only children are rows draws closed and TAB opens
+it, so a contributor's rows are read when a reader asks that line for them.
+`:summary` is the way onto the line itself, and the only thing a contributor
+can say that is read without a keystroke.
+
 Batch per root — thirty lines with a subprocess each, every TTL, is a fork bomb
 with a view attached — and expect to be **retired on the first error**, like an
 observer. The diffstat (`agent-river--rows-vc`) is the asynchronous, batched and
