@@ -102,27 +102,39 @@ its hook synchronous."
   "Width of the session column shown when several sessions are active."
   :type 'integer)
 
-(defcustom agent-river-shell-glyph "💻"
-  "Shown on a log line in place of a shell tool's name.
+(defcustom agent-river-tool-glyphs
+  '(;; Three hosts' names for one thing.
+    ("Bash" . "💻") ("BashOutput" . "💻") ("execute" . "💻")
+    ;; Changing part of a file, and putting a whole one down.
+    ("Edit" . "✏️") ("edit" . "✏️") ("Write" . "📄"))
+  "What a log line draws in place of a tool's name, keyed by that name.
 
-A tool name is the host's own word, and for most tools it is also the
-most specific thing the line can say -- `Grep' and `Read' are two
-different things being done.  A shell call is the exception: `Bash',
-`BashOutput' and `execute' are three hosts' names for one thing, the
-word says nothing the glyph cannot, and what actually differs between
-two shell calls is the command beside it, which is clipped to
-`agent-river-detail-width' and is where the room belongs.
+A tool name is the host's own word, and usually it is also the most
+specific thing the line can say -- `Grep' and `WebFetch' are two
+different things being done, and neither is frequent enough that reading
+the word costs anything.  What earns a glyph is a call made so often that
+its name is the part of the line a reader has stopped seeing, while the
+argument beside it -- a command, a path, clipped to
+`agent-river-detail-width' -- is the part that differs between two of
+them and the part the room belongs to.
 
-Which tools this replaces is `agent-river-shell-tools', not a list of
-its own: two lists of the names of the shell tools would be two accounts
-of one fact, and the one nobody remembered to extend would go on
-spelling out the name for a host the other had already learned.
+Keyed by name and not by class, which is what the shell glyph used to be:
+`Bash', `BashOutput' and `execute' are three names for one thing and
+could be drawn from `agent-river-shell-tools', but `Edit' and `Write'
+are not a class -- they are two tools that differ, and the glyph is how
+they differ.  Once the table has to answer per name, a second class-keyed
+path beside it would be two mechanisms deciding one question.
 
-Nil keeps the name, which is the answer for a font that has no such
-glyph -- the box it would otherwise draw says less than `Bash' does.
-Wider than one column, unlike `agent-river-spinner-frames': nothing is
-aligned after it, since the argument that follows is free text."
-  :type '(choice (const :tag "Keep the tool's own name" nil) string))
+Both dialects are listed by hand, as in `agent-river-phase-buckets' and
+for the same reason: the hooks report the host's own tool name and an
+agent-shell session reports the coarser ACP `kind', and a table that knew
+only one of them would quietly stop drawing for the other.
+
+A tool absent from here keeps its name, which is also how a glyph is
+turned off -- the box a font without it draws says less than `Bash' does.
+Not held to the one-column rule `agent-river-spinner-frames' has: nothing
+is aligned after a tool name, since what follows it is free text."
+  :type '(alist :key-type string :value-type string))
 
 (defcustom agent-river-refresh-interval 1
   "Seconds between redraws of the state block while work is in progress.
@@ -209,17 +221,9 @@ rather than guess, the same way a shell call does."
   :type '(alist :key-type string :value-type (repeat string)))
 
 (defcustom agent-river-shell-tools '("Bash" "BashOutput" "execute")
-  "Tools that run a shell command, whichever host named them.
+  "Tools whose step text is searched for `agent-river-verify-regexp'.
 `execute' is the ACP kind a shell call arrives as; see
-`agent-river-phase-buckets' for why both dialects are listed.
-
-Read twice, and the two readings are one question -- is this step a
-shell call -- asked for different purposes, which is why the list is not
-split.  `agent-river--bucket' searches such a step's text for
-`agent-river-verify-regexp', because a shell call is the one step whose
-tool name classifies nothing; and `agent-river--tool-label' draws it as
-`agent-river-shell-glyph', because a shell call is the one step whose
-tool name says nothing the glyph cannot."
+`agent-river-phase-buckets' for why both dialects are listed."
   :type '(repeat string))
 
 (defcustom agent-river-verify-regexp
@@ -2140,9 +2144,7 @@ is what the tool tallies, `agent-river--bucket' and
 `agent-river--writing-p' all match on.  Renaming it here and there alike
 would mean a host's own word had stopped appearing anywhere, and the
 next reader of the state would be matching against a glyph."
-  (if (and agent-river-shell-glyph (member tool agent-river-shell-tools))
-      agent-river-shell-glyph
-    tool))
+  (or (cdr (assoc tool agent-river-tool-glyphs)) tool))
 
 (defun agent-river--detail (kind payload)
   "Return the line KIND should show for PAYLOAD."

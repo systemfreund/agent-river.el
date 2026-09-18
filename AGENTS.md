@@ -1583,25 +1583,31 @@ together:
   against the `act` colouring it lands on. Pairing by nearness or tool name
   instead would fold two parallel calls of one tool into each other — which is
   exactly the case the id exists for.
-- **A shell call is the one tool drawn as a glyph, not named**
-  (`agent-river-shell-glyph`, `agent-river--tool-label`). For every other
-  tool the host's own word is the most specific thing the line can say —
-  `Grep` and `Read` are two different things being done — but `Bash`,
-  `BashOutput` and `execute` are three hosts' names for one thing, and what
-  actually differs between two shell calls is the command beside them, which
-  is clipped to `agent-river-detail-width`. Three things it owes. **Which
-  tools it replaces is `agent-river-shell-tools`**, not a list of its own:
-  two lists of the shell tools' names would be two accounts of one fact, and
-  the one nobody remembered to extend would go on spelling out the name for
-  a host the other had already learned — the reading is the same question
-  `agent-river--bucket` asks that list, put to a different purpose. It is
-  **drawn and never folded**: `:tool` keeps the host's word, because the
-  tool tally, the phase bucket and `agent-river--writing-p` all match on it
-  and a glyph folded in would stop all three matching, silently. And **nil
-  gives the name back**, the answer for a font without the glyph, where the
-  box it would otherwise draw says less than `Bash` does — the same off
-  switch `agent-river-spinner-frames` has, though not its one-column rule:
-  nothing is aligned after a tool name, since what follows it is free text.
+- **A handful of tools are drawn as a glyph rather than named**
+  (`agent-river-tool-glyphs`, `agent-river--tool-label`). Usually the host's
+  own word is the most specific thing the line can say — `Grep` and
+  `WebFetch` are two different things being done, and neither is frequent
+  enough that reading the word costs anything. What earns a glyph is a call
+  made so often that its name is the part of the line a reader has stopped
+  seeing, while the argument beside it — a command, a path, clipped to
+  `agent-river-detail-width` — is what differs between two of them. Three
+  things it owes. **Keyed by name, not by class**: the shell glyph was
+  class-keyed at first, read straight off `agent-river-shell-tools`, since
+  `Bash`, `BashOutput` and `execute` are three hosts' names for one thing —
+  but `Edit` and `Write` are not a class, they are two tools that differ and
+  the glyph is *how* they differ, so the table has to answer per name, and a
+  second class-keyed path beside it would be two mechanisms deciding one
+  question. Both dialects are then listed by hand, as in
+  `agent-river-phase-buckets` and for its reason. It is **drawn and never
+  folded**: `:tool` keeps the host's word, because the tool tally, the phase
+  bucket and `agent-river--writing-p` all match on it and a glyph folded in
+  would stop all three matching, silently — the signal text keeps the word
+  too, since that line goes back to the agent. And **a tool absent from the
+  table keeps its name**, which is both how a glyph is turned off and the
+  answer for a font without it, where the box drawn instead says less than
+  `Bash` does — not held to the one-column rule
+  `agent-river-spinner-frames` has, since nothing is aligned after a tool
+  name and what follows it is free text.
 - **The refresh timer** (`agent-river--ensure-timer`) redraws only the block, runs
   only while someone is mid-task, retires itself on the first tick that finds no
   one working, and cancels itself if a redraw throws.
