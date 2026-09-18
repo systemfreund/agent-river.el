@@ -4962,6 +4962,55 @@ its members behind for the next one."
     ;; And therefore the line still gets its reading.
     (should (equal (agent-river--map-summary contributed t) "!"))))
 
+(ert-deftest agent-river-test-a-badge-is-drawn-against-the-name ()
+  ;; The one reading that goes before the name.  The column at the end of the
+  ;; line is read by running an eye down it; a badge is read at the moment the
+  ;; name is.
+  (let ((contributed (list (cons (list :name 'ci :badge (lambda (_rows) "✘"))
+                                 (list (list :key "1" :text "one"))))))
+    (should (equal (agent-river--map-badge contributed t) "✘"))
+    (should (string-match-p "✘ .*a\\.el"
+                            (agent-river--map-line 'file "a.el" nil nil nil nil
+                                                   (agent-river--map-badge contributed t))))))
+
+(ert-deftest agent-river-test-a-badge-wider-than-the-slot-is-refused ()
+  ;; Not truncated: the gutter is what every name in the buffer is indented
+  ;; by, so a two-column badge moves one name out of step with all the others.
+  (let ((contributed (list (cons (list :name 'loud :badge (lambda (_rows) "!!"))
+                                 (list (list :key "1" :text "one"))))))
+    (should (equal (agent-river--map-badge contributed t) " "))
+    (should (equal (agent-river--map-line 'file "a.el" nil nil nil nil
+                                          (agent-river--map-badge contributed t))
+                   (agent-river--map-line 'file "a.el" nil nil nil nil " ")))))
+
+(ert-deftest agent-river-test-the-first-contributor-to-badge-wins ()
+  ;; One slot, no arithmetic that could combine two glyphs -- so the
+  ;; alternative to a rule is a line that changes its mind between redraws.
+  (let ((contributed (list (cons (list :name 'first :badge (lambda (_rows) "a"))
+                                 (list (list :key "1")))
+                           (cons (list :name 'second :badge (lambda (_rows) "b"))
+                                 (list (list :key "2"))))))
+    (should (equal (agent-river--map-badge contributed t) "a"))))
+
+(ert-deftest agent-river-test-no-badge-anywhere-leaves-the-slot-out ()
+  ;; A slot held open on some lines and not others sits in a different place
+  ;; per line, which is the slot's whole purpose spent on nothing -- so it is
+  ;; one decision for the buffer, like the column's.
+  (let* ((rows (make-hash-table :test 'equal))
+         (quiet (list (cons (list :name 'ci :badge (lambda (_rows) nil))
+                            (list (list :key "1"))))))
+    (puthash "/repo/a.el" quiet rows)
+    (should-not (agent-river--map-badged-p rows))
+    (should-not (agent-river--map-badge quiet nil))
+    (should (equal (agent-river--map-line 'file "a.el" nil nil nil nil nil)
+                   (agent-river--map-line 'file "a.el" nil)))
+    ;; And one node with something to flag opens it for the buffer.
+    (puthash "/repo/b.el"
+             (list (cons (list :name 'ci :badge (lambda (_rows) "✘"))
+                         (list (list :key "2"))))
+             rows)
+    (should (agent-river--map-badged-p rows))))
+
 (ert-deftest agent-river-test-a-refresh-is-offered-on-its-own-clock ()
   ;; The redraw fires every few seconds; a contributor that spawns work
   ;; must not be asked to spawn it again each time.
