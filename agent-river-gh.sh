@@ -1,8 +1,9 @@
 #!/bin/sh
-# agent-river-gh.sh -- deliver recently updated GitHub issues to the spool.
+# agent-river-gh.sh -- deliver recently updated GitHub issues and pull
+# requests to the spool.
 #
 # The pull half of agent-river-spool.el's third direction.  Like
-# agent-river-hook.sh it is deliberately thin: it asks `gh' for issues and
+# agent-river-hook.sh it is deliberately thin: it asks `gh' for objects and
 # writes what comes back.  It interprets no field and makes no decision -- the
 # knowledge of what GitHub calls things lives in agent-river-gh.el, in Elisp,
 # under test.
@@ -11,6 +12,13 @@
 # thing, so one issue is one file.  That has to happen before the spool, or
 # the delivery and everything read out of it stop being single-valued.  The
 # split is `gh --jq', which is bundled with gh -- no external jq.
+#
+# It names which query an answer came out of, in `source', and that is the
+# whole of what it knows about the difference between an issue and a pull
+# request.  Naming the command it ran is not interpreting a field: the
+# alternative is a reader guessing the kind from the shape of what it was
+# handed, and guessing a thing's domain from its spelling is the mistake this
+# package refuses everywhere else.
 #
 # Usage:  agent-river-gh.sh [DIRECTORY]
 #
@@ -21,9 +29,10 @@
 # Environment:
 #   AGENT_RIVER_SPOOL      where issues are delivered
 #   AGENT_RIVER_GH_STATE   where the watermark is kept
-#   AGENT_RIVER_GH_LIMIT   how many issues to ask for (default 50)
+#   AGENT_RIVER_GH_LIMIT   how many of each to ask for (default 50)
 #   AGENT_RIVER_GH_SINCE   first-run lookback, a gh search date (default 1 day)
 #   AGENT_RIVER_GH_RESCAN  non-empty: ignore the watermark for this one run
+#   AGENT_RIVER_GH_KINDS   what to ask for: `issue', `pr', or both (default both)
 
 set -eu
 
@@ -34,6 +43,7 @@ xdg=${XDG_STATE_HOME:-$HOME/.local/state}
 spool=${AGENT_RIVER_SPOOL:-$xdg/agent-river/spool}
 state=${AGENT_RIVER_GH_STATE:-$xdg/agent-river/gh}
 limit=${AGENT_RIVER_GH_LIMIT:-50}
+kinds=${AGENT_RIVER_GH_KINDS:-"issue pr"}
 
 # Every step degrades to a no-op.  A poller that fails loudly in a cron job
 # every minute is a poller someone switches off.
@@ -47,6 +57,29 @@ repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || exi
 # already have so it can sit inside the wrapper, and never reads gh's output.
 quote() {
   printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+# What to ask for, and what to call the answer.  Two tables rather than one
+# because they are read at different moments -- the fields go to `gh', the
+# source name goes into the file -- and because a pull request's extra fields
+# are rejected outright by `gh issue list', so there is no shared list to
+# narrow from.  The source names are the keys of `agent-river-gh--domains',
+# which is where they are turned back into a domain.
+fields_for() {
+  case $1 in
+    issue) printf '%s' 'number,title,updatedAt,author,labels,state,url,body' ;;
+    pr) printf '%s%s' 'number,title,updatedAt,author,labels,state,url,body,' \
+                      'isDraft,headRefName,baseRefName,isCrossRepository,reviewDecision' ;;
+    *) return 1 ;;
+  esac
+}
+
+source_for() {
+  case $1 in
+    issue) printf '%s' 'gh' ;;
+    pr) printf '%s' 'gh-pr' ;;
+    *) return 1 ;;
+  esac
 }
 
 slug=$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_')
@@ -76,51 +109,76 @@ else
 fi
 
 # `>=' rather than `>', and the watermark is the time of the run rather than
-# the newest issue seen.  Both over-fetch a little, and over-fetching is free:
-# an issue already on record is recognised by its key, so a repeat costs one
-# deleted file.  Missing an issue costs an issue.
+# the newest object seen.  Both over-fetch a little, and over-fetching is
+# free: an issue already on record is recognised by its key, so a repeat costs
+# one deleted file.  Missing an issue costs an issue.
 #
-# The answer goes to a file first, rather than straight down a pipe, because
-# the watermark may only move once the query is known to have *worked*.  A
-# pipeline exits with the status of its right-hand side, and a `while' whose
-# body never runs exits 0 -- so an expired token, a rate limit or a dropped
-# network read exactly like a quiet hour, and the mark would be stamped over
-# every issue the outage hid.  That is the one failure here that does not
-# degrade to a no-op: every other step loses nothing, this one loses issues
-# permanently, because the next run asks about a window that has passed.
-answer=$(mktemp 2>/dev/null) || exit 0
-if ! gh issue list --state open --limit "$limit" \
-     --search "updated:>=$since" \
-     --json number,title,updatedAt,author,labels,state,url,body \
-     --jq '.[]' > "$answer" 2>/dev/null; then
-  rm -f "$answer"
-  exit 0
-fi
+# One mark for the repository rather than one per kind, because what the mark
+# records is the moment before which this repository has been asked about
+# *completely* -- so every query shares the one `since', and a kind that could
+# not be asked or came back cut short holds the mark for all of them.  Loose
+# in one direction only: the kinds that did answer are asked again next run,
+# which costs their deleted files.
+complete=1
 
-while IFS= read -r issue; do
-  [ -n "$issue" ] || continue
-  tmp=$(mktemp "$spool/gh.XXXXXXXX" 2>/dev/null) || continue
-  # Built where the watcher does not look -- only `.json' is taken in -- and
-  # renamed into place, so the file is never visible half written.
-  if printf '{"source":"gh","repo":%s,"cwd":%s,"issue":%s}' \
-       "$(quote "$repo")" "$(quote "$PWD")" "$issue" > "$tmp"; then
-    mv "$tmp" "$tmp.json" || rm -f "$tmp"
-  else
-    rm -f "$tmp"
+for kind in $kinds; do
+  # An unknown kind is a typo in somebody's configuration, and the mark is not
+  # held for it: there is no window being missed, because nothing will ever
+  # ask about one.  Emacs rejects it before it gets here -- see
+  # `agent-river-gh--kinds' -- so this is the cron path saying no quietly,
+  # which is what every other step in this script does too.
+  fields=$(fields_for "$kind") || continue
+  src=$(source_for "$kind") || continue
+
+  # The answer goes to a file first, rather than straight down a pipe, because
+  # the watermark may only move once the query is known to have *worked*.  A
+  # pipeline exits with the status of its right-hand side, and a `while' whose
+  # body never runs exits 0 -- so an expired token, a rate limit or a dropped
+  # network read exactly like a quiet hour, and the mark would be stamped over
+  # every issue the outage hid.  That is the one failure here that does not
+  # degrade to a no-op: every other step loses nothing, this one loses issues
+  # permanently, because the next run asks about a window that has passed.
+  answer=$(mktemp 2>/dev/null) || { complete=0; continue; }
+  if ! gh "$kind" list --state open --limit "$limit" \
+       --search "updated:>=$since" --json "$fields" \
+       --jq '.[]' > "$answer" 2>/dev/null; then
+    rm -f "$answer"
+    complete=0
+    continue
   fi
-done < "$answer"
 
-count=$(wc -l < "$answer" | tr -d ' ')
-rm -f "$answer"
+  while IFS= read -r object; do
+    [ -n "$object" ] || continue
+    tmp=$(mktemp "$spool/gh.XXXXXXXX" 2>/dev/null) || continue
+    # Built where the watcher does not look -- only `.json' is taken in -- and
+    # renamed into place, so the file is never visible half written.
+    #
+    # `object' rather than `issue' or `pr': the kind is already said once, in
+    # the field whose job is saying how to read this, and a second account of
+    # it in the nesting is one the two could disagree about.
+    if printf '{"source":%s,"repo":%s,"cwd":%s,"object":%s}' \
+         "$(quote "$src")" "$(quote "$repo")" "$(quote "$PWD")" "$object" \
+         > "$tmp"; then
+      mv "$tmp" "$tmp.json" || rm -f "$tmp"
+    else
+      rm -f "$tmp"
+    fi
+  done < "$answer"
 
-# A truncated run has not seen the window either.  There is no way to tell a
-# full page from a truncated one apart from its size, so a run that came back
-# at the limit keeps the old mark and the next one asks again -- the same
-# over-fetch the header describes, and free for the same reason.  Advancing
-# the mark to the oldest issue seen would be tighter and would mean reading
-# gh's output, which is the one thing this script does not do.
-[ "$count" -lt "$limit" ] || exit 0
+  count=$(wc -l < "$answer" | tr -d ' ')
+  rm -f "$answer"
 
-# Only after a query that was answered and was not cut short: a failed or
-# truncated run must not move the watermark past issues it never looked at.
+  # A truncated run has not seen the window either.  There is no way to tell a
+  # full page from a truncated one apart from its size, so a run that came
+  # back at the limit keeps the old mark and the next one asks again -- the
+  # same over-fetch the header describes, and free for the same reason.
+  # Advancing the mark to the oldest object seen would be tighter and would
+  # mean reading gh's output, which is the one thing this script does not do.
+  [ "$count" -lt "$limit" ] || complete=0
+done
+
+# Only after queries that were answered and were not cut short: a failed or
+# truncated run must not move the watermark past objects it never looked at.
+[ "$complete" -eq 1 ] || exit 0
+
 printf '%s' "$now" > "$mark"

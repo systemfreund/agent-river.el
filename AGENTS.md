@@ -31,9 +31,10 @@ one thing here that starts a process, pointing an agent at an artifact.
 Both are optional and require `agent-river`, and they require nothing of
 each other — see the third-direction section for why they were one file and
 are not any more. `agent-river-gh.el` and `agent-river-gh.sh` are one
-*source* for the spool, and the line they are on the far side of is that a
-source knowing about a foreign system lives beside the mechanism rather
-than inside it — `river` is the normalised shape and stays in the core, and
+*dialect* for the spool, registered under two source names (`gh`,
+`gh-pr`), and the line they are on the far side of is that a source
+knowing about a foreign system lives beside the mechanism rather than
+inside it — `river` is the normalised shape and stays in the core, and
 the next source (a tracker, a mailbox, a build) goes next to the GitHub
 one. `agent-river-tests.el` is the ERT suite for all of it,
 `agent-river-hook.sh` is the bridge, and there is one example hook wiring
@@ -43,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (450 tests). -L . is required: the tests require all four .el files.
+# Full suite (459 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -993,7 +994,36 @@ before the deletion, so that deferring is not the same as forgetting.
   quiet hour and stamped the mark over every issue the outage hid. It is the
   one step in that script that does not degrade to a no-op — everything else
   loses nothing, this loses issues permanently, because the next run asks
-  about a window that has passed.
+  about a window that has passed. **One mark per repository, not per kind**
+  now that there are two: what it records is the moment before which this
+  repository has been asked about *completely*, so every query shares the
+  one `since` and a kind that failed or came back at the limit holds the
+  mark for all of them. Loose in one direction only — the kinds that did
+  answer are asked again next run, which costs their deleted files.
+- **An issue and a pull request are one dialect and two source names**
+  (`agent-river-gh--domains`, `AGENT_RIVER_GH_KINDS`). The script names
+  which query an answer came out of — `gh` or `gh-pr` — and nests it under
+  a uniform `object`; the reader is *told* the kind rather than working it
+  out from which key happened to be present, which would be inferring a
+  domain from a spelling, the thing `agent-river--key-domain` refuses one
+  subject over. One reader, because everything else is shared: both are a
+  number, a title, a body somebody else wrote and a state that can be over,
+  and the domain symbol is also the key's prefix, from one `format`, so the
+  two cannot come apart. `:gone` needed nothing — `merged` had been written
+  into it before there was anything that could be merged. Three things it
+  owes. **The PR-only context cells are asked for, never branched on**
+  (`branch`, `base`, `review`, `draft`, `fork`): the chain already asks that
+  way for a `body` an issue may not have, and a domain test there would be a
+  second place the kind is decided. **The registering form spells the two
+  names out** rather than reading the table, because it is extracted into
+  the autoloads file and runs before the table exists — a test is what holds
+  the two lists together, since adrift, a delivered kind reads as malformed
+  and goes to `failed/`, which nothing re-reads. And **Emacs rejects an
+  unknown kind before the poller sees it** (`agent-river-gh--kinds`): the
+  script spells its default with `:-`, which fires on an empty value as
+  readily as on an unset one, so handing it a list that came to nothing
+  would ask for both — the drift `agent-river-gh-kinds` exists to shut,
+  arrived at from the inside.
 - **A source registered by an autoload needs an autoload of its own**
   (`agent-river-gh--read`). The `with-eval-after-load` form puts the reader
   into the alist at startup; without a cookie on the reader, the entry is a
@@ -1008,6 +1038,24 @@ before the deletion, so that deferring is not the same as forgetting.
   holding tools. With a person in the loop the person is the defence, so the
   quoting is a courtesy rather than the whole of it — and it is kept anyway,
   because it is what has to be right on the day #37 is built.
+- **The `>` goes on in one place** (`agent-river-gh--quote`), and the pull
+  request is what paid for it. The body was split on newlines from the
+  start; the branch name added beside it was `format`ed into a single line,
+  so a name carrying a newline closed the quotation and everything after it
+  read as the operator's own words — the injection the framing exists to
+  stop, walking out through the field that had just been added next to it.
+  A branch name is a stranger's text exactly as a body is: a fork spells one
+  however it likes. What stays outside is ours and interpolates nothing —
+  the framing, the export, and the note that a pull request is a draft,
+  which is a sentence read off a boolean.
+- **Two framings, dispatched on the domain** (`agent-river-gh--framing`),
+  which is the two lines inside one brief that `agent-river-launch-brief`
+  asks for rather than a function per domain. They are written side by side
+  because what has to stay parallel is the part that is not about the work:
+  both introduce the same quotation and both say it is not an instruction.
+  Only the ask differs — an issue is a request to weigh, a pull request is a
+  change to read — and anything else falls back to the issue's, the more
+  careful of the two.
 
 ### One set of motions, every buffer
 
