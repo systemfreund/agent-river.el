@@ -659,19 +659,22 @@ by label. `◇` lines are the agent's own reasoning and `“` lines
 what it said at the end of a turn; neither is in any hook payload, so both come
 from the session's agent-shell buffer where there is one.
 
-The `|…|` column is what the session has been **spending**, one bar per
-`agent-river-spend-interval` (five minutes) across `agent-river-spend-width`
-characters of braille — two bars to a character, so the default six cover an
-hour. The figure behind it is agent-shell's running cost, which only ever goes
-up; the graph is the *difference* between successive readings, so it says when
-the money went rather than how much there has been. All the session lines share
-one scale so they can be read against each other, a bar the session was alive
-for and spent nothing in draws one dot where a bar from before it was first seen
-draws none, and the first reading of a session is never spending — a cumulative
-figure attributed to the moment Emacs first looked would draw the whole history
-as one spike. `agent-river-spend-width` nil turns it off. No hook payload carries
-a cost, so a session run from a terminal has no graph, the way it has no `◇`
-lines.
+The `|…|` column is how much **context** the session has been taking on, one bar
+per `agent-river-tokens-interval` (five minutes) across
+`agent-river-tokens-width` characters of braille — two bars to a character, so
+the default six cover an hour. A bar holds how many tokens the window grew by
+while it ran, which is the work arriving as it arrives: the cost and the token
+counts agent-shell keeps only move once a turn, so a graph of those would land a
+twenty-minute turn as a single spike in the bar it ended in. All the session
+lines share one scale so they can be read against each other; a bar the session
+was alive for and nothing arrived in draws one dot where a bar from before it
+was first seen draws none; the first reading of a session is never growth, or a
+session Emacs has just adopted would draw its whole window as one spike; and a
+compaction is taken as it comes rather than counted as negative work.
+`agent-river-tokens-width` nil turns it off. No hook payload carries any of
+this, so a session run from a terminal has no graph, the way it has no `◇`
+lines. What it **cost** is a separate question with a separate answer:
+`M-x agent-river-spend`.
 
 The HUD is deliberately **not** Markdown: its log carries prompts, reasoning and
 tool arguments — text this package does not control — and Markdown would let
