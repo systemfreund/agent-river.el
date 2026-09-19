@@ -1,16 +1,16 @@
 #!/bin/sh
 # agent-river-gh.sh -- deliver recently updated GitHub issues to the spool.
 #
-# The pull half of agent-river-launch.el's third direction.  Like
+# The pull half of agent-river-spool.el's third direction.  Like
 # agent-river-hook.sh it is deliberately thin: it asks `gh' for issues and
-# writes what comes back.  It interprets no field, makes no decision and knows
-# nothing about rules -- the knowledge of what GitHub calls things lives in
-# agent-river-gh.el, in Elisp, under test.
+# writes what comes back.  It interprets no field and makes no decision -- the
+# knowledge of what GitHub calls things lives in agent-river-gh.el, in Elisp,
+# under test.
 #
-# The one thing it does beyond moving bytes is *split*: the spool's unit is
-# one occasion, so one issue is one file.  That has to happen before the spool
-# or the ledger, the dedupe and the recovery all stop being single-valued.
-# The split is `gh --jq', which is bundled with gh -- no external jq.
+# The one thing it does beyond moving bytes is *split*: the spool's unit is one
+# thing, so one issue is one file.  That has to happen before the spool, or
+# the delivery and everything read out of it stop being single-valued.  The
+# split is `gh --jq', which is bundled with gh -- no external jq.
 #
 # Usage:  agent-river-gh.sh [DIRECTORY]
 #
@@ -19,10 +19,11 @@
 # not be a reason for an issue to go unseen.
 #
 # Environment:
-#   AGENT_RIVER_SPOOL      where candidates are delivered
+#   AGENT_RIVER_SPOOL      where issues are delivered
 #   AGENT_RIVER_GH_STATE   where the watermark is kept
 #   AGENT_RIVER_GH_LIMIT   how many issues to ask for (default 50)
 #   AGENT_RIVER_GH_SINCE   first-run lookback, a gh search date (default 1 day)
+#   AGENT_RIVER_GH_RESCAN  non-empty: ignore the watermark for this one run
 
 set -eu
 
@@ -53,7 +54,14 @@ mkdir -p "$state" || exit 0
 mark="$state/$slug.since"
 
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-if [ -r "$mark" ]; then
+# AGENT_RIVER_GH_RESCAN ignores the watermark for one run, and the reason is
+# on the Emacs side: what the watermark protects is a *delivery* being made
+# twice, and what consumes a delivery is now an artifact table that does not
+# survive a restart.  Incrementally polled, a restarted Emacs would show an
+# empty map until somebody touched an issue on GitHub.  So the first poll
+# after the mode is switched on asks wide, and every poll after it is
+# incremental again -- which is also why the mark is still stamped below.
+if [ -r "$mark" ] && [ -z "${AGENT_RIVER_GH_RESCAN:-}" ]; then
   since=$(cat "$mark")
 else
   # GNU spells it `-d', BSD spells it `-v', and which one is here decides
@@ -69,8 +77,8 @@ fi
 
 # `>=' rather than `>', and the watermark is the time of the run rather than
 # the newest issue seen.  Both over-fetch a little, and over-fetching is free:
-# the spool deduplicates on the occasion key, so a repeat costs one deleted
-# file.  Missing an issue costs an issue.
+# an issue already on record is recognised by its key, so a repeat costs one
+# deleted file.  Missing an issue costs an issue.
 #
 # The answer goes to a file first, rather than straight down a pipe, because
 # the watermark may only move once the query is known to have *worked*.  A
