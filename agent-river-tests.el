@@ -195,11 +195,11 @@
       (agent-river-observe '(:kind "act" :session "s1" :label "repo"
                                    :detail "Edit a.el")))
     ;; A fold that dies must leave a visible trace: this exact failure once
-    ;; stopped the display with no error anywhere.
-    (with-current-buffer (agent-river--buffer)
-      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-        (should (string-match-p "fold failed" text))
-        (should (string-match-p "agent-river-reset" text))))))
+    ;; stopped the display with no error anywhere.  In the log, which is
+    ;; where everything this package says out loud goes.
+    (let ((text (agent-river-test--log-text)))
+      (should (string-match-p "fold failed" text))
+      (should (string-match-p "agent-river-reset" text)))))
 
 (ert-deftest agent-river-test-panel-surfaces-a-live-failure-run ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -254,59 +254,199 @@
       (should (string-match-p "repo" block))
       (should-not (string-match-p "other" block)))))
 
-(ert-deftest agent-river-test-newest-event-is-at-the-top ()
+(ert-deftest agent-river-test-newest-event-is-at-the-bottom ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
+    ;; Cleared, because the oldest line is the one being asserted on now and
+    ;; the log buffer outlives the test that wrote into it last.
+    (agent-river-clear)
     (agent-river-observe '(:kind "act" :session "s1" :label "repo" :detail "first"))
     (agent-river-observe '(:kind "act" :session "s1" :label "repo" :detail "second"))
-    (with-current-buffer (agent-river--buffer)
-      (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
-             (lines (split-string text "\n" t)))
-        ;; State block on top, then the log newest-first underneath.
-        (should (string-match-p "repo" (nth 0 lines)))
-        (should (string-match-p "second" (nth 1 lines)))
-        (should (string-match-p "first" (nth 2 lines)))))))
+    (let ((lines (split-string (agent-river-test--log-text) "\n" t)))
+      ;; Oldest to newest, the way every other log is read.  It ran the
+      ;; other way while the state block was pinned above it in the same
+      ;; buffer -- both things worth seeing together at the top, nothing to
+      ;; tail -- and that reason left with the block.
+      (should (string-match-p "first" (nth 0 lines)))
+      (should (string-match-p "second" (nth 1 lines))))))
 
 (ert-deftest agent-river-test-trim-drops-the-oldest ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil)
         (agent-river-max-entries 3))
+    (agent-river-clear)
     (dolist (n '("one" "two" "three" "four"))
       (agent-river-observe (list :kind "act" :session "s1" :label "repo"
                                  :detail n)))
-    (with-current-buffer (agent-river--buffer)
-      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-        (should (string-match-p "four" text))
-        ;; Oldest now sits at the bottom, so trimming works from the tail.
-        (should-not (string-match-p "one" text))))))
+    (let ((lines (agent-river-test--log-lines)))
+      (should (= (length lines) 3))
+      ;; Oldest is at the top, so the trim takes from there and the newest
+      ;; line is the last one -- which is also what says the count is
+      ;; measured back from the end rather than forward from the start.
+      (should (string-match-p "two" (nth 0 lines)))
+      (should (string-match-p "four" (nth 2 lines))))))
 
-(ert-deftest agent-river-test-a-blank-line-closes-the-block ()
+(ert-deftest agent-river-test-each-half-holds-only-its-own ()
+  ;; The split, stated as what each buffer may contain.  They shared one
+  ;; before, separated by a blank line the block owned, and everything
+  ;; downstream had to know where that line was to be sure which half it
+  ;; was reading -- an offset kept in a marker, in a buffer being rewritten
+  ;; from both ends.
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
+    (agent-river-clear)
     (agent-river-observe '(:kind "act" :session "s1" :label "repo"
                                  :detail "Edit a.el"))
     (agent-river-observe '(:kind "act" :session "s1" :label "repo"
                                  :detail "Edit b.el"))
-    (with-current-buffer (agent-river--buffer)
-      (save-excursion
-        (goto-char (point-min))
-        ;; One session line, then the separator, then the newest event.
-        (should (looking-at-p "\\*+ "))
-        (forward-line 1)
-        (should (looking-at-p "$"))
-        (forward-line 1)
-        (should (looking-at-p "[0-9][0-9]:"))
-        ;; And the separator belongs to the block, so the marker everything
-        ;; downstream reads still points at the newest log line rather than
-        ;; at the blank one.
-        (should (= (point) (marker-position agent-river--block-end))))
-      ;; Redrawn, not accumulated: a block that grew a blank line per event
-      ;; would push the log down the buffer one line at a time.
-      (agent-river--redraw-block)
-      (agent-river--redraw-block)
-      (should-not (string-match-p "\n\n\n"
-                                  (buffer-substring-no-properties
-                                   (point-min) (point-max)))))))
+    (let ((block (agent-river-test--block-text))
+          (log (agent-river-test--log-text)))
+      ;; The block is session lines and nothing else: no timestamps, and no
+      ;; blank line to close it off from something that is not there.
+      (should (string-prefix-p "* " block))
+      (should-not (string-match-p "Edit a\\.el" block))
+      (should (= 1 (length (split-string block "\n" t))))
+      ;; The log is event lines and nothing else, newest first.
+      (should (string-match-p "\\`[0-9][0-9]:" log))
+      (should-not (string-match-p "^\\*+ " log))
+      (should (string-match-p "Edit a\\.el" log))
+      (should (string-match-p "Edit b\\.el" log)))
+    ;; Redrawn, not accumulated: the block appears once however many events
+    ;; went through, and the redraw leaves no blank lines behind it.
+    (agent-river--redraw-block)
+    (agent-river--redraw-block)
+    (should (equal (agent-river-test--block-text)
+                   (concat (substring-no-properties (agent-river--panel-block))
+                           "\n")))))
+
+(ert-deftest agent-river-test-either-view-may-be-killed-and-comes-back ()
+  ;; Two buffers, one state.  Killing a view must not take the other with
+  ;; it, and an event brings back whichever is gone -- which is how it has
+  ;; always been, from when both halves were one buffer and every line went
+  ;; through `agent-river-log'.
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-clear)
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :detail "Edit a.el"))
+    (kill-buffer (agent-river--buffer))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :detail "Edit b.el"))
+    ;; The log kept everything written while the block was gone, and the
+    ;; block is drawn from the registry rather than from anything the log
+    ;; remembers.
+    (should (string-match-p "Edit a\\.el" (agent-river-test--log-text)))
+    (should (string-match-p "repo" (agent-river-test--block-text)))
+    (kill-buffer (agent-river--log-buffer))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :detail "Edit c.el"))
+    (should (string-match-p "Edit c\\.el" (agent-river-test--log-text)))
+    (should (string-match-p "repo" (agent-river-test--block-text)))))
+
+(ert-deftest agent-river-test-an-event-opens-the-block-and-never-the-log ()
+  ;; A log that appears on an event appears on every event, including the
+  ;; one after a reader closed it -- which is a view overruling a decision
+  ;; somebody has just made.  The block is the other way round: bounded, and
+  ;; what an onlooker is there for.
+  (let ((shown nil)
+        (agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display t))
+    (agent-river-clear)
+    (cl-letf (((symbol-function 'display-buffer)
+               (lambda (buffer &rest _) (push (buffer-name (get-buffer buffer)) shown) nil)))
+      (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                   :detail "Edit a.el")))
+    (should (member agent-river-buffer-name shown))
+    (should-not (member agent-river-log-buffer-name shown))
+    ;; Written all the same: being there to be opened is the whole of what
+    ;; the log owes when nobody is looking at it.
+    (should (string-match-p "Edit a\\.el" (agent-river-test--log-text)))))
+
+(ert-deftest agent-river-test-a-tick-does-not-resurrect-a-killed-block ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :detail "Edit a.el"))
+    (kill-buffer (agent-river--buffer))
+    ;; The timer's way in creates nothing: a buffer the user killed stays
+    ;; killed until something happens.
+    (agent-river--redraw-block)
+    (should-not (get-buffer agent-river-buffer-name))
+    ;; And an event is that something, which is the whole difference between
+    ;; the two ways in.
+    (agent-river--update-block)
+    (should (get-buffer agent-river-buffer-name))))
+
+(ert-deftest agent-river-test-clearing-the-log-leaves-the-block ()
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :detail "Edit a.el"))
+    (agent-river-clear)
+    (should (equal "" (agent-river-test--log-text)))
+    ;; Nothing was cleared in the block, and there is nothing there to
+    ;; clear: it is derived, and emptying it would leave a picture of the
+    ;; state on screen that is wrong until the next event redraws it.
+    (should (string-match-p "repo" (agent-river-test--block-text)))))
+
+(ert-deftest agent-river-test-an-event-that-writes-no-line-still-draws-the-block ()
+  ;; The block used to be redrawn by the log line going past it.  An outcome
+  ;; landing on the line that opened its call writes no line of its own, so
+  ;; with the two halves apart that event would have left the block saying
+  ;; what it said before -- here, that nothing had failed.
+  (let ((agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-clear)
+    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                 :tool "Bash" :detail "Bash  make"
+                                 :call "s1\0t1"))
+    (agent-river-observe '(:kind "fail" :session "s1" :label "repo"
+                                 :tool "Bash" :detail "Bash ✗  exit 1"
+                                 :call "s1\0t1" :outcome "✗  exit 1"))
+    (should (= 1 (length (agent-river-test--log-lines))))
+    (should (string-match-p "1 failing" (agent-river-test--block-text)))))
+
+(ert-deftest agent-river-test-only-a-window-we-opened-is-fitted ()
+  ;; Sizing a window the user put the block in themselves is this package
+  ;; writing into a window it was never pointed at, which is the rule the
+  ;; observers keep one protocol over.  The parameter is set by
+  ;; `agent-river-show' and by nothing else.
+  (let ((asked nil)
+        (window (selected-window))
+        (buffer (agent-river--buffer)))
+    (cl-letf (((symbol-function 'fit-window-to-buffer)
+               (lambda (win &rest _) (push win asked))))
+      (set-window-buffer window buffer)
+      (unwind-protect
+          (progn
+            (agent-river--fit-block-windows buffer)
+            (should-not asked)
+            (set-window-parameter window 'agent-river-fit t)
+            (agent-river--fit-block-windows buffer)
+            (should (equal asked (list window))))
+        (set-window-parameter window 'agent-river-fit nil)))))
+
+(ert-deftest agent-river-test-each-view-takes-the-keys-its-content-answers ()
+  ;; The same gestures in both, but only where the buffer has something for
+  ;; them to walk: the block has no landmarks, since nothing in it is a log
+  ;; line, and the log has no coarse structure over its lines.  A key bound
+  ;; in both would be a key that does nothing in one of them.
+  (should (eq (lookup-key agent-river-mode-map (kbd "n"))
+              #'agent-river-next-line))
+  (should (eq (lookup-key agent-river-log-mode-map (kbd "n"))
+              #'agent-river-next-line))
+  (should (eq (lookup-key agent-river-mode-map (kbd "M-n"))
+              #'agent-river-next-session))
+  (should-not (eq (lookup-key agent-river-log-mode-map (kbd "M-n"))
+                  #'agent-river-next-session))
+  (should (eq (lookup-key agent-river-log-mode-map (kbd ">"))
+              #'agent-river-next-notable))
+  (should-not (eq (lookup-key agent-river-mode-map (kbd ">"))
+                  #'agent-river-next-notable))
+  ;; The log hangs off the block: the way to it is a key there, and there is
+  ;; none going back, because `q' is.
+  (should (eq (lookup-key agent-river-mode-map (kbd "l"))
+              #'agent-river-show-log)))
 
 (ert-deftest agent-river-test-block-is-rewritten-not-appended ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -1219,10 +1359,7 @@ quietly stop all three matching."
           ;; has to leave a trace, since going quiet is how this has broken
           ;; before.
           (should-not (agent-river-hook "act" in out))
-          (with-current-buffer (agent-river--buffer)
-            (should (string-match-p
-                     "hook failed"
-                     (buffer-substring-no-properties (point-min) (point-max))))))
+          (should (string-match-p "hook failed" (agent-river-test--log-text))))
       (ignore-errors (delete-file in))
       (ignore-errors (delete-file out)))))
 
@@ -1537,7 +1674,6 @@ stubbed here so the tests do not depend on agent-shell being installed."
       (insert (propertize "*" 'agent-river-spinner (agent-river-test--ago 0)
                           'display "✽")
               " alpha\n")
-      (setq agent-river--block-end (copy-marker (point) nil))
       ;; The mark carries the phase, so the painter needs nothing else to
       ;; know what this star should be showing.
       (agent-river--spinner-paint (current-buffer))
@@ -1553,8 +1689,9 @@ stubbed here so the tests do not depend on agent-shell being installed."
   ;; walking every buffer in Emacs -- and the panel had already answered the
   ;; same question when it decided which stars to mark.
   (with-temp-buffer
+    ;; The whole buffer is the block now, so the painter and the gate need
+    ;; no marker to say where to stop looking.
     (insert "* alpha\n")
-    (setq agent-river--block-end (copy-marker (point) nil))
     (should-not (agent-river--spinning-p (current-buffer)))
     (goto-char (point-min))
     (put-text-property (point-min) (1+ (point-min))
@@ -1667,18 +1804,19 @@ stubbed here so the tests do not depend on agent-shell being installed."
 (ert-deftest agent-river-test-tick-redraws-only-the-block ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
+    (agent-river-clear)
     (agent-river-observe '(:kind "act" :session "s1" :label "repo"
                                  :detail "Edit a.el"))
-    (let ((before (with-current-buffer (agent-river--buffer)
-                    (buffer-substring-no-properties (point-min) (point-max)))))
+    (let ((before (agent-river-test--block-text))
+          (log (agent-river-test--log-text)))
       (agent-river--redraw-block)
-      (let ((after (with-current-buffer (agent-river--buffer)
-                     (buffer-substring-no-properties (point-min) (point-max)))))
-        ;; Same number of lines: the block is replaced, never appended, and
-        ;; the log is not touched.
-        (should (= (length (split-string before "\n"))
-                   (length (split-string after "\n"))))
-        (should (string-match-p "Edit a\\.el" after))))))
+      ;; The block is replaced, never appended -- and the log is not
+      ;; touched, which the split makes true by construction rather than by
+      ;; a marker saying where to stop deleting.
+      (should (= (length (split-string before "\n"))
+                 (length (split-string (agent-river-test--block-text) "\n"))))
+      (should (equal log (agent-river-test--log-text)))
+      (should (string-match-p "Edit a\\.el" (agent-river-test--log-text))))))
 
 
 ;;; Registry and queries
@@ -1902,8 +2040,13 @@ stubbed here so the tests do not depend on agent-shell being installed."
   "Return a session update notification of KIND, carrying no thought."
   `((params . ((update . ((sessionUpdate . ,kind)))))))
 
-(defun agent-river-test--hud ()
-  "Return the text of the HUD buffer."
+(defun agent-river-test--log-text ()
+  "Return the text of the event log buffer."
+  (with-current-buffer (agent-river--log-buffer)
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun agent-river-test--block-text ()
+  "Return the text of the state block buffer."
   (with-current-buffer (agent-river--buffer)
     (buffer-substring-no-properties (point-min) (point-max))))
 
@@ -1921,10 +2064,10 @@ stubbed here so the tests do not depend on agent-shell being installed."
     (agent-river--on-notification "s1" (agent-river-test--thought "Joining on tool_use_id"))
     ;; Mid-stream a chunk ends inside a sentence.  Showing that would put a
     ;; truncated clause on screen and never correct it.
-    (should-not (string-match-p "Joining" (agent-river-test--hud)))
+    (should-not (string-match-p "Joining" (agent-river-test--log-text)))
     (agent-river--on-notification "s1" (agent-river-test--thought " is more precise. Then"))
     (should (string-match-p "Joining on tool_use_id is more precise"
-                            (agent-river-test--hud)))))
+                            (agent-river-test--log-text)))))
 
 (ert-deftest agent-river-test-only-the-first-sentence-of-a-thought-is-shown ()
   (agent-river-test--with-stream
@@ -1932,27 +2075,27 @@ stubbed here so the tests do not depend on agent-shell being installed."
     (agent-river--on-notification "s1" (agent-river-test--thought " Third one."))
     ;; Thinking blocks are paragraphs; unabridged they would bury the
     ;; tool-call rhythm the log exists to show.
-    (should (string-match-p "First one" (agent-river-test--hud)))
-    (should-not (string-match-p "Second one" (agent-river-test--hud)))
-    (should-not (string-match-p "Third one" (agent-river-test--hud)))))
+    (should (string-match-p "First one" (agent-river-test--log-text)))
+    (should-not (string-match-p "Second one" (agent-river-test--log-text)))
+    (should-not (string-match-p "Third one" (agent-river-test--log-text)))))
 
 (ert-deftest agent-river-test-a-thought-without-a-sentence-is-flushed-at-the-end ()
   (agent-river-test--with-stream
     (agent-river--on-notification "s1" (agent-river-test--thought "Short unfinished thought"))
-    (should-not (string-match-p "Short unfinished" (agent-river-test--hud)))
+    (should-not (string-match-p "Short unfinished" (agent-river-test--log-text)))
     ;; The agent stopped thinking and acted.  Swallowing the run because it
     ;; never reached a full stop would lose the reasoning entirely.
     (agent-river--on-notification "s1" (agent-river-test--update "tool_call"))
-    (should (string-match-p "Short unfinished thought" (agent-river-test--hud)))))
+    (should (string-match-p "Short unfinished thought" (agent-river-test--log-text)))))
 
 (ert-deftest agent-river-test-a-non-thought-notification-says-nothing ()
   (agent-river-test--with-stream
-    (let ((before (agent-river-test--hud)))
+    (let ((before (agent-river-test--log-text)))
       ;; Tool calls are the hooks' job.  Folding them here as well would
       ;; double every step in the log and in the counts.
       (agent-river--on-notification "s1" (agent-river-test--update "tool_call"))
       (agent-river--on-notification "s1" (agent-river-test--update "agent_message_chunk"))
-      (should (equal before (agent-river-test--hud))))))
+      (should (equal before (agent-river-test--log-text))))))
 
 (ert-deftest agent-river-test-thought-runs-are-per-session ()
   (agent-river-test--with-stream
@@ -1961,8 +2104,8 @@ stubbed here so the tests do not depend on agent-shell being installed."
     ;; Two agents think side by side; concatenating their chunks would
     ;; produce a sentence neither of them had.
     (agent-river--on-notification "s1" (agent-river-test--thought " about a. x"))
-    (should (string-match-p "Alpha thinking about a" (agent-river-test--hud)))
-    (should-not (string-match-p "Beta thinking about" (agent-river-test--hud)))))
+    (should (string-match-p "Alpha thinking about a" (agent-river-test--log-text)))
+    (should-not (string-match-p "Beta thinking about" (agent-river-test--log-text)))))
 
 (ert-deftest agent-river-test-thought-chunk-reads-only-thoughts ()
   (should (equal (agent-river--thought-chunk (agent-river-test--thought "x")) "x"))
@@ -2123,7 +2266,7 @@ CALL overrides fields of the tool call record."
     (should-not (gethash "s1" agent-river-registry))
     (should-not (agent-river--claim "s1" 'shell))
     ;; Going quiet about it is how this has broken before.
-    (should (string-match-p "hooks reach this session" (agent-river-test--hud)))))
+    (should (string-match-p "hooks reach this session" (agent-river-test--log-text)))))
 
 
 ;;; What the agent said -- the other half of a turn
@@ -2217,7 +2360,7 @@ CALL overrides fields of the tool call record."
       ;; which is deliberately not Markdown.  Same rule as `intent'.
       (should (string-match-p "\\*parser\\*" said)))
     (should (string-match-p "“ Fixed the \\*parser\\*\\. - one - two"
-                            (agent-river-test--hud)))))
+                            (agent-river-test--log-text)))))
 
 (ert-deftest agent-river-test-saying-something-is-not-a-step ()
   (agent-river-test--with-say
@@ -2369,7 +2512,7 @@ CALL overrides fields of the tool call record."
     ;; `turn-complete' fires whatever the stop reason, so without this a
     ;; cancelled turn's fragment reads as the answer -- where an interrupted
     ;; tool call is marked `✗' on its own line.
-    (should (string-match-p "As far as I got ✗" (agent-river-test--hud)))
+    (should (string-match-p "As far as I got ✗" (agent-river-test--log-text)))
     ;; A reason we were not given is "do not know", not "interrupted": the
     ;; hosts that report none would otherwise have every turn marked.
     (should-not (agent-river--unfinished-p '((message . "x"))))
@@ -2547,7 +2690,7 @@ ID names the request; RESPOND is what its `:respond' calls."
                                  (agent-river--panel state))))
         ;; And that it was asked is in the log, which is the half of this
         ;; that is point-in-time.
-        (should (string-match-p "asks: Run" (agent-river-test--hud)))
+        (should (string-match-p "asks: Run" (agent-river-test--log-text)))
         ;; Answered, it leaves both.
         (with-current-buffer (agent-river--shell-buffer "s1")
           (agent-river--attend
@@ -2880,7 +3023,7 @@ AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
       (should (= calls 1))
       (should-not agent-river-observers)
       ;; Retiring quietly is the failure mode this package keeps having.
-      (should (string-match-p "observer .* retired" (agent-river-test--hud))))))
+      (should (string-match-p "observer .* retired" (agent-river-test--log-text))))))
 
 (ert-deftest agent-river-test-a-retiring-observer-can-tear-down ()
   (agent-river-test--with-observers
@@ -2920,7 +3063,7 @@ AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
     ;; must not be reported as a fold failure -- that message sends the user
     ;; to `agent-river-reset', which throws away every session.
     (should (= (agent-river-state-steps (gethash "s1" agent-river-registry)) 1))
-    (should-not (string-match-p "fold failed" (agent-river-test--hud)))))
+    (should-not (string-match-p "fold failed" (agent-river-test--log-text)))))
 
 
 ;;; Notes -- state produced from outside the hook stream
@@ -3347,15 +3490,19 @@ AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
       (should-not agent-river--heat-timer))))
 
 
-;;; Moving about the HUD
+;;; Moving about the two views
 ;;
-;; The same three grains as the map, on the same keys, so these mirror the
-;; map's motion tests.  The one thing that is only a problem here is the
-;; following: a log that pins itself to the head makes every motion pointless
-;; unless it knows to stop.
+;; The same grains as the map, on the same keys, so these mirror the map's
+;; motion tests.  Which grains each buffer has is decided by what it holds,
+;; and since the split that is a sharper line than it was: the block has
+;; lines and their details, the log has lines and landmarks among them.
+;;
+;; The one thing that is only a problem in the log is the following: a log
+;; that pins itself to the head makes every motion pointless unless it knows
+;; to stop.
 
-(defmacro agent-river-test--with-hud (&rest body)
-  "Fold two sessions and a handful of events into a fresh HUD, run BODY."
+(defmacro agent-river-test--folded (&rest body)
+  "Fold two sessions and log a handful of events, then run BODY."
   (declare (indent 0))
   `(let ((agent-river-registry (make-hash-table :test 'equal))
          (agent-river-auto-display nil))
@@ -3368,10 +3515,16 @@ AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
      (agent-river-log "fail" "Bash exit 1" "alpha")
      (agent-river-log "think" "Read b.el" "beta")
      (agent-river-log "signal" "three failures in a row" "alpha")
+     ,@body))
+
+(defmacro agent-river-test--with-block (&rest body)
+  "Draw the block with its details unfolded and run BODY in its buffer."
+  (declare (indent 0))
+  `(agent-river-test--folded
      (with-current-buffer (agent-river--buffer)
-       ;; Unwound, because the HUD buffer outlives the test: the expansion
-       ;; is buffer-local and left behind it made a later test that asserts
-       ;; the details start folded fail, in suite order only.
+       ;; Unwound, because the buffer outlives the test: the expansion is
+       ;; buffer-local and left behind it made a later test that asserts the
+       ;; details start folded fail, in suite order only.
        (unwind-protect
            (progn
              (setq agent-river--panel-expanded t)
@@ -3380,7 +3533,16 @@ AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
              ,@body)
          (setq agent-river--panel-expanded nil)))))
 
-(defun agent-river-test--hud-lines (test)
+(defmacro agent-river-test--with-log (&rest body)
+  "Run BODY in the log buffer, point at the tail, where a reader who has
+not moved sits."
+  (declare (indent 0))
+  `(agent-river-test--folded
+     (with-current-buffer (agent-river--log-buffer)
+       (goto-char (point-max))
+       ,@body)))
+
+(defun agent-river-test--marked-lines (test)
   "Return the lines of the current buffer TEST stops on, top down.
 Tests the line point is on first: `agent-river--scan' is a motion and so
 starts past it, which is right for a command and would silently drop the
@@ -3397,29 +3559,37 @@ first line from a survey."
             seen))
     (nreverse seen)))
 
-(ert-deftest agent-river-test-hud-motion-walks-every-marked-line ()
-  (agent-river-test--with-hud
-    (let ((lines (agent-river-test--hud-lines #'agent-river--entry-line-p)))
-      ;; Sessions, their details and the log, in buffer order.
+(ert-deftest agent-river-test-block-motion-walks-sessions-and-details ()
+  (agent-river-test--with-block
+    (let ((lines (agent-river-test--marked-lines #'agent-river--entry-line-p)))
+      ;; Both grains, in buffer order, and nothing from the log: the fine
+      ;; grain here is the details under a session rather than the stream
+      ;; the session was folded from.
       (should (seq-find (lambda (l) (string-prefix-p "* alpha" l)) lines))
       (should (seq-find (lambda (l) (string-prefix-p "** files:" l)) lines))
-      (should (seq-find (lambda (l) (string-match-p "Edit a\\.el" l)) lines))
-      ;; Log lines start with timestamps and are all fair game.
-      )))
+      (should-not (seq-find (lambda (l) (string-match-p "Bash exit 1" l)) lines)))))
 
-(ert-deftest agent-river-test-hud-session-motion-is-the-selection ()
-  (agent-river-test--with-hud
-    (let ((lines (agent-river-test--hud-lines #'agent-river--session-line-p)))
+(ert-deftest agent-river-test-log-motion-walks-every-event-line ()
+  (agent-river-test--with-log
+    (let ((lines (agent-river-test--marked-lines #'agent-river--entry-line-p)))
+      ;; Every line, landmarks and bulk alike -- the log's only other grain
+      ;; is the one that leaves the bulk out.
+      (should (= (length lines) 4))
+      (should (seq-find (lambda (l) (string-match-p "Edit a\\.el" l)) lines))
+      (should (seq-find (lambda (l) (string-match-p "Read b\\.el" l)) lines)))))
+
+(ert-deftest agent-river-test-block-session-motion-is-the-selection ()
+  (agent-river-test--with-block
+    (let ((lines (agent-river-test--marked-lines #'agent-river--session-line-p)))
       ;; The block's own structure and nothing else -- the details under a
-      ;; session are the fine grain's, and this has to reach across the whole
-      ;; log rather than stopping where the block does.
+      ;; session are the fine grain's.
       (should (= (length lines) 2))
       (should (string-prefix-p "* alpha" (nth 0 lines)))
       (should (string-prefix-p "* beta" (nth 1 lines))))))
 
-(ert-deftest agent-river-test-hud-notable-motion-finds-the-landmarks ()
-  (agent-river-test--with-hud
-    (let ((lines (agent-river-test--hud-lines #'agent-river--notable-line-p)))
+(ert-deftest agent-river-test-log-notable-motion-finds-the-landmarks ()
+  (agent-river-test--with-log
+    (let ((lines (agent-river-test--marked-lines #'agent-river--notable-line-p)))
       ;; What broke and what the agent was told, without the bulk of the
       ;; log in between -- the distinction the motion exists to make.
       (should (= (length lines) 2))
@@ -3427,51 +3597,59 @@ first line from a survey."
       (should (seq-find (lambda (l) (string-match-p "Bash exit 1" l)) lines))
       (should-not (seq-find (lambda (l) (string-match-p "Read b\\.el" l)) lines)))))
 
-(ert-deftest agent-river-test-hud-motion-lands-past-the-stars ()
-  (agent-river-test--with-hud
+(ert-deftest agent-river-test-block-motion-lands-past-the-stars ()
+  (agent-river-test--with-block
     ;; Point starts on alpha's line, and a motion moves off it.
     (should (agent-river--scan 1 #'agent-river--session-line-p))
     ;; A cursor parked on an outline star says nothing about the line.
-    (should (looking-at-p "beta"))
-    ;; A log line starts with its timestamp and is left alone.
+    (should (looking-at-p "beta"))))
+
+(ert-deftest agent-river-test-log-motion-lands-on-the-timestamp ()
+  (agent-river-test--with-log
+    ;; A log line starts with its timestamp and has no structure in front of
+    ;; the content, so point is left where the line begins.  From the top,
+    ;; since a forward motion from the tail has nowhere to go.
+    (goto-char (point-min))
     (should (agent-river--scan 1 #'agent-river--notable-line-p))
     (should (= (point) (line-beginning-position)))))
 
 (ert-deftest agent-river-test-hud-motion-refuses-rather-than-drifts ()
-  (agent-river-test--with-hud
+  (agent-river-test--with-block
     (goto-char (point-max))
     (let ((before (point)))
       (should-not (agent-river--scan 1 #'agent-river--entry-line-p))
       (should (= (point) before)))))
 
 (ert-deftest agent-river-test-a-session-line-is-reachable-unhosted ()
-  (agent-river-test--with-hud
+  (agent-river-test--with-block
     ;; Nothing here is hosted by agent-shell, so no session line is
     ;; visitable -- and the motion still has to stop on both.  Tying the two
     ;; together made `n' skip exactly the sessions RET could not open, which
     ;; is the case where looking is all there is.
-    (let ((lines (agent-river-test--hud-lines #'agent-river--session-line-p)))
+    (let ((lines (agent-river-test--marked-lines #'agent-river--session-line-p)))
       (should (= 2 (seq-count (lambda (l) (string-prefix-p "* " l)) lines))))
     (goto-char (point-min))
     (agent-river--scan 1 #'agent-river--session-line-p)
     (should-not (get-text-property (line-beginning-position) 'agent-river-session))))
 
-(ert-deftest agent-river-test-the-hud-follows-only-what-is-at-the-head ()
-  (agent-river-test--with-hud
+(ert-deftest agent-river-test-the-log-follows-only-what-is-at-the-tail ()
+  (agent-river-test--with-log
     (let ((buffer (current-buffer))
           (window (selected-window)))
       (set-window-buffer window buffer)
-      (set-window-point window (point-min))
-      ;; At the head, an event keeps it there: there is nothing to tail, and
-      ;; the state and the newest event are both up here.
+      (set-window-point window (point-max))
+      ;; At the end, an event carries it along: this is an ordinary log and
+      ;; a window nobody has moved tails it.
       (should (memq window (agent-river--following-windows buffer)))
       ;; Moved away on purpose, it is no longer following -- pinning it back
       ;; on the next tool call is what made the motion commands pointless
       ;; before they arrived.
-      (goto-char (point-max))
+      (goto-char (point-min))
       (set-window-point window (point))
       (should-not (memq window (agent-river--following-windows buffer)))
-      ;; And the place survives the edit, because every edit is above it.
+      ;; And the place survives the edit, because every edit is below it --
+      ;; or above it, once the trim starts taking from the top, and a
+      ;; marker rides the text either way.
       (let ((line (buffer-substring-no-properties (line-beginning-position)
                                                   (line-end-position))))
         (agent-river-log "act" "Edit later.el" "alpha")
@@ -3482,7 +3660,7 @@ first line from a survey."
                        line))))))
 
 (ert-deftest agent-river-test-a-redraw-keeps-point-on-the-block-line ()
-  (agent-river-test--with-hud
+  (agent-river-test--with-block
     ;; The block is erased and rebuilt on every refresh tick, and a marker
     ;; inside it collapses to point-min when it goes -- so `save-excursion'
     ;; alone sent whoever had navigated into the block back to the top once
@@ -3497,8 +3675,10 @@ first line from a survey."
       (should (equal (buffer-substring-no-properties (line-beginning-position)
                                                      (line-end-position))
                      line))
-      ;; And a tool call arriving rebuilds it the same way.
-      (agent-river-log "act" "Edit later.el" "alpha")
+      ;; And an event arriving rebuilds it the same way.  It is
+      ;; `agent-river--update-block' that does it now rather than the log
+      ;; line going past, and a reader's place has to survive either.
+      (agent-river--update-block)
       (should (equal (buffer-substring-no-properties (line-beginning-position)
                                                      (line-end-position))
                      line))
@@ -3506,7 +3686,7 @@ first line from a survey."
       (should-not (= (point) (line-beginning-position))))))
 
 (ert-deftest agent-river-test-a-block-line-that-has-gone-sends-point-to-the-head ()
-  (agent-river-test--with-hud
+  (agent-river-test--with-block
     (agent-river--scan 1 #'agent-river--session-line-p)
     (should (looking-at-p "beta"))
     ;; The session the line named is no longer live, so there is nothing to
@@ -3516,12 +3696,13 @@ first line from a survey."
     (agent-river--redraw-block)
     (should (= (point) (point-min)))))
 
-(ert-deftest agent-river-test-an-event-keeps-point-on-the-newest-log-line ()
-  (agent-river-test--with-hud
-    ;; The newest log line begins exactly where `agent-river--block-end' is,
-    ;; so a marker there is swept up with the block like any other -- the one
-    ;; log line that did not ride the text.
-    (goto-char agent-river--block-end)
+(ert-deftest agent-river-test-an-event-keeps-a-reader-above-the-tail ()
+  (agent-river-test--with-log
+    ;; Every edit is at one end or the other, never where they are, so a
+    ;; reader's marker rides the text it was on rather than the offset it
+    ;; was at.
+    (goto-char (point-min))
+    (forward-line 1)
     (let ((line (buffer-substring-no-properties (line-beginning-position)
                                                 (line-end-position))))
       (agent-river-log "act" "Edit later.el" "alpha")
@@ -3529,31 +3710,43 @@ first line from a survey."
                                                      (line-end-position))
                      line)))))
 
-(ert-deftest agent-river-test-the-head-is-the-top-line-not-the-whole-block ()
-  (agent-river-test--with-hud
+(ert-deftest agent-river-test-a-reader-at-the-tail-is-shown-the-new-line ()
+  (agent-river-test--with-log
+    ;; The next line is written at `point-max', which is where a reader who
+    ;; has not moved is sitting.  That is nobody's place: it is the tail, and
+    ;; a reader at the tail follows it onto the new line rather than being
+    ;; left one line above it.
+    (should (= (point) (point-max)))
+    (agent-river-log "act" "Edit later.el" "alpha")
+    (should (= (point) (point-max)))
+    (forward-line -1)
+    (should (string-match-p "Edit later\\.el"
+                            (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position))))))
+
+(ert-deftest agent-river-test-the-tail-is-the-last-line-alone ()
+  (agent-river-test--with-log
     (let ((buffer (current-buffer))
           (window (selected-window)))
       (set-window-buffer window buffer)
-      ;; The block is where `n' and `M-n' do most of their walking, so a head
-      ;; running to the end of the newest log line made every line a reader
-      ;; could navigate to count as following -- and the next tool call
-      ;; pinned them back to the top.
-      (agent-river--scan 1 #'agent-river--session-line-p)
+      ;; A tail reaching further back than the last line would make every
+      ;; line a reader could navigate to count as following -- and the next
+      ;; tool call would pull them off it.
+      (goto-char (point-min))
       (set-window-point window (point))
       (should-not (memq window (agent-river--following-windows buffer)))
-      ;; Back at the top it follows again: a reader can rejoin the head the
-      ;; same way they left it.
-      (goto-char (point-min))
+      ;; The newest entry itself counts: a reader who has walked back down
+      ;; onto it has not moved away from anything.
+      (goto-char (point-max))
+      (forward-line -1)
       (set-window-point window (point))
       (should (memq window (agent-river--following-windows buffer))))))
 
 (defun agent-river-test--log-lines ()
-  "Return the log lines of the HUD, newest first, without the state block."
-  (with-current-buffer (agent-river--buffer)
+  "Return the log lines, oldest first, the order they are written in."
+  (with-current-buffer (agent-river--log-buffer)
     (save-excursion
-      (goto-char (or (and (markerp agent-river--block-end)
-                          (marker-position agent-river--block-end))
-                     (point-min)))
+      (goto-char (point-min))
       (let (lines)
         (while (not (eobp))
           (when (get-text-property (point) 'agent-river-line)
@@ -3641,9 +3834,11 @@ first line from a survey."
                            :call "s1\0t1" :outcome "✓  9ms"))
     (let ((lines (agent-river-test--log-lines)))
       (should (= (length lines) 2))
-      ;; Newest first, so the still-open second call is above the first.
-      (should (string-match-p "Bash  second\\'" (nth 0 lines)))
-      (should (string-match-p "Bash  first ✓  9ms\\'" (nth 1 lines))))))
+      ;; In the order they opened, so the answered first call stays above
+      ;; the second -- an outcome lands on the line that began the call and
+      ;; does not move it to the end.
+      (should (string-match-p "Bash  first ✓  9ms\\'" (nth 0 lines)))
+      (should (string-match-p "Bash  second\\'" (nth 1 lines))))))
 
 (ert-deftest agent-river-test-one-call-is-answered-once ()
   (agent-river-test--with-calls
@@ -3658,7 +3853,7 @@ first line from a survey."
                              :call "s1\0t1" :outcome "✓  250ms")))
     (let ((lines (agent-river-test--log-lines)))
       (should (= (length lines) 2))
-      (should (string-match-p "Run tests ✓  250ms\\'" (nth 1 lines))))))
+      (should (string-match-p "Run tests ✓  250ms\\'" (nth 0 lines))))))
 
 (ert-deftest agent-river-test-the-call-id-carries-its-session ()
   ;; `tool_use_id' is unique everywhere on Claude Code and only within its
@@ -5936,7 +6131,7 @@ first."
       ;; for one to be forgotten in.
       (should (= calls 1))
       (should-not agent-river-artifact-observers)
-      (should (string-match-p "observer .* retired" (agent-river-test--hud))))))
+      (should (string-match-p "observer .* retired" (agent-river-test--log-text))))))
 
 (ert-deftest agent-river-test-an-artifact-event-reaches-no-agent ()
   (agent-river-test--with-artifacts
@@ -6031,8 +6226,8 @@ first."
     ;; Its own glyph, because it is its own subject: every other kind in the
     ;; log is an agent doing or being told something, and this is true whether
     ;; or not any agent ever looks at it.
-    (should (string-match-p "◎" (agent-river-test--hud)))
-    (should (string-match-p "INC-444 routed to you" (agent-river-test--hud)))))
+    (should (string-match-p "◎" (agent-river-test--log-text)))
+    (should (string-match-p "INC-444 routed to you" (agent-river-test--log-text)))))
 
 (ert-deftest agent-river-test-a-record-fits-on-one-log-line ()
   (agent-river-test--with-artifacts
@@ -6040,7 +6235,7 @@ first."
                           :name "INC-444\ndisk full"
                           :text (concat "routed to you\nbecause "
                                         (make-string 200 ?x)))
-    (let ((hud (agent-river-test--hud)))
+    (let ((hud (agent-river-test--log-text)))
       ;; The HUD is line-based: a newline does not make two log lines, it
       ;; makes one line and a remainder carrying none of the properties the
       ;; motions read -- and the trim then counts lines that are no longer
@@ -6096,9 +6291,9 @@ first."
     ;; A log line saying a record was forgotten is a measurement of something
     ;; that happened, and nothing happened here.
     (should-not (agent-river-drop-artifact "inc:nope"))
-    (should-not (string-match-p "forgotten" (agent-river-test--hud)))
+    (should-not (string-match-p "forgotten" (agent-river-test--log-text)))
     (should (equal (agent-river-drop-artifact "inc:INC-444") "inc:INC-444"))
-    (should (string-match-p "forgotten" (agent-river-test--hud)))))
+    (should (string-match-p "forgotten" (agent-river-test--log-text)))))
 
 (ert-deftest agent-river-test-forgetting-every-record-asks-first ()
   (agent-river-test--with-artifacts
@@ -6983,7 +7178,7 @@ headless launcher issue #37 wants could not be dropped in beside it."
       ;; Out loud: a launcher that starts something which never announces
       ;; itself is the failure this layer is least able to see.
       (should (string-match-p "never became a session"
-                              (agent-river-test--hud))))))
+                              (agent-river-test--log-text))))))
 
 (ert-deftest agent-river-launch-test-a-launcher-that-throws-is-reported ()
   (agent-river-spool-test--with
@@ -6996,7 +7191,7 @@ headless launcher issue #37 wants could not be dropped in beside it."
       (agent-river-clear)
       (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
         (agent-river-launch-artifact "inc:1"))
-      (should (string-match-p "launch failed" (agent-river-test--hud)))
+      (should (string-match-p "launch failed" (agent-river-test--log-text)))
       ;; Nothing is pending, because nothing started.
       (should (null agent-river-launch--launched)))))
 
@@ -7010,7 +7205,7 @@ headless launcher issue #37 wants could not be dropped in beside it."
       ;; command being broken rather than the brief.
       (should-error (agent-river-launch-artifact "inc:1") :type 'user-error)
       (should (null agent-river-launch-test--started))
-      (should (string-match-p "brief errored" (agent-river-test--hud))))))
+      (should (string-match-p "brief errored" (agent-river-test--log-text))))))
 
 
 ;;; GitHub as a source
@@ -7144,7 +7339,7 @@ headless launcher issue #37 wants could not be dropped in beside it."
     ;; the door: `failed/' exists so a source's author can see what their
     ;; program wrote, and that is worth less than every later delivery.
     (should (null (agent-river-spool-test--files)))
-    (should (string-match-p "cannot file" (agent-river-test--hud)))))
+    (should (string-match-p "cannot file" (agent-river-test--log-text)))))
 
 (ert-deftest agent-river-spool-test-one-bad-delivery-costs-one-delivery ()
   ;; The same bargain one level up, for whatever a delivery manages to throw
@@ -7181,7 +7376,7 @@ headless launcher issue #37 wants could not be dropped in beside it."
       ;; Dropped and reported: a launch that cannot be linked is still a
       ;; launch that happened.
       (should (null agent-river-launch--launched))
-      (should (string-match-p "could not be linked" (agent-river-test--hud))))))
+      (should (string-match-p "could not be linked" (agent-river-test--log-text))))))
 
 (ert-deftest agent-river-test-one-artifact-is-looked-up-not-walked-for ()
   ;; The same rendering either way, because there is one renderer: two would

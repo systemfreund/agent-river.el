@@ -58,7 +58,7 @@ its parent's session id and fold onto that session; see
 agent-river-registry                ; the hash itself: key -> agent-river-state
 (agent-river-state "<session-id>")  ; address one, creating it if needed
 (agent-river-reset)                 ; forget every fold
-(agent-river-clear)                 ; only empty the HUD buffer
+(agent-river-clear)                 ; only empty the event log
 ```
 
 Several sessions fold side by side. Emacs Lisp is single-threaded, so
@@ -637,19 +637,33 @@ at those rather than writing the guard tests again. Useful helpers:
 
 Worked examples of the protocols above, and the reason each of them exists.
 
-## The HUD (`*agent-river*`)
+## The HUD (`*agent-river*` and `*agent-river-log*`)
 
-One buffer, two halves: a state block of one line per live session, rewritten on
-every fold, over a **newest-first** log.
+Two buffers: a state block of one line per live session, rewritten on every
+fold, and the log of the stream it was folded from — oldest to newest, tailed
+by any window you have not scrolled away from.
 
 ```
+*agent-river*
 * │⣶⣶⣷⣴⣀⣀│ · supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches)
 * │⠀⠀⣀⣤⣶⣿│ · supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
 
-19:07:03 super<2> ▸ Edit  supersonic-mpv.el
-19:06:58 superson ▸ Read  Cask ✓  2ms
+*agent-river-log*
 19:06:55 superson ◆ fix the mpv bridge
+19:06:58 superson ▸ Read  Cask ✓  2ms
+19:07:03 super<2> ▸ Edit  supersonic-mpv.el
 ```
+
+`M-x agent-river-show` opens the block in a side window on the right, sized to
+what it holds; `l` there — or `M-x agent-river-show-log` — opens the log in the
+slot beneath it, which is the layout the two had when they shared one buffer.
+`agent-river-auto-display` opens **the block** when an event arrives and no
+window is showing it. Never the log: a view that reappears on the event after
+you closed it is a view overruling you, and the log is written whether or not
+anybody is looking at it. The keys are shared with the map and the approval queue, but each
+buffer takes only the grains its own content answers: `n`/`p` in both,
+`M-n`/`M-p` over session lines in the block, `>`/`<` over the landmarks
+(`agent-river-notable-kinds`) in the log.
 
 One tool call is **one line**: the outcome is written onto the line that opened
 it, so the timestamp stays the one the call began at. Pairing is by
@@ -678,9 +692,9 @@ this, so a session run from a terminal has no graph, the way it has no `◇`
 lines. What it **cost** is a separate question with a separate answer:
 `M-x agent-river-spend`.
 
-The HUD is deliberately **not** Markdown: its log carries prompts, reasoning and
-tool arguments — text this package does not control — and Markdown would let
-that text restructure the view watching it.
+Neither buffer is Markdown: the log carries prompts, reasoning and tool
+arguments — text this package does not control — and Markdown would let that
+text restructure the view watching it.
 
 ## The map (`M-x agent-river-map`) and dired heat
 
@@ -762,7 +776,7 @@ Two rules a writer keeps:
   own.
 
 **Did it work?** `M-x agent-river-map` lists it under its domain, and
-`*agent-river*` gets a line either way. If nothing appears, look in
+`*agent-river-log*` gets a line either way. If nothing appears, look in
 `<spool>/failed/`: an unreadable delivery is kept there and the reason is in
 the log.
 
