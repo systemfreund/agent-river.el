@@ -31,7 +31,7 @@ is the bridge, and there is one example hook wiring per host —
 ## Commands
 
 ```sh
-# Full suite (457 tests). -L . is required: the tests require all three .el files.
+# Full suite (471 tests). -L . is required: the tests require all three .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1128,6 +1128,34 @@ difference between two readings says that, and the graph is those differences.
   reading stays where the measurement is. The practical consequence is that the
   graph's real resolution is a turn, and a session taking two long turns an
   hour draws two spikes rather than a curve.
+- **A falling figure never rebases the total** (`agent-river--spend-record`).
+  `:total` is the high-water mark, not the last reading. A figure that goes
+  down is somebody else's arithmetic — a server reconnecting, an agent whose
+  `usage_update` reports the turn rather than the session — and storing the dip
+  would understate the session in `agent-river-spend`, which presents the
+  number as a fact, and then measure the next genuine rise from the lower base
+  and land it as one inflated bar. That the meter only goes up is an assumption
+  about another package, so it is enforced here rather than trusted.
+- **The money is named or not named, never guessed** (`agent-river--spend-money`,
+  `:currency`). `agent-river-spend` is the one place the figure itself is shown,
+  so it carries the currency agent-shell named and sums **per currency**: a
+  table of bare numbers added into one headline is how two currencies become a
+  total true of neither. A later reading that carries no currency does not
+  unname the money, because only the notification carrying a cost carries one.
+- **The sweep is over the table, not over the session being written**
+  (`agent-river--spend-trim`). Trimming only the one being recorded left a
+  session that has stopped being sampled holding its last bars for as long as
+  this Emacs runs, and made `agent-river--spend-max` walk every session ever
+  seen rather than the ones still spending — which is what makes the per-line
+  walk, and the memo rejected beside it, the right trade rather than a lucky
+  one. The *entry* is deliberately not dropped: its total is what answers for
+  a session whose buffer is gone.
+- **The read retires on its first error, and says so** (`agent-river--spend-sample`).
+  `ignore-errors` was the first answer and it was the quiet half of the house
+  rule: this reads another package's internals on every tool call, so a shape
+  that moves would stop the graph for ever with nothing anywhere saying why.
+  The observers' idiom instead — guard, log once, stop — and `agent-river-reset`
+  is where it is given another go, since a reload may well be the fix.
 - **Sampled per event, never on a timer.** A timer would have to run through
   the quiet, which is most of the time and is precisely when there is nothing
   to measure: a session that is not working is not spending. Events arrive
@@ -1164,13 +1192,24 @@ difference between two readings says that, and the graph is those differences.
   *range*, from `:since` and the table's horizon, and never from an amount.
   That leaves three levels for the value, which is coarse on purpose: the graph
   answers when the money went and the figures beside it answer how much.
-- **A fixed column, reserved as soon as any session has one**
-  (`agent-river--spend-column`). A width decided per line is a column in name
-  only, and everything after it would sit somewhere different on every line —
-  the same rule the map's diffstat follows. Nil only where nothing anywhere has
-  been measured, since an Emacs that hosts no sessions would otherwise carry an
-  empty column for ever. Padded with blank braille rather than spaces, so the
-  empty column is exactly as wide as a full one in whatever font draws them.
+- **Every graph is the same length; the line around it is not a column and
+  cannot be made one** (`agent-river--spend-column`). This is *not* the map's
+  diffstat rule and the analogy was wrong when it was first written here: the
+  listing there has aligned prefixes, where a block line is `· `-joined parts
+  of whatever width they happen to be — a label, a truncated but unpadded task
+  — so what follows the graph already sits somewhere different on every line.
+  What the padding buys instead is that two graphs can be read against each
+  other, which works at different columns because the rightmost bar is *now* in
+  each one wherever it starts, and that a line's own tail stops jumping when
+  its session is sampled for the first time. Padded with blank braille rather
+  than spaces, so an empty one is exactly as wide as a full one in whatever
+  font draws them.
+- **Reserved while a session the block is *drawing* has been sampled**
+  (`agent-river--spend-measured-p`), and pointedly not while the table is
+  non-empty. An entry outlives its session on purpose so that
+  `agent-river-spend` can answer for one whose buffer is gone, so asking the
+  table whether it holds anything would keep an empty column on every line of
+  an Emacs whose agent-shell sessions all ended hours ago.
 - **It is in neither frame, and sits between the two readings it belongs
   with.** Every other number on the line is the task's and resets on a prompt;
   this covers a fixed window that runs straight through one. It goes between

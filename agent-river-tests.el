@@ -453,6 +453,12 @@
   "Return MINUTES after `agent-river-test--noon'."
   (time-add agent-river-test--noon (* 60 minutes)))
 
+(defun agent-river-test--spend-session (id)
+  "Register ID as a session the block would be drawing."
+  (let ((state (agent-river-state id id)))
+    (agent-river-fold state '(:kind "act" :tool "Edit"))
+    state))
+
 (ert-deftest agent-river-test-a-first-cost-reading-is-not-spending ()
   (agent-river-test--with-spend
     (agent-river--spend-record "s1" 12.0 (agent-river-test--at 0))
@@ -522,31 +528,126 @@
 
 (ert-deftest agent-river-test-the-cost-column-is-reserved-on-every-line ()
   (agent-river-test--with-spend
+    (agent-river-test--spend-session "s1")
+    (agent-river-test--spend-session "s2")
     ;; Nothing measured anywhere: no column at all, rather than an empty one
     ;; on every line for ever in an Emacs that hosts no sessions.
     (should-not (agent-river--spend-column "s1"))
     (agent-river--spend-record "s1" 1.0)
     (agent-river--spend-record "s1" 2.0)
-    ;; One session measured: the column is on both lines and is the same
-    ;; width, or everything after it would sit somewhere different on each.
+    ;; One session measured: both lines carry a graph of the same length,
+    ;; which is what lets the two be read against each other, and what stops
+    ;; a line's own tail jumping when its session is sampled for the first
+    ;; time.
     (should (agent-river--spend-column "s2"))
     (should (= (length (agent-river--spend-column "s1"))
                (length (agent-river--spend-column "s2"))))
+    ;; Nil is the off switch and so is zero, which is what the natural
+    ;; number type leaves it possible to say.
     (let ((agent-river-spend-width nil))
+      (should-not (agent-river--spend-column "s1")))
+    (let ((agent-river-spend-width 0))
       (should-not (agent-river--spend-column "s1")))))
+
+(ert-deftest agent-river-test-the-cost-column-goes-when-the-sessions-do ()
+  (agent-river-test--with-spend
+    (agent-river-test--spend-session "s1")
+    (agent-river--spend-record "s1" 1.0)
+    (agent-river--spend-record "s1" 2.0)
+    (should (agent-river--spend-column "s1"))
+    ;; An entry outlives its session on purpose, so that what it cost can
+    ;; still be asked for.  The column is about the lines being drawn, and
+    ;; asking the table whether it is empty instead would keep an empty one
+    ;; on every line of an Emacs whose agent-shell sessions all ended hours
+    ;; ago.
+    (remhash "s1" agent-river-registry)
+    (should-not (agent-river--spend-column "s1"))
+    (should (= 2.0 (plist-get (gethash "s1" agent-river--spend) :total)))))
+
+(ert-deftest agent-river-test-a-cost-that-goes-down-does-not-rebase-the-total ()
+  (agent-river-test--with-spend
+    (agent-river--spend-record "s1" 10.0 (agent-river-test--at 0))
+    (agent-river--spend-record "s1" 8.0 (agent-river-test--at 1))
+    ;; A figure that falls is somebody else's arithmetic -- a reconnecting
+    ;; server, an agent reporting the turn rather than the session.  Stored,
+    ;; it would understate the session in `agent-river-spend', which presents
+    ;; the number as a fact.
+    (should (= 10.0 (plist-get (gethash "s1" agent-river--spend) :total)))
+    (should (null (plist-get (gethash "s1" agent-river--spend) :bars)))
+    (agent-river--spend-record "s1" 12.0 (agent-river-test--at 2))
+    ;; And the next genuine rise is measured from the high-water mark, or
+    ;; the dip would come back as one inflated bar.
+    (should (= 2.0 (alist-get (agent-river--spend-bar (agent-river-test--at 2))
+                              (plist-get (gethash "s1" agent-river--spend) :bars))))))
+
+(ert-deftest agent-river-test-old-bars-go-for-every-session-not-just-the-busy-one ()
+  (agent-river-test--with-spend
+    (agent-river--spend-record "quiet" 0 (agent-river-test--at 0))
+    (agent-river--spend-record "quiet" 1.0 (agent-river-test--at 1))
+    (should (plist-get (gethash "quiet" agent-river--spend) :bars))
+    ;; A day and a half later another session takes a step.  Trimming only
+    ;; what is being written would leave the quiet one's bars in the table
+    ;; for as long as this Emacs runs, and make the per-line scale walk grow
+    ;; with every session ever seen rather than with the ones still working.
+    (agent-river--spend-record "busy" 0 (agent-river-test--at 2000))
+    (should-not (plist-get (gethash "quiet" agent-river--spend) :bars))
+    ;; The entry stays: its total is what answers for a session whose buffer
+    ;; is gone, and with no bars left it is three values.
+    (should (= 1.0 (plist-get (gethash "quiet" agent-river--spend) :total)))))
+
+(ert-deftest agent-river-test-a-broken-meter-says-so-once-and-stops ()
+  (agent-river-test--with-spend
+    (let ((agent-river--spend-broken nil)
+          (logged nil))
+      (cl-letf (((symbol-function 'agent-river--spend-read)
+                 (lambda (&rest _) (error "no such slot")))
+                ((symbol-function 'agent-river-log)
+                 (lambda (kind text &rest _) (push (cons kind text) logged))))
+        (agent-river--spend-sample "s1")
+        (agent-river--spend-sample "s1")
+        ;; Said once and then retired: this runs on every tool call, so a
+        ;; failure left in place is a failure repeated thousands of times --
+        ;; and never silently, which is what the `ignore-errors' here did.
+        (should (= 1 (length logged)))
+        (should (equal "fail" (car (car logged))))
+        (should (string-match-p "spend read failed" (cdr (car logged))))
+        (should agent-river--spend-broken)))))
 
 (ert-deftest agent-river-test-a-cost-total-outlives-the-buffer-it-came-from ()
   (agent-river-test--with-spend
-    (agent-river--spend-record "s1" 6.30)
-    (agent-river--spend-record "s2" 24.32)
+    (agent-river--spend-record "s1" 6.30 nil "USD")
+    (agent-river--spend-record "s2" 24.32 nil "USD")
     ;; The totals are agent-shell's figures, kept here as they were sampled
     ;; -- so a session whose shell buffer has been killed still answers for
     ;; what it cost, which reading `agent-shell--state' cannot do.
     (let ((report (agent-river-spend)))
-      (should (< (abs (- (plist-get report :total) 30.62)) 0.001))
+      (should (< (abs (- (alist-get "USD" (plist-get report :totals)
+                                    nil nil #'equal)
+                         30.62))
+                 0.001))
       (should (= 2 (length (plist-get report :sessions))))
       ;; Dearest first: the line worth reading is at the top.
-      (should (equal (caar (plist-get report :sessions)) "s2")))))
+      (should (equal (plist-get (car (plist-get report :sessions)) :label)
+                     "s2")))))
+
+(ert-deftest agent-river-test-two-currencies-are-not-one-total ()
+  (agent-river-test--with-spend
+    (agent-river--spend-record "s1" 6.30 nil "USD")
+    (agent-river--spend-record "s2" 4.00 nil "EUR")
+    ;; The one place the money itself is shown, so it is summed per currency
+    ;; rather than into a headline number true of neither.
+    (let ((totals (plist-get (agent-river-spend) :totals)))
+      (should (= 2 (length totals)))
+      (should (= 6.30 (alist-get "USD" totals nil nil #'equal)))
+      (should (= 4.00 (alist-get "EUR" totals nil nil #'equal))))))
+
+(ert-deftest agent-river-test-a-currency-once-named-is-remembered ()
+  (agent-river-test--with-spend
+    (agent-river--spend-record "s1" 1.0 nil "USD")
+    ;; Only the notification that carries a cost carries a currency, so a
+    ;; later reading without one must not quietly unname the money.
+    (agent-river--spend-record "s1" 2.0)
+    (should (equal "USD" (plist-get (gethash "s1" agent-river--spend) :currency)))))
 
 (ert-deftest agent-river-test-the-session-line-carries-the-cost-graph ()
   (agent-river-test--with-block

@@ -4012,8 +4012,11 @@ Braille is two dots wide, so a character is two bars and the default six
 draws twelve of them.  The window the graph covers is therefore twice this
 many `agent-river-spend-interval's: an hour, by default.
 
-Nil is the off switch, and the answer for a font with no braille in it."
-  :type '(choice (const :tag "No graph" nil) integer))
+Nil is the off switch, and the answer for a font with no braille in it.
+So is 0, since a graph no characters wide is no graph -- which is why the
+type is a natural number: a negative width is not a setting anybody meant,
+and the customise buffer is the cheapest place to say so once."
+  :type '(choice (const :tag "No graph" nil) natnum))
 
 (defcustom agent-river-spend-interval 300
   "Seconds of spending one bar of the graph covers.
@@ -4077,7 +4080,18 @@ ACP server reports no cost never will have."
               (cost (alist-get :cost-amount (alist-get :usage state))))
     (and (numberp cost) cost)))
 
-(defun agent-river--spend-record (session total &optional now)
+(defun agent-river--spend-currency (session)
+  "Return what SESSION\\='s cost is denominated in, or nil.
+
+Read beside the figure and kept with it, because the one place the money
+is actually shown is `agent-river-spend' -- and a table of bare numbers
+summed into a headline is how two currencies become one wrong total."
+  (when-let* ((buffer (agent-river--shell-buffer session))
+              (state (buffer-local-value 'agent-shell--state buffer))
+              (currency (alist-get :cost-currency (alist-get :usage state))))
+    (and (stringp currency) currency)))
+
+(defun agent-river--spend-record (session total &optional now currency)
   "Record TOTAL as SESSION\\='s cumulative cost as of NOW.
 
 The graph is made of the differences between readings, so the *first*
@@ -4095,7 +4109,20 @@ through one, so a twenty-minute turn lands in the bar it ended in instead
 of across the four it ran through.  Spreading it back over them would read
 better and would be an invention -- nothing says the money went evenly --
 so the reading stays where the measurement is, and the graph answers when
-the spending was reported."
+the spending was reported.
+
+CURRENCY is what the figure is denominated in, where the meter says.  It
+is remembered rather than overwritten with nil, since only the
+notification carrying a cost carries one.
+
+`:total' is the high-water mark and not simply the last reading.  A figure
+that goes down is somebody else\\='s arithmetic -- a server reconnecting, an
+agent whose `usage_update' reports the turn rather than the session -- and
+storing the dip would do two things without a word: understate the session
+in `agent-river-spend', which presents it as a fact, and measure the next
+genuine rise from the lower base, landing it as one inflated bar.  That it
+only ever goes up is an assumption about another package, so it is
+enforced here rather than trusted."
   (let* ((at (or now (current-time)))
          (entry (gethash session agent-river--spend))
          (last (plist-get entry :total))
@@ -4108,21 +4135,57 @@ the spending was reported."
             (setcdr cell (+ (cdr cell) spent))
           (push (cons bar spent) bars))))
     (puthash session
-             (list :total total
+             (list :total (if last (max total last) total)
+                   :currency (or currency (plist-get entry :currency))
                    :since (or (plist-get entry :since) at)
-                   :bars (agent-river--spend-trim bars at))
+                   :bars bars)
              agent-river--spend)
+    (agent-river--spend-trim at)
     total))
 
-(defun agent-river--spend-trim (bars now)
-  "Return BARS with everything older than the horizon dropped, as of NOW."
+(defun agent-river--spend-trim (now)
+  "Drop every session\\='s bars older than the horizon, as of NOW.
+
+Swept over the whole table rather than over the session being written.
+Trimming only that one left a session that has stopped being sampled --
+ended, or its shell buffer killed -- holding whatever bars it had at the
+end for as long as this Emacs runs, and made `agent-river--spend-max' walk
+every session ever seen rather than the ones still spending.
+
+What is deliberately not dropped is the entry.  Its `:total' is what lets
+`agent-river-spend' answer for a session whose buffer is gone, which is
+the one thing reading agent-shell directly cannot do, and an entry with no
+bars left is three values."
   (let ((floor (- (agent-river--spend-bar now) agent-river--spend-horizon)))
-    (seq-filter (lambda (cell) (> (car cell) floor)) bars)))
+    (maphash (lambda (_session entry)
+               (plist-put entry :bars
+                          (seq-filter (lambda (cell) (> (car cell) floor))
+                                      (plist-get entry :bars))))
+             agent-river--spend)))
+
+(defvar agent-river--spend-broken nil
+  "Non-nil once reading the meter has thrown, which retires the sampling.
+Cleared by `agent-river-reset'.  See `agent-river--spend-sample'.")
 
 (defun agent-river--spend-sample (session)
-  "Sample what SESSION has cost, recording whatever of it is new."
-  (when-let* ((total (agent-river--spend-read session)))
-    (agent-river--spend-record session total)))
+  "Sample what SESSION has cost, recording whatever of it is new.
+
+Guarded like an observer, and for an observer\\='s three reasons: this runs
+on every tool call, it reads another package\\='s internals, and it is extra
+to the fold.  So it must not report itself as the fold having broken --
+that sends somebody to `agent-river-reset' over a decoration -- it must
+not repeat a failure thousands of times, and it must not go quiet either,
+which `ignore-errors' here did.  It says so once and stops sampling."
+  (unless agent-river--spend-broken
+    (condition-case err
+        (when-let* ((total (agent-river--spend-read session)))
+          (agent-river--spend-record session total nil
+                                     (agent-river--spend-currency session)))
+      (error
+       (setq agent-river--spend-broken t)
+       (agent-river-log "fail"
+                        (format "spend read failed (%s) -- not sampling again"
+                                (error-message-string err)))))))
 
 (defconst agent-river--spend-left [0 #x40 #x44 #x46 #x47]
   "Braille bits for a bar of each height in a cell\\='s left column.
@@ -4166,7 +4229,10 @@ which is the whole of what a stack of graphs is read for.
 
 Recomputed per line rather than memoised for the draw: this is a handful
 of sessions with a few dozen bars between them, and a dynamic binding to
-get right costs more than the microseconds it would save."
+get right costs more than the microseconds it would save.  What keeps that
+true is `agent-river--spend-trim' sweeping the whole table rather than one
+session: without it this walk would grow with every session this Emacs had
+ever seen, and a memo would be answering the wrong question."
   (let ((window (* 2 (or agent-river-spend-width 6)))
         (bar (agent-river--spend-bar now))
         (max nil))
@@ -4212,23 +4278,59 @@ session with a blank column rather than a made-up one."
                          "")
               "|"))))
 
+(defun agent-river--spend-measured-p ()
+  "Return non-nil when a session the block is drawing has been sampled.
+
+The question the column is reserved on, and pointedly not \"has anything
+ever been sampled\": an entry outlives its session on purpose, so that
+`agent-river-spend\' can answer for one whose buffer is gone, and asking
+the table whether it is empty would keep the column on every line of an
+Emacs whose agent-shell sessions all ended hours ago."
+  (catch 'measured
+    (maphash (lambda (session _entry)
+               (when-let* ((state (gethash session agent-river-registry)))
+                 (when (agent-river--active-p state) (throw 'measured t))))
+             agent-river--spend)
+    nil))
+
 (defun agent-river--spend-column (session &optional now)
-  "Return SESSION\\='s graph as a fixed-width column, or nil.
+  "Return SESSION\\='s graph padded to a fixed width, or nil.
 
-Reserved on every session line as soon as one session has anything to
-draw: a width decided per line is a column in name only, and everything
-after it would sit somewhere different on every line.  Nil only when
-nothing anywhere has been measured -- an Emacs with no agent-shell in it
-would otherwise carry an empty column for ever, which is a promise that
-setup cannot keep.
+Every graph is the same length, which is what lets two of them be read
+against each other -- and it works at different columns, because the
+rightmost bar is `now\' in each one wherever that one happens to start.
+The line around it is not a column and cannot be made one: the block is
+`· \'-joined parts of whatever width they happen to be -- a label, a
+truncated but unpadded task -- so what follows the graph already sits
+somewhere different on every line.  What the padding does buy beyond the
+comparison is that a line\='s own tail stops jumping when its session goes
+from unsampled to sampled.
 
-Padded with blank braille rather than spaces, so the empty column is
-exactly as wide as a full one in whatever font is drawing them."
+Padded with blank braille rather than spaces, so an empty column is
+exactly as wide as a full one in whatever font is drawing them.
+
+NOW is read once and handed to both readings below.  Left to each of them
+to ask, a draw that straddled a bar boundary would scale the graph against
+a window one bar from its own."
   (when (and agent-river-spend-width (> agent-river-spend-width 0)
-             (> (hash-table-count agent-river--spend) 0))
-    (propertize (or (agent-river--spend-graph session (agent-river--spend-max now) now)
-                    (concat "|" (make-string agent-river-spend-width #x2800) "|"))
-                'face 'agent-river-spend)))
+             (agent-river--spend-measured-p))
+    (let ((now (or now (current-time))))
+      (propertize (or (agent-river--spend-graph session (agent-river--spend-max now) now)
+                      (concat "|" (make-string agent-river-spend-width #x2800) "|"))
+                  'face 'agent-river-spend))))
+
+(defun agent-river--spend-money (row)
+  "Return ROW\\='s `:cost\' with its `:label\' and `:currency\' where it has them.
+
+The currency is named where the meter named one and left out where it did
+not, rather than defaulted to a dollar sign: this is the one place the
+money itself is shown, and guessing what it is denominated in is worse
+than saying nothing."
+  (let ((label (plist-get row :label))
+        (currency (plist-get row :currency)))
+    (concat (and label (concat label " "))
+            (and currency (concat currency " "))
+            (format "%.2f" (plist-get row :cost)))))
 
 ;;;###autoload
 (defun agent-river-spend ()
@@ -4244,24 +4346,32 @@ Deliberately a query rather than a line in the HUD.  A total across
 sessions belongs to no session, so it would need a line or a header of its
 own, and this view has spent one of those before and taken it back."
   (interactive)
-  (let (rows (total 0))
+  (let (rows totals)
     (maphash (lambda (session entry)
-               (let ((cost (or (plist-get entry :total) 0))
-                     (state (gethash session agent-river-registry)))
-                 (setq total (+ total cost))
-                 (push (cons (or (and state (agent-river-state-label state)) session)
-                             cost)
-                       rows)))
+               (let* ((cost (or (plist-get entry :total) 0))
+                      (currency (plist-get entry :currency))
+                      (state (gethash session agent-river-registry))
+                      (sum (assoc currency totals)))
+                 (push (list :label (or (and state (agent-river-state-label state))
+                                        session)
+                             :cost cost :currency currency)
+                       rows)
+                 (if sum
+                     (setcdr sum (+ (cdr sum) cost))
+                   (push (cons currency cost) totals))))
              agent-river--spend)
-    (setq rows (sort rows (lambda (a b) (> (cdr a) (cdr b)))))
+    (setq rows (sort rows (lambda (a b) (> (plist-get a :cost)
+                                           (plist-get b :cost)))))
     (message "%s"
              (if rows
-                 (format "%s · %.2f total"
-                         (mapconcat (lambda (row) (format "%s %.2f" (car row) (cdr row)))
-                                    rows " · ")
-                         total)
+                 (format "%s · %s total"
+                         (mapconcat #'agent-river--spend-money rows " · ")
+                         (mapconcat (lambda (sum)
+                                      (agent-river--spend-money
+                                       (list :cost (cdr sum) :currency (car sum))))
+                                    totals " · "))
                "Nothing measured -- no session here reports what it costs"))
-    (list :total total :sessions rows)))
+    (list :totals totals :sessions rows)))
 
 
 ;;; Entry points -- how state gets in
@@ -4356,13 +4466,12 @@ often the agent had to be told something is itself part of the state."
     ;; says so.
     (agent-river--ensure-subscribed session)
     (agent-river--ensure-shell-teardown session)
-    ;; The meter, read before the fold and outside its guard.  Every step of
-    ;; it already answers nil where there is nothing to read, so the only
-    ;; way this throws is agent-shell changing the shape of its own state --
-    ;; and a cost that cannot be read must not be able to report itself as
-    ;; the fold having broken, which is what sends somebody to
-    ;; `agent-river-reset'.  The graph stops moving and nothing else does.
-    (ignore-errors (agent-river--spend-sample session))
+    ;; The meter, read before the fold and outside its guard: a cost that
+    ;; cannot be read must not be able to report itself as the fold having
+    ;; broken, which is what sends somebody to `agent-river-reset'.  It
+    ;; carries a guard of its own instead, which says so once and stops
+    ;; sampling -- the observers' idiom, for the observers' reasons.
+    (agent-river--spend-sample session)
     ;; The fold must not be able to take the HUD dark without saying so.
     ;; Reloading this file after changing the struct leaves older states
     ;; short a slot, and the resulting error used to abort `observe' before
@@ -5559,8 +5668,12 @@ half that also folds."
   ;; The cost table goes too, by the same argument: it is keyed by the
   ;; sessions being forgotten.  What it loses is the shape of the last
   ;; hour, not the totals -- those are agent-shell's figures and come back
-  ;; with each session's next event.
+  ;; with each session's next event.  Which is also why this is where a
+  ;; retired sampler is given another go: the reading it failed at is one
+  ;; a reload may well have fixed, and there is nothing left to be
+  ;; inconsistent with.
   (clrhash agent-river--spend)
+  (setq agent-river--spend-broken nil)
   (agent-river--stop-timer)
   (agent-river--stop-spinner))
 

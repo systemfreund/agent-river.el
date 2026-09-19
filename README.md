@@ -345,7 +345,9 @@ to prevent. Note what happened, never what you think about it.
 (agent-river-children "<session-id>")   ; subagent states
 
 (agent-river-spend)                     ; what the sessions have cost
-;; (:total 30.62 :sessions (("event log tweak" . 24.32) ("alpha" . 6.30)))
+;; (:totals (("USD" . 30.62))
+;;  :sessions ((:label "event log tweak" :cost 24.32 :currency "USD")
+;;             (:label "alpha" :cost 6.30 :currency "USD")))
 ```
 
 `agent-river-spend` is a query rather than a line in the HUD, because a total
@@ -353,6 +355,8 @@ across sessions belongs to no session and would need a line or a header of its
 own. The figures are agent-shell's, sampled as the sessions worked, and they
 outlive the buffers they came from: a session whose shell buffer has been killed
 still answers for what it cost, which reading `agent-shell--state` cannot do.
+Totals are summed **per currency**, since this is the one place the figure
+itself is shown and two currencies added together are a number true of neither.
 
 `agent-river-touching` is the one that earns its keep: two agents editing the
 same file without knowing about each other is a real hazard in a worktree setup.
