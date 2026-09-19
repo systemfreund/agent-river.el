@@ -713,108 +713,73 @@ file to read before altering behaviour rather than building on it.
 
 ## A third direction: something arrives, and you point an agent at it
 
-`agent-river.el` listens. Two optional files are where something from
-*outside* becomes a subject here, and where an agent can afterwards be
-pointed at one:
+Two optional files, and they require nothing of each other:
 
 ```
-  agent-river-spool.el    a file in the spool  ->  an artifact
-  agent-river-launch.el   an artifact          ->  a session
+agent-river-spool.el    a file in a directory  ->  an artifact, drawn on the map
+agent-river-launch.el   an artifact            ->  an agent session, when you ask
 ```
 
-They require nothing of each other. The first is the door and runs with no
-configuration at all; the second is the only thing in the package that
-starts a process, and needs two switches turned on.
+### Delivering something
 
-```elisp
-(agent-river-spool-mode 1)         ; watch the spool
-;; M-x agent-river-map             ; see what has arrived
-;; M-x agent-river-launch-artifact ; point an agent at one
-```
-
-Delivering by hand, which is also how a poller does it — built elsewhere,
-renamed in:
+**Write a JSON file into a directory.** That is the whole integration: no
+Elisp, no registration, and nothing that needs Emacs to be running when your
+side does its work.
 
 ```sh
-d=~/.local/state/agent-river/spool
+d=${XDG_STATE_HOME:-$HOME/.local/state}/agent-river/spool
 printf '%s' '{"source":"river","key":"inc:INC-444","domain":"inc",
-              "name":"Checkout 500s","context":{"url":"https://..."}}' > $d/x.tmp
-mv $d/x.tmp $d/x.json
+              "name":"Checkout 500s","context":{"url":"https://…"}}' \
+  > $d/INC-444.tmp
+mv $d/INC-444.tmp $d/INC-444.json
 ```
 
-### The spool is the only door
+On the Emacs side, once: `(agent-river-spool-mode 1)`.
 
-A GitHub poller, a webhook, an agent handing off and you with `echo` all
-write the same shape to the same place, so a new kind of source is a new
-*writer* and never a new mechanism. It is deliberately not under
-`user-emacs-directory`: everything else this package writes is written by
-Emacs, and this is written **to** Emacs by processes that should not have to
-know how an Emacs configuration is laid out.
+| field | | |
+|---|---|---|
+| `source` | **required** | which reader to use. `river` is this shape, and an unknown name falls back to it |
+| `key` | **required** | the identity. Put the domain in it (`inc:INC-444`), or two producers numbering from 1 will collide |
+| `domain` | | what kind of thing this is; heads its own section of the map. **Leave it out and the key is taken for a file name** |
+| `name` | | what a person sees on the line. Defaults to the key |
+| `context` | | an object, carried and never read by agent-river. Drawn as rows under the line |
+| `gone` | | `true` when the thing is over: the line is struck through, not removed |
+| `text` | | the line for the event log |
+| `session` | | an agent-river session id, if one caused this — see below |
 
-Two directories, and the second is for what could not be read:
+Two rules a writer keeps:
 
-```
-<spool>/          the inbox: delivered, not yet taken in
-<spool>/failed/   unreadable, kept for you to look at
-```
+- **Build elsewhere, `rename` in.** Only `.json` is taken in, which leaves
+  `.tmp` free for the writing half; a watcher sees the file the moment it
+  appears, and a half-written one would be read as broken.
+- **The same key twice is the same thing twice.** A second delivery updates
+  the record rather than making another, so a poller needs no memory of its
+  own.
 
-A writer builds the file elsewhere and `rename`s it in; only `.json` is taken
-in, which leaves `.tmp` free for the writing half. A delivery that is taken
-in is **deleted** — the artifact table is the record, and a copy on disk
-beside it could only disagree with it.
+**Did it work?** `M-x agent-river-map` lists it under its domain, and
+`*agent-river*` gets a line either way. If nothing appears, look in
+`<spool>/failed/`: an unreadable delivery is kept there and the reason is in
+the log.
 
-A file that will not parse is given `agent-river-spool-settle` seconds
-before it is called broken. The contract is write-then-rename and a poller
-can be held to it; a writer that is not a program cannot be — an agent told
-to report something reaches for `Write`, so its JSON is briefly half there,
-and filing that under `failed/` would throw the delivery away over a contract
-nobody told the writer about.
+### If your system speaks its own dialect
 
-### One adapter per source
+Register a reader in `agent-river-spool-sources` under your `source` name and
+the raw payload can land in the spool unchanged — the reader turns it into
+the fields above. That is what keeps the knowledge of what a foreign system
+calls things in Elisp and under test, rather than in whatever wrote the file.
 
-`agent-river-spool-sources` maps a source name to a reader, and a reader is
-the only thing that knows a dialect — exactly the role `agent-river--event`
-plays for the hosts, and for the same reason: a poller should move bytes and
-understand nothing.
+`agent-river-gh.el` is the worked example: a shell script that asks `gh` for
+issues and interprets nothing, and a reader of about forty lines that knows
+what GitHub calls a title.
 
-A reader returns a **spec**, the arguments an artifact is declared with, and
-does not declare one itself:
+### If a session caused it
 
-```elisp
-(:key "issue:owner/repo#42" :domain 'issue :name "#42 ..."
- :context ((url . "…") (author . "…")) :gone nil :text "…" :session nil)
-```
+`session` names an agent-river session, and the fact that the delivery
+happened is noted on it — logged, counted, attributable.
 
-One place puts things in the table, and a reader is a pure translation that
-tests without a table, a spool or a timer. The normalised shape (`river`) is
-the fallback reader rather than an error, so a source that can write it needs
-no adapter at all. A reader that throws costs its own file: it goes to
-`failed/`, which nothing re-reads.
-
-There is no `:cwd`. Where an agent would be started is not a property of the
-thing it would work on, and this package never reads a value out of a
-context — so a source that knows a working tree puts it in the context, and
-the brief reads it back out.
-
-### A delivery may name the session that caused it
-
-`session` in the normalised shape is the one field that is not about the
-artifact. It says which agent-river session produced the delivery, and it
-is noted on *that session* — a measurement folded as an event, logged and
-counted, rather than written onto a slot.
-
-What is noted is the fact. An agent's own account of its work is not, and
-must not be: a note may feed a signal, so folding the agent's words in
-would launder a claim into an observation about it.
-
-There was more here once — an agent could hand off by writing a file with
-its own prose in it, and `agent-river-launch.el` carried the text telling
-it how. That existed to keep a *chain* alive, where one agent finishing was
-the occasion for the next launch. A person is the link now. It was also a
-second account of something the stream already carries: with
-`agent-river-listen-mode`, the end of every turn is folded, excerpted in
-the HUD and rendered into the Markdown export, and asking the agent to
-write a file as well is the same fact from a less reliable source.
+Note the fact, never an opinion. A note may feed a signal that goes back into
+an agent's own context, so an account of the work written *by* that agent
+belongs in `context`, where it is shown and read by nobody.
 
 ### Starting a session
 
@@ -837,9 +802,8 @@ where to say it, or nil:
 ```
 
 Nil is the arming switch: a launcher with no brief can never launch. It is
-also where a context is read — this package never takes a value out of one,
-which is what lets a record carry a severity, a body and a URL without the
-package learning about any of them.
+also the only place a context is read, which is what lets a record carry a
+severity, a body and a URL without agent-river learning about any of them.
 
 `M-x agent-river-launch-artifact` asks before it starts anything. It is also
 suitable as a `:visit` in `agent-river-map-domains`, which is what makes RET
@@ -859,26 +823,14 @@ A **launcher** is a plist in `agent-river-launch-launchers`:
 | `:launch` | `(BRIEF) -> HANDLE`; BRIEF also carries `:key` and `:name` |
 | `:resolve` | `(HANDLE) -> session id`, once there is one, or nil |
 
-The split between the last two is a real asymmetry: agent-shell's session id
-appears after the handshake, so a launch hands back a buffer and the id is
-resolved afterwards; a headless CLI can be *told* its id, so `:resolve` is
-nil. Resolving is what links the session to the artifact it was started for
-— the reach lands by itself, because whoever started the agent is the one
-caller holding both ends of the relationship.
+`:resolve` exists because agent-shell's session id only appears after the
+handshake: a launch hands back a buffer and the id is asked for afterwards,
+where a headless CLI can be *told* one and answers nil. It is what links the
+session to the artifact it was started for, so the two are related on the
+map without anybody recording it.
 
-### Deliberately not here
-
-No rules, no gates, no budget, no chain cap, no decision log, no queue
-buffer and no instructions telling an agent to report back. All of that existed (`db0aa5c`) and was removed, because nearly every
-part of it was the price of deciding **unattended**: a durable ledger,
-occasion-shaped keys, a refusal log to calibrate on. With a person pressing
-the key, a repeat is a line rather than an agent, and the artifact table
-already deduplicates, already lists what nobody has picked up, and already
-records an ending.
-
-Getting to unattended is issue #37, which was written before the deletion so
-that deferring it is not the same as forgetting it: it lists what would have
-to come back and what each piece prevents.
+There are no rules, gates or budgets here — a person decides every launch.
+What it would take to decide without one is issue #37.
 
 ### GitHub as a source
 
@@ -892,16 +844,14 @@ live beside the mechanism rather than inside it.
 ```
 
 The script asks `gh` for recently updated issues and writes one file per
-issue, interpreting nothing. It is the same program cron would run, which is
-the point: an Emacs that is not running must not be a reason for an issue to
-go unseen.
+issue, interpreting nothing. It is the same program cron would run: an Emacs
+that is not running must not be a reason for an issue to go unseen.
 
-It keeps a watermark so an issue is delivered once — and because the artifact
-table does not survive a restart, the first poll after the mode is switched
-on ignores it and asks wide. `C-u M-x agent-river-gh-poll` is the same thing
-by hand.
+A watermark keeps an issue from being delivered twice; the first poll after
+the mode is switched on ignores it and asks wide, because the artifact table
+does not survive a restart. `C-u M-x agent-river-gh-poll` does that by hand.
 
-`agent-river-gh-brief` is the worked example of a brief. The issue arrives as
-quoted material, introduced as a request from a third party: with a person in
-the loop the person is the defence, and the framing is kept anyway because it
-is what has to be right the day something decides this without them.
+`agent-river-gh-brief` is the worked example of a brief, and shows the one
+thing a brief for foreign text owes: the issue is quoted and introduced as a
+request from a third party, so nothing in it reads as an instruction that
+arrived with your standing.
