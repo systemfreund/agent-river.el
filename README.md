@@ -643,8 +643,8 @@ One buffer, two halves: a state block of one line per live session, rewritten on
 every fold, over a **newest-first** log.
 
 ```
-* |⣶⣶⣷⣴⣀⣀| · supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches)
-* |⠀⠀⣀⣤⣶⣿| · supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
+* │⣶⣶⣷⣴⣀⣀│ · supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches)
+* │⠀⠀⣀⣤⣶⣿│ · supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
 
 19:07:03 super<2> ▸ Edit  supersonic-mpv.el
 19:06:58 superson ▸ Read  Cask ✓  2ms
@@ -659,7 +659,7 @@ by label. `◇` lines are the agent's own reasoning and `“` lines
 what it said at the end of a turn; neither is in any hook payload, so both come
 from the session's agent-shell buffer where there is one.
 
-The `|…|` column leading each line is how much **context** the session has been
+The `│…│` column leading each line is how much **context** the session has been
 taking on, one bar per `agent-river-tokens-interval` (five minutes) across
 `agent-river-tokens-width` characters of braille — two bars to a character, so
 the default six cover an hour. A bar holds how many tokens the window grew by

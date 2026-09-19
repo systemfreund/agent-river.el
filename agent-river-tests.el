@@ -676,14 +676,14 @@
       (agent-river--usage-record "s1" '(:used 2000))
       (let ((line (substring-no-properties
                    (agent-river--panel (gethash "s1" agent-river-registry)))))
-        (should (string-match "|[⠀-⣿]+|" line))
+        (should (string-match "│[⠀-⣿]+│" line))
         ;; First on the line, ahead of the name: only the outline marker
         ;; comes before it, which is what makes every graph in the block
         ;; start in the same place and stack into a strip worth reading
         ;; down.  Anywhere further right it sits behind a label and a task
         ;; of whatever width the session happened to have.
-        (should (< (string-match "|" line) (string-match "repo" line)))
-        (should (string-prefix-p "* |" line))))))
+        (should (< (string-match "│" line) (string-match "repo" line)))
+        (should (string-prefix-p "* │" line))))))
 
 
 ;;; Phase

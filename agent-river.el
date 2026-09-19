@@ -4235,6 +4235,16 @@ Filled from the bottom: dot 7, then 3, 2, 1.")
 Dot 8, then 6, 5, 4 -- the same bars one column over, and not a shift of
 the left ones, because braille numbers its dots down the columns.")
 
+(defconst agent-river--usage-frame "│"
+  "What closes the token graph at each end.
+
+Box drawing rather than the ASCII pipe, because that is what the character
+is for: it is a rule around a reading, and it reads as one at a glance
+instead of as a character the log below would print literally.  Named once
+because the graph and the blank column that stands in for it have to agree
+-- two spellings of a frame are two widths, and the whole of what being a
+column buys is that they do not differ.")
+
 (defun agent-river--usage-cell (left right)
   "Return the braille character showing bars of height LEFT and RIGHT."
   (string (+ #x2800
@@ -4311,12 +4321,12 @@ session with a blank column rather than a made-up one."
                   0)
                 heights)))
       (setq heights (nreverse heights))
-      (concat "|"
+      (concat agent-river--usage-frame
               (mapconcat (lambda (i) (agent-river--usage-cell (nth (* 2 i) heights)
                                                               (nth (1+ (* 2 i)) heights)))
                          (number-sequence 0 (1- width))
                          "")
-              "|"))))
+              agent-river--usage-frame))))
 
 (defun agent-river--usage-measured-p ()
   "Return non-nil when a session the block is drawing has been sampled.
@@ -4359,7 +4369,9 @@ a window one bar from its own."
              (agent-river--usage-measured-p))
     (let ((now (or now (current-time))))
       (propertize (or (agent-river--usage-graph session (agent-river--usage-max now) now)
-                      (concat "|" (make-string agent-river-tokens-width #x2800) "|"))
+                      (concat agent-river--usage-frame
+                              (make-string agent-river-tokens-width #x2800)
+                              agent-river--usage-frame))
                   'face 'agent-river-tokens))))
 
 (defun agent-river--usage-money (row)

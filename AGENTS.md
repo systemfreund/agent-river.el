@@ -1078,7 +1078,7 @@ would mark nothing anyone chose.
 ### What a session is using — two meters read from outside, one drawn
 
 `agent-river-tokens-width` puts a braille graph on a session's block line
-(`|⣶⣶⣷⣴⣀⣀|`), one bar per `agent-river-tokens-interval`, and
+(`│⣶⣶⣷⣴⣀⣀│`), one bar per `agent-river-tokens-interval`, and
 `agent-river-spend` reports what the sessions have cost. Both figures are
 agent-shell's: `:context-used` says how full the window is, `:cost-amount` what
 has been spent, and they sit in one alist the sampler reads once per event.
