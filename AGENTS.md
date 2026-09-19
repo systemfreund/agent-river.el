@@ -17,21 +17,25 @@ reasoning behind a decision, and the failure it prevents, lives here and in the
 code comments. A change that moves behaviour updates both.
 
 No build system. `agent-river.el` is everything the HUD is;
-`agent-river-launch.el` is the other direction, starting a session from an
-event (optional, requires `agent-river`); `agent-river-gh.el` and
-`agent-river-gh.sh` are one *source* for it, and the line they are on the far
-side of is that a source knowing about a foreign system lives beside the
-mechanism rather than inside it — `river` is the normalised shape and
-`handoff` is agent-river itself talking, so both stay in the core, and the
-next source (a tracker, a mailbox, a build) goes next to the GitHub one.
-`agent-river-tests.el` is the ERT suite for all of it, `agent-river-hook.sh`
-is the bridge, and there is one example hook wiring per host —
-`claude-settings.json`, `codex-hooks.json`, `gemini-settings.json`.
+`agent-river-spool.el` is the door something from outside comes in through,
+turning a delivered file into an artifact; `agent-river-launch.el` is the
+one thing here that starts a process, pointing an agent at an artifact.
+Both are optional and require `agent-river`, and they require nothing of
+each other — see the third-direction section for why they were one file and
+are not any more. `agent-river-gh.el` and `agent-river-gh.sh` are one
+*source* for the spool, and the line they are on the far side of is that a
+source knowing about a foreign system lives beside the mechanism rather
+than inside it — `river` is the normalised shape and stays in the core, and
+the next source (a tracker, a mailbox, a build) goes next to the GitHub
+one. `agent-river-tests.el` is the ERT suite for all of it,
+`agent-river-hook.sh` is the bridge, and there is one example hook wiring
+per host — `claude-settings.json`, `codex-hooks.json`,
+`gemini-settings.json`.
 
 ## Commands
 
 ```sh
-# Full suite (471 tests). -L . is required: the tests require all three .el files.
+# Full suite (430 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -806,249 +810,179 @@ performed the dispatch, and nothing in this package performs one. A user does.
   `agent-river-drop-artifact` takes back -- so the session is looked up while
   there is still nothing to take back. A test pins it.
 
-### The third direction — `agent-river-launch.el`
+### The third direction — `agent-river-spool.el`, `agent-river-launch.el`
 
 Consumers carry state outward, producers add events about a session that
-already exists. This file turns an event from *outside* into a **new**
-session. It is the first thing here that acts, so it lives apart, is opt-in,
-and does not touch `agent-river.el` — what it takes from the river is the
-state it decides on. The README section *"A third direction: starting a
-session from an event"* is the design document for all of it, including the
-parts not written yet; read it before adding to this file.
+already exists. These two are where something from *outside* becomes a
+subject here, and where an agent can afterwards be pointed at one: a file
+in the spool becomes an **artifact**, and an artifact becomes a **session**
+when a person asks for one. Both are optional, opt-in, and do not touch
+`agent-river.el`.
 
-Built so far: all five roles. Rungs 1 and 2 of four — the pipeline runs end
-to end, and `agent-river-launch-launcher` decides whether the last step is a
-process or a no-op. What is load-bearing already:
+**Two files, because they touch at nothing.** They were one while an agent
+finishing was the occasion for the next launch: the text telling an agent
+how to hand back had to carry the spool's own path, so the out-half read
+the in-half and the two were a cycle. That text is gone — what it existed
+to keep alive was the chain, and a person is the link now, so its purpose
+left with the machinery it was built for. It was also a second account of
+something the stream already carries: `say` folds the end of every turn,
+excerpts it in the HUD and puts it in the export, and asking the agent to
+write a file as well is the same fact from a less reliable source. Measured
+before removing it, the spool had existed for five days and had never held
+a single file. With it gone, `agent-river-spool--dir` had one caller and
+now has none, and the two halves share nothing at all.
 
-- **The spool is the only door**, and the state *is* the filesystem —
-  `<spool>/` inbox, `queued/`, `done/`, `failed/`. No second account of what
-  has been handled that can disagree with the first, and the queue is
-  rebuilt from `queued/` on startup (`agent-river-launch--recover`), so a
-  crash at 3am comes back to its candidates rather than to an empty queue and
-  a `done/` claiming they were handled. A writer renames in; a half-written
-  file would read as malformed.
-- **A key names the occasion, not the object.** `issue-42` is wrong; an issue
-  reopened is a new reason to act. Same mistake as `(streak N)`. The ledger
-  file name carries a hash of the full key, because sanitising alone maps
-  `a/b` and `a_b` onto one file and a false match here is a launch that never
-  happens and never says why.
-- **A poller splits, and derives nothing** (`agent-river-gh.sh`). The spool's
-  unit is one occasion, so one issue is one file, and that split has to
-  happen before the spool or the ledger, the dedupe and the recovery all stop
-  being single-valued — it is `gh --jq`, bundled with `gh`, so still no
-  external dependency. Everything *else* stays in Elisp under test: the
-  script interprets no field and makes no decision. Its watermark is the time
-  of the last run, asked with `>=`, so it over-fetches slightly — which is
-  free, because the spool deduplicates on the occasion key and a repeat costs
-  one deleted file, where a miss costs an issue.
-- **A third party's text is data, and the gate is the boundary**
-  (`agent-river-gh-example-rule`). An issue body is written by whoever can
-  open an issue and would arrive as instructions to an agent holding tools,
-  so it is carried in `:payload` where no rule can match it, and the decision
-  to act is made on `:actor` and `:labels`. A label is the better half: it
-  can only be set by someone with write access, so it is a maintainer saying
-  "this one may be worked on" rather than a guess about a stranger. Labels
-  are comma-*wrapped* (`,bug,`) so the obvious spelling is the exact one —
-  unwrapped, a rule for `bug` also fires on `debug`, and a loose match here
-  is a stranger's issue reaching an agent. Nothing in that file is installed
-  as a default.
-- **A pull source derives its key; a push source mints one**
-  (`agent-river-launch--mint`). The rule above is about *re-seeing*: a poller
-  meets the same object on every tick, so its key has to say which visit this
-  is. A handoff is delivered once and consumed once — there is nothing to
-  re-see, so every write is its own occasion. An `id` may still be supplied,
-  for a writer that retries.
-- **A claim may be the occasion, never the content** (`:claim`,
-  `agent-river-launch--unmatchable`). An agent hands off by writing a
-  candidate — no tool, no hook, nothing in the fold changes. Its own words go
-  to `:claim`, which `agent-river-launch--field` refuses, so a rule cannot be
-  matched by the prose of the thing it is deciding about; what a source *may*
-  steer is `:occasion`, a token from a small vocabulary a rule author can
-  anticipate. The same split the `intent*` slots have in the state.
-- **A note carries the fact, not the claim**
-  (`agent-river-launch--note-session`). A handoff is folded onto its session
-  via `agent-river-note`, so it shows in the HUD and is counted — but a note
-  is a *measurement* and may feed a signal, so folding the agent's own words
-  into one would launder a claim into an observation. `handoff: review`.
-- **A file too young to parse is not a broken file**
-  (`agent-river-launch-settle`). The contract is write-then-rename and a
-  poller can be held to it; an agent reaches for `Write`, which creates the
-  file where the watch already sees it. Filing half-written JSON under
-  `failed/` loses a handoff over a contract nobody told the agent about, and
-  loses it where the agent cannot find out.
-- **A source adapter is the only thing that knows a dialect**
-  (`agent-river-launch-sources`), exactly as `agent-river--event` is for the
-  hosts — so a poller moves bytes and understands nothing. The normalised
-  shape is the fallback reader, which is why the protocol is not speculative.
-  A reader that throws costs its own file and no more: it goes to `failed/`
-  and is never read again, so unlike an observer there is no runaway to retire.
-- **`:match` is final, `:gate` is not** (`agent-river-launch--rule-for`,
-  `--gate`). A match is a property of the candidate and nothing about waiting
-  will change it, so a candidate no rule matches is *finished* — filed, not
-  left to be asked the same question every minute. A gate is a property of
-  the world, so its refusal leaves the candidate queued to be asked again;
-  refusing finally would throw work away for having arrived while an agent
-  happened to be busy. Collapsing the two loses one or the other.
-  The match is re-asked at every drain rather than cached: rules get edited
-  between a delivery and the moment it could run.
-- **A gate states its reason, and silence means yes.** Which is why a gate
-  function returns the reason rather than a boolean, why a gate that *throws*
-  refuses (`gate errored`) instead of being read as silence, and why an
-  unknown check refuses too — a typo in a config must not silently arm a rule
-  its author gated.
-- **Refusals are the measurement.** The decision log exists from the first
-  commit, before anything can launch, because the path to autonomy is paved
-  with a fortnight of decisions and those only accrue in wall-clock time.
-  A hold is logged **on change only**: a candidate held for an hour is asked
-  sixty times, and sixty identical lines bury the transitions the log exists
-  to show. Once a rule can refuse, the reason has to become *durable* too —
-  right now only the fact is, as which directory the file ended in.
-- **Three switches, three different questions**
-  (`agent-river-launch-launcher`, a rule's `:prompt`,
-  `agent-river-launch-auto`). *Can* anything launch; may *this rule*, since
-  there is nothing to say to an agent without a prompt; does it happen
-  *without being asked*. That is the ladder — a launcher configured is rung
-  2, arming one rule is rung 3, `auto` is rung 4 — and each is a thing the
-  user can see themselves turn on. A rule with no `:prompt` stays a dry run
-  however the other two are set.
-- **`:launch` and `:resolve` are split by a real asymmetry.** agent-shell's
-  ACP session id appears after the process is up, so a launch hands back a
-  handle (the buffer) and the key is resolved afterwards; a headless CLI can
-  be *told* its session id, so the key is known before the process starts and
-  `:resolve` is nil. Where we control the invocation we assign identity;
-  where we do not, we resolve it after. `agent-river-launch--resolve-pending`
-  runs at the head of every drain.
-- **The chain cap is not a gate** (`agent-river-launch-max-generation`,
-  default 2). It is checked on every candidate whatever the rules say,
-  because a guard you have to remember to add per rule is not a guard. It is
-  *final* like a match, not deferred like a gate: no amount of waiting makes
-  a fourth-generation launch a third. The provenance filter is the sharp
-  instrument and belongs in a rule; this is the blunt one that holds when the
-  sharp one is missing.
-- **A launcher that throws is a decision** (`failed`, filed). Left in the
-  queue it would be retried every minute, turning one broken launcher into a
-  process attempt a minute for as long as Emacs runs.
-- **RET overrides the gate and nothing else** (`agent-river-launch-now`). A
-  gate is this layer's guess about whether the moment is right and a person
-  pressing RET is not a guess — but it cannot invent a prompt a rule does not
-  have, and it cannot launch with no launcher.
-- **The budget is spent by launching, never by waiting.** An armed candidate
-  sitting in the queue is asked every minute; charging it each time would
-  spend a four-an-hour budget fifteen times over in one hour of waiting.
-- **The drain has to run with nothing delivered.** The gates read the world,
-  and an agent going idle is what releases a held candidate; no file arrives
-  to say so. `agent-river-launch-poll-interval` is therefore the drain's
-  clock as well as the spool's safety net, which is why its default is a
-  minute. Draining on `agent-river-observers` would be sharper and belongs
-  with the launcher, debounced — that hook fires on every tool call.
-- **A full queue defers, it does not drop** — intake stops and the files stay
-  in the inbox, one log line per scan rather than one per file.
-- **Every callback a user supplies is guarded, and a broken one is a
-  decision.** `:match`, `:gate`, `:launch`, `:prompt` and a launcher's
-  `:available-p` — the list is closed and the reason is the same each time,
-  but `:prompt` earned the sharpest version of it. The drain assigns
-  `agent-river-launch--queue` only after its loop, so an unwind out of it
-  leaves the queue holding candidates it has already decided and filed, and
-  every tick from then on decides them again — once a minute, for as long as
-  Emacs runs, with one `scan failed` line an hour as the only trace. A
-  prompt that throws falls to the dry run, which is where a rule that cannot
-  produce a prompt belongs anyway.
+**There are no rules here, no gates, no budget and no queue, and the
+deletion is the design.** There was all of that once (`db0aa5c`): a
+candidate with an occasion-shaped key, a durable ledger in `queued/` and
+`done/`, matches and gates and a chain cap and a decision log and
+`*agent-river-queue*`. Nearly every part of it was the price of deciding
+**unattended**, and with a person pressing the key each one either
+disappears or turns out to be something the artifact table already does —
+`agent-river-appeared` answers nil for a key it has, the map's domain
+section is the queue and already lists what nobody has picked up, and
+`agent-river-ended` is what `done/` was for. What pays for all of it is one
+sentence: **a repeat is a line, not an agent.** What would have to come back
+to launch unattended, and what each piece prevents, is issue #37 — written
+before the deletion, so that deferring is not the same as forgetting.
+
+- **The spool is the only door**, and what makes it worth keeping when the
+  ledger goes is that it needs no Emacs running: a cron poller, a webhook
+  and an agent handing off by writing a file are one mechanism. Two
+  directories now, `<spool>/` and `<spool>/failed/`, and a delivery that is
+  taken in is **deleted** — the artifact table is the record, and a copy on
+  disk beside it could only disagree with it.
+- **A reader returns a spec; one place declares.** A source adapter
+  (`agent-river-spool-sources`) is the only thing that knows a dialect,
+  exactly as `agent-river--event` is for the hosts, and it hands back the
+  arguments an artifact is declared with rather than declaring one — so a
+  reader is a pure translation that tests without a table, a spool or a
+  timer, and there is one place a thing enters the table. A reader that
+  throws costs its own file: it goes to `failed/`, which nothing re-reads,
+  so unlike an observer there is no runaway to retire.
+- **A half-written file is not a broken one** (`agent-river-spool-settle`).
+  The contract is write-then-rename and a poller can be held to it; a writer
+  that is not a program cannot be — an agent told to report something
+  reaches for `Write`, so its JSON is briefly half there. Filing that under
+  `failed/` would throw the delivery away over a contract nobody told the
+  writer about, and throw it away *quietly*. A file too young is left for
+  the next scan. It covers "parses but has no key" too, because a truncated
+  write can land as valid JSON with the key not in it yet.
+- **A declaration that throws is treated like a file that would not parse.**
+  Left in the inbox it would be retried every minute for the life of the
+  Emacs, which is the one outcome worse than losing it.
+- **`:session` is the one spec field that is not about the artifact**
+  (`agent-river-spool--note-session`). A producer that knows which session
+  caused the thing it is delivering says so, and that is noted on *that
+  session* — the producer direction, and the only note producer that ships.
+  What is noted is the fact, never a claim: a note may feed a signal, so
+  folding in an agent's own words would launder a claim into an observation
+  about it.
+- **A key names the object.** A pull source re-sees the same issue every
+  tick, so `issue:owner/repo#42` and a second sighting is the same line.
+  There was an occasion-shaped key here once, pairing the object with the
+  moment it moved, and it was for the launcher that would otherwise never
+  act twice on one issue — it went with the launcher. Getting it back is
+  part of #37, and the open question there is where an occasion lives once
+  the subject is the object.
+- **There is no `:cwd` on a spec.** Where an agent would be started is not a
+  property of the thing it would work on, and this package never reads a
+  value out of a context — so a source that knows a working tree puts it in
+  the context and `agent-river-launch-brief`, which is the user's own code,
+  reads it back out.
+- **Two switches, and the sharp one is the brief.**
+  `agent-river-launch-launcher` says whether anything can launch at all;
+  `agent-river-launch-brief` returns what to say about a given artifact, or
+  nil, which is the arming switch — a launcher with no brief can never
+  launch. One function rather than one per domain, because dispatching on
+  `:domain` is two lines inside it and a second mechanism deciding one
+  question is what this package spends its exceptions avoiding.
 - **Unavailable is absent** (`agent-river-launch--launcher`,
-  `--available-p`). The field was documented, implemented and asked by
-  nobody, so "this cannot run here" was discovered at the last possible
-  moment: the candidate drew armed, RET passed its check, the user
-  confirmed — and `--launch` then failed on the path that *finishes* a
-  candidate, spending the occasion on a launch that never happened. Read at
-  selection, a launcher whose package is not loaded is shadow mode, and the
-  whole dry run falls out. It is read every time rather than remembered,
-  because a package loaded after Emacs started makes its launcher available
-  without telling anyone.
-- **Nothing is asked forever** (`agent-river-launch--resolve-pending`,
-  `--resolve-window`). A record's one job is to say what session its handle
-  became; having answered, it is dropped, which is also what stops the list
-  being a log of every launch this Emacs made. Having not answered inside
-  the window, it is given up on **out loud** — a launcher that starts
-  something that never becomes a session is the failure this layer is least
-  able to see, since the candidate was filed as `launched` and nothing
-  afterwards contradicts it. The window exists because `:resolve` returning
-  nil means "not yet" and "never" in one answer. A launcher with no
-  `:resolve` is settled at once rather than given up on: that is the
-  headless case, where identity is assigned before the process starts.
-- **The drain does not re-enter** (`agent-river-launch--draining`). The queue
-  is rewritten only after the loop and nothing marks a candidate in flight,
-  so a `:launch` that lets the event loop run lets the poll timer land on a
-  queue that still holds the candidate being launched — same rule, same
-  gate, launched twice. The ledger cannot help: that check is at intake and
-  this candidate is long past it. The guard sits on the drain rather than on
-  any launcher's good behaviour, because the launcher list is a public
-  extension point.
+  `--available-p`). Asked at selection, so "this cannot run here" is the
+  first thing said rather than the last: asked at the launch, the user was
+  prompted to confirm something that then failed. Read every time, because a
+  package loaded after Emacs started makes its launcher available without
+  anything here being told.
+- **Launching asks first** (`agent-river-launch-artifact`). Starting a
+  process is the most expensive thing this package does and the one gesture
+  with nothing on the far side that can take it back. It is also suitable
+  as a `:visit` in `agent-river-map-domains`, which is what makes RET on a
+  line of the map start an agent on it — the whole of "launching happens
+  from the map", with no new keymap and no change to `agent-river.el`.
+- **The edge lands by itself, and that is the point of doing it here**
+  (`agent-river-launch--resolve-pending`). Whoever starts an agent on an
+  artifact is the one caller holding both ends of the relationship, so the
+  reach is recorded without an ordering for anybody to get wrong — the
+  thing the old layer never did and `agent-river-link-artifact` closes one
+  subject over. It is late because the session id does not exist when the
+  process starts, which is the `:launch`/`:resolve` split: agent-shell
+  announces its id after the handshake, a headless CLI can be told one
+  before it starts.
+- **Named is not the same as heard from.** The reach waits for the session
+  to be in the registry as well as to have an id: agent-shell sets the id at
+  the handshake and the hooks fold that session's first event afterwards,
+  and `agent-river-reach` refuses to attach an edge to a state that is not
+  there — rightly, since for its other caller that means a person named the
+  wrong session. Waiting is the answer and the window is what bounds it.
+- **Nothing is asked forever** (`agent-river-launch--resolve-window`). A
+  record that resolves has done its one job and goes, which is also what
+  stops the list becoming a log of every launch this Emacs made; one that
+  has not resolved inside the window is given up on **out loud**, because a
+  launcher that starts something which never becomes a session is the
+  failure this layer is least able to see. The window exists because
+  `:resolve` returning nil means "not yet" and "never" in one answer. A
+  launcher with no `:resolve` is settled at once rather than given up on.
+- **Every callback a user supplies is guarded** — `:available-p`, `:launch`,
+  and the brief. A brief that throws is no brief: this is user code called
+  from a command, and an error there would read as the command being broken.
+- **The watermark is still incremental, and one poll a session is not**
+  (`AGENT_RIVER_GH_RESCAN`). `agent-river-gh.sh` stamps a watermark so an
+  issue is delivered once, and what receives a delivery is now a table that
+  does not survive a restart — so incremental polling alone leaves a
+  restarted Emacs looking at an empty map until somebody touches an issue on
+  GitHub. The first poll after the mode is switched on asks wide; every one
+  after it is incremental again. `C-u M-x agent-river-gh-poll` is the same
+  thing by hand, for after `agent-river-artifacts-reset`.
 - **The watermark moves only after a query that was answered and was not cut
-  short** (`agent-river-gh.sh`). A pipeline exits with the status of its
-  right-hand side and a `while` whose body never ran exits 0, so a failed
-  `gh` read exactly like a quiet hour and stamped the mark over every issue
-  the outage hid. It is the one step in that script that does not degrade to
-  a no-op — everything else loses nothing, this loses issues permanently,
-  because the next run asks about a window that has passed. A run that came
-  back at `--limit` keeps the old mark for the same reason.
+  short.** A pipeline exits with the status of its right-hand side and a
+  `while` whose body never ran exits 0, so a failed `gh` read exactly like a
+  quiet hour and stamped the mark over every issue the outage hid. It is the
+  one step in that script that does not degrade to a no-op — everything else
+  loses nothing, this loses issues permanently, because the next run asks
+  about a window that has passed.
 - **A source registered by an autoload needs an autoload of its own**
   (`agent-river-gh--read`). The `with-eval-after-load` form puts the reader
   into the alist at startup; without a cookie on the reader, the entry is a
   symbol with an empty function cell, and since the reader runs inside
-  `agent-river-launch--candidate`'s guard every `gh` candidate is then read
-  as malformed and filed under `failed/`. The recovery path turns a
-  load-order slip into silent, permanent loss. The same silence is why the
-  poller is handed `AGENT_RIVER_SPOOL` — bound into `process-environment`,
-  since `make-process` has no `:environment` argument and ignores one
-  without complaining.
-- **`:max-concurrent` counts agents, and `agent-river--active-count` counts
-  sessions** (`agent-river-launch--agents`). They were the same number when
-  this gate was written and a subagent was a registry entry of its own; since
-  it became a tally on its parent, the session count reads 1 where eight
-  agents are working, and a cap read off it would refuse nothing. This is the
-  one question here that is about load rather than about sessions, so it adds
-  each session's `running` delegates — `done` is over and `stale` is a guess,
-  and a guess must not be what holds a launch back. The core function's own
-  docstring said "subagents count" for as long as they had stopped: a number
-  whose meaning moves under a caller is worth a line saying what it now
-  means, which it has.
-- **The queue is a view like the others, and answers to their rules**
-  (`agent-river-launch--goto`, `agent-river-launch--row`). Its lines are
-  found again by what they *name* after every rebuild, which is the third
-  time this package has paid for that — and the sharpest, since a slid line
-  under RET here does not answer a question, it starts a process. It carries
-  the three motions below. And **RET asks**, which the approval queue spends
-  a prompt on only for the two `_always` answers: there the other answers
-  each decide one tool call, here every RET is the expensive kind. The three
-  refusals it cannot override live in one place (`--refusal`), read by the
-  command before it asks and signalled by `agent-river-launch-now`, or a
-  reader would be made to confirm a launch that was never going to happen.
+  `agent-river-spool--take-in`'s guard every `gh` delivery is then read as
+  malformed and filed under `failed/`, which nothing re-reads. The same
+  silence is why the poller is handed `AGENT_RIVER_SPOOL` — bound into
+  `process-environment`, since `make-process` has no `:environment` argument
+  and ignores one without complaining.
+- **The prompt is still quoted, and the reason has changed** (`agent-river-gh-brief`).
+  An issue is text written by whoever can open one and it reaches an agent
+  holding tools. With a person in the loop the person is the defence, so the
+  quoting is a courtesy rather than the whole of it — and it is kept anyway,
+  because it is what has to be right on the day #37 is built.
 
 ### One set of motions, every buffer
 
-The HUD, the map, the approval queue and the launch queue take the same keys
-for the same three
+The HUD, the map and the approval queue take the same keys for the same three
 grains, because they are views of one state and learning each separately buys
 nothing: `n`/`p` (plus `SPC`/`DEL` and the remapped arrows) walk every line
 worth stopping on, `M-n`/`M-p` walk the coarse structure, `>`/`<` walk the
 lines that want attention. A session line is a map entry is a question
-heading is a candidate; a
+heading; a
 detail heading is a map file line is an answer row; a log line has no analogue
-and rides the fine grain — which is where the launch queue's *decision* lines
-sit, being its log. The map's *section* headings have no analogue in
+and rides the fine grain. The map's *section* headings have no analogue in
 the block, which is flat. `>` is `agent-river-notable-kinds` in the HUD —
 which includes `artifact`, because a record arriving is one step further out
 than a note (nobody in the session saw it) and it lands when nothing else is
 happening, which is when a log is worth scanning at all — "some
-agent is under this" on the map, and in the approval queue it coincides with
-`M-n` —
+agent is under this" on the map, and in the queue it coincides with `M-n` —
 bound all the same, because a reader arriving from either of the others
 presses it expecting the next thing that wants them, and getting it is the
-whole point of the keys being shared. In the launch queue it is **armed** —
-rule matched, gate open, prompt present, launcher configured — so `>` and
-RET agree exactly about what is actionable, which is the one property that
-motion is worth having. In shadow mode nothing is armed and it refuses, and
-that is the true answer rather than a dead key: nothing being armed is what
-shadow mode *is*.
+whole point of the keys being shared.
 
 Three rules, shared by `agent-river--scan` and `agent-river--map-scan`:
 
