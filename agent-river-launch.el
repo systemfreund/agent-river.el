@@ -384,10 +384,22 @@ candidate that is waiting, which is how one occasion becomes two agents."
 (defvar agent-river-launch--decisions nil
   "Recent decisions, newest first.  A display, not the account.")
 
+(defvar agent-river-launch--decided 0
+  "How many decisions have ever been recorded.
+
+What `:n' is taken from, so that a line of the decision log can be found
+again after the buffer is rebuilt under whoever is reading it.  Never
+reset, for `fail-runs\=' reason one subject over: a counter that starts
+again lets a new row take the name an old row was found by, and the
+reader is then put back on the wrong line by the mechanism that exists
+to stop exactly that.")
+
 (defun agent-river-launch--decide (decision candidate reason)
   "Record DECISION about CANDIDATE, because of REASON.
 CANDIDATE may be a plist or, where reading failed, a file name."
+  (setq agent-river-launch--decided (1+ agent-river-launch--decided))
   (let ((entry (list :at (current-time)
+                     :n agent-river-launch--decided
                      :decision decision
                      :reason reason
                      :key (if (stringp candidate)
@@ -1206,6 +1218,25 @@ Return non-nil if it should stay in the queue."
               (push candidate keep))))))))
     (setq agent-river-launch--queue (nreverse keep))))
 
+(defun agent-river-launch--refusal (candidate)
+  "Return why CANDIDATE cannot be launched by hand, or nil.
+
+The three things RET cannot override, in one place because two callers
+need the same answer for opposite purposes: `agent-river-launch-now\='
+signals it, and the command that asks before calling it has to know
+there is something to ask about.  Asked twice, a reader would be made to
+confirm a launch that was never going to happen -- and the second copy
+would be the one that went stale."
+  (let ((rule (agent-river-launch--rule-for candidate)))
+    (cond
+     ((null (agent-river-launch--launcher))
+      "No launcher: set `agent-river-launch-launcher' first")
+     ((null rule)
+      "No rule matches this candidate any more")
+     ((null (agent-river-launch--prompt rule candidate))
+      (format "Rule `%s' has no :prompt, so it can only ever be a dry run"
+              (plist-get rule :name))))))
+
 ;;;###autoload
 (defun agent-river-launch-now (candidate)
   "Launch CANDIDATE now, whatever its gate says.
@@ -1215,20 +1246,13 @@ a gate is this layer\='s guess about whether the moment is right, and a
 person pressing RET is not a guess.  What it cannot override is the rule
 having nothing to say -- there is no prompt to invent -- or there being no
 launcher configured at all."
-  (let ((rule (agent-river-launch--rule-for candidate)))
-    (cond
-     ((null (agent-river-launch--launcher))
-      (user-error "No launcher: set `agent-river-launch-launcher' first"))
-     ((null rule)
-      (user-error "No rule matches this candidate any more"))
-     ((null (agent-river-launch--prompt rule candidate))
-      (user-error "Rule `%s' has no :prompt, so it can only ever be a dry run"
-                  (plist-get rule :name)))
-     (t
+  (let ((refusal (agent-river-launch--refusal candidate)))
+    (when refusal (user-error "%s" refusal))
+    (let ((rule (agent-river-launch--rule-for candidate)))
       (agent-river-launch--spend rule)
       (agent-river-launch--launch rule candidate)
       (setq agent-river-launch--queue (delq candidate agent-river-launch--queue))
-      (agent-river-launch--redraw)))))
+      (agent-river-launch--redraw))))
 
 ;;;###autoload
 (defun agent-river-launch-drain ()
@@ -1320,6 +1344,19 @@ rebuilds the queue from disk."
 ;; `special-mode', and no gesture that offers an edit the next redraw would
 ;; throw away.  Not Markdown: a candidate's title comes from whoever opened
 ;; the issue, and the HUD is not Markdown for exactly that reason.
+;;
+;; The same keys as the HUD, the map and the approval queue, for the same
+;; three grains: `n'/`p' walk every line worth stopping on, `M-n'/`M-p' walk
+;; the candidates past their own detail, and `>'/`<' walk the ones RET could
+;; act on.  A candidate is a session line is a question block; its rule and
+;; claim lines are detail headings; a decision line is the log, and rides
+;; the fine grain the way a log line does in the HUD.
+;;
+;; What `>' means here is "armed": rule matched, gate open, prompt present,
+;; launcher configured -- so it and RET agree exactly about what is
+;; actionable, which is the property worth having.  In shadow mode that set
+;; is empty and the motion refuses, and that is the true answer rather than
+;; a dead key: nothing being armed is what shadow mode *is*.
 
 (defvar agent-river-launch--decision-faces
   '((launched . agent-river-prompt)
@@ -1347,25 +1384,139 @@ the theme already means by these -- no colour is chosen here.")
      ,@body
      (put-text-property start (point) 'agent-river-launch-candidate ,candidate)))
 
+(defmacro agent-river-launch--row (row kind &rest body)
+  "Run BODY, marking what it inserts as a row of KIND named ROW.
+
+Two properties and not one.  KIND is what a motion may stop on, and it is
+a property rather than a regexp over the text for the reason the other
+three buffers keep it one: the rendering is there to be changed, and a
+motion read off the rendering changes with it.  ROW is what the line
+*names*, which is how a redraw finds it again."
+  (declare (indent 2))
+  `(let ((start (point)))
+     ,@body
+     (add-text-properties start (point)
+                          (list 'agent-river-line ,kind
+                                'agent-river-launch-row ,row))))
+
 (defun agent-river-launch-candidate-at-point ()
   "Return the candidate the point is in, or nil."
   (get-text-property (point) 'agent-river-launch-candidate))
 
-(defun agent-river-queue-launch ()
-  "Launch the candidate at point now.
 
-Deliberately overrides its gate: a gate is this layer\='s guess about
-whether the moment is right, and a person pressing RET is not a guess."
-  (interactive)
-  (let ((candidate (agent-river-launch-candidate-at-point)))
-    (unless candidate
-      (user-error "No candidate here"))
-    (agent-river-launch-now candidate)
-    (message "agent-river: launched")))
+;;; Motion -- the three grains, as everywhere else
+
+(defun agent-river-launch--line-p ()
+  "Return non-nil on a line any motion may stop on."
+  (and (get-text-property (line-beginning-position) 'agent-river-line) t))
+
+(defun agent-river-launch--candidate-line-p ()
+  "Return non-nil on the first line of a candidate."
+  (eq (get-text-property (line-beginning-position) 'agent-river-line)
+      'candidate))
+
+(defun agent-river-launch--armed-line-p ()
+  "Return non-nil on a candidate RET could launch."
+  (and (get-text-property (line-beginning-position) 'agent-river-launch-armed)
+       t))
+
+(defun agent-river-launch--beginning-of-row ()
+  "Put point on the first character of the row's own text.
+A detail line is indented, and a cursor parked in column zero reads as
+though the indent were the content."
+  (goto-char (line-beginning-position))
+  (skip-chars-forward " "))
+
+(defun agent-river-launch--scan (count test)
+  "Move to the COUNTth line satisfying TEST, forward when COUNT is positive."
+  (agent-river--scan count test #'agent-river-launch--beginning-of-row))
+
+(defun agent-river-queue-next-line (&optional n)
+  "Move to the Nth next line worth stopping on."
+  (interactive "p")
+  (or (agent-river-launch--scan (or n 1) #'agent-river-launch--line-p)
+      (user-error "No further line")))
+
+(defun agent-river-queue-previous-line (&optional n)
+  "Move to the Nth previous line worth stopping on."
+  (interactive "p")
+  (agent-river-queue-next-line (- (or n 1))))
+
+(defun agent-river-queue-next-candidate (&optional n)
+  "Move to the Nth next candidate, past this one's own detail."
+  (interactive "p")
+  (or (agent-river-launch--scan (or n 1) #'agent-river-launch--candidate-line-p)
+      (user-error "No further candidate")))
+
+(defun agent-river-queue-previous-candidate (&optional n)
+  "Move to the Nth previous candidate."
+  (interactive "p")
+  (agent-river-queue-next-candidate (- (or n 1))))
+
+(defun agent-river-queue-next-armed (&optional n)
+  "Move to the Nth next candidate that is waiting for RET."
+  (interactive "p")
+  (or (agent-river-launch--scan (or n 1) #'agent-river-launch--armed-line-p)
+      (user-error "Nothing is waiting for you")))
+
+(defun agent-river-queue-previous-armed (&optional n)
+  "Move to the Nth previous candidate that is waiting for RET."
+  (interactive "p")
+  (agent-river-queue-next-armed (- (or n 1))))
+
+
+;;; Finding a line again after the buffer is rebuilt
+
+(defun agent-river-launch--here ()
+  "Return what the line at point names, for a redraw to find again.
+A cons of the row's name and its kind, or nil where it names nothing."
+  (let ((row (get-text-property (line-beginning-position)
+                                'agent-river-launch-row)))
+    (when row
+      (cons row (get-text-property (line-beginning-position)
+                                   'agent-river-line)))))
+
+(defun agent-river-launch--find (row kind)
+  "Return the position of the line naming ROW as KIND, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (let (found)
+      (while (and (not found) (not (eobp)))
+        (if (and (equal row (get-text-property (line-beginning-position)
+                                               'agent-river-launch-row))
+                 (eq kind (get-text-property (line-beginning-position)
+                                             'agent-river-line)))
+            (setq found (line-beginning-position))
+          (forward-line 1)))
+      found)))
+
+(defun agent-river-launch--goto (here)
+  "Put point back on the line HERE named, or on the first line there is.
+
+By name rather than by position, the way the HUD\='s block, the map\='s
+listing and the approval queue\='s rows all do it.  The buffer is rebuilt
+on every intake and every drain, and a candidate that left from above
+would otherwise slide a different candidate under a finger already on
+its way down to RET -- which in this buffer does not answer a question,
+it starts a process.
+
+A candidate whose detail line has gone -- it stopped being held, so
+there is no longer a reason to show -- keeps the reader on the candidate
+itself rather than sending them to the top."
+  (let ((pos (and here (or (agent-river-launch--find (car here) (cdr here))
+                           (agent-river-launch--find (car here) 'candidate)))))
+    (goto-char (or pos (point-min)))
+    (unless pos
+      (unless (agent-river-launch--line-p)
+        (agent-river-launch--scan 1 #'agent-river-launch--line-p)))
+    (agent-river-launch--beginning-of-row)))
 
 (defun agent-river-launch--draw ()
   "Render the queue and the recent decisions into the current buffer."
-  (let ((inhibit-read-only t))
+  (let ((inhibit-read-only t)
+        ;; Asked before the erase, because the erase takes the properties
+        ;; the answer is read off with it.
+        (here (agent-river-launch--here)))
     (erase-buffer)
     (insert (propertize (format "%d queued" (length agent-river-launch--queue))
                         'face 'agent-river-session)
@@ -1394,63 +1545,76 @@ whether the moment is right, and a person pressing RET is not a guess."
        ;; The whole block is marked, not just its first line: RET has to work
        ;; from wherever the eye stopped, and a candidate is three lines deep.
        (agent-river-launch--with-candidate candidate
-        (insert (propertize (agent-river-launch--when
-                             (plist-get candidate :at))
-                            'face 'agent-river-time)
-                " "
-                (propertize (plist-get candidate :source)
-                            'face 'agent-river-session)
-                "  "
-                (propertize (or (plist-get candidate :title) "")
-                            'face 'agent-river-act)
-                (let ((actor (plist-get candidate :actor)))
-                  (if actor (propertize (format "  <%s>" actor)
-                                        'face 'agent-river-time)
-                    ""))
-                "\n")
-        ;; Why it is still here rather than gone: the rule it is waiting under
-        ;; and what that rule is waiting for.  A queue that says only what is
-        ;; in it leaves the one question a reader has -- why has this not
-        ;; happened -- to be answered from the decision log by hand.
-        (let ((rule (agent-river-launch--rule-for candidate))
-              (said (plist-get candidate :said)))
-          (insert (propertize (format "         %s%s\n"
-                                      (if rule
-                                          (format "rule %s" (plist-get rule :name))
-                                        "no rule")
-                                      (if said
-                                          (format " -- %s: %s"
-                                                  (car said) (cdr said))
-                                        ""))
-                              'face 'agent-river-think)))
-        ;; The claim last and marked as a quotation, for the reason the
-        ;; Markdown export puts `intent' last and marks it twice: it is the
-        ;; subject talking about itself, and a reader who takes it for one of
-        ;; the measurements above has no way back to the distinction.
-        (let ((claim (plist-get candidate :claim)))
-          (when claim
-            (insert (propertize (format "         \"%s\"\n"
-                                        (agent-river--clip
-                                         (agent-river--squish claim) 60))
-                                'face 'agent-river-intent)))))))
+        (let ((key (plist-get candidate :key))
+              (said (plist-get candidate :said))
+              (from (point)))
+          (agent-river-launch--row key 'candidate
+            (insert (propertize (agent-river-launch--when
+                                 (plist-get candidate :at))
+                                'face 'agent-river-time)
+                    " "
+                    (propertize (plist-get candidate :source)
+                                'face 'agent-river-session)
+                    "  "
+                    (propertize (or (plist-get candidate :title) "")
+                                'face 'agent-river-act)
+                    (let ((actor (plist-get candidate :actor)))
+                      (if actor (propertize (format "  <%s>" actor)
+                                            'face 'agent-river-time)
+                        ""))
+                    "\n"))
+          ;; Read off the decision the drain last recorded rather than asked
+          ;; again here: `>' and RET have to agree about what is actionable,
+          ;; and asking twice is two answers waiting to differ.
+          (when (eq (car-safe said) 'armed)
+            (put-text-property from (point) 'agent-river-launch-armed t))
+          ;; Why it is still here rather than gone: the rule it is waiting
+          ;; under and what that rule is waiting for.  A queue that says only
+          ;; what is in it leaves the one question a reader has -- why has
+          ;; this not happened -- to be answered from the decision log by
+          ;; hand.
+          (let ((rule (agent-river-launch--rule-for candidate)))
+            (agent-river-launch--row key 'detail
+              (insert (propertize (format "         %s%s\n"
+                                          (if rule
+                                              (format "rule %s"
+                                                      (plist-get rule :name))
+                                            "no rule")
+                                          (if said
+                                              (format " -- %s: %s"
+                                                      (car said) (cdr said))
+                                            ""))
+                                  'face 'agent-river-think))))
+          ;; The claim last and marked as a quotation, for the reason the
+          ;; Markdown export puts `intent' last and marks it twice: it is the
+          ;; subject talking about itself, and a reader who takes it for one
+          ;; of the measurements above has no way back to the distinction.
+          (let ((claim (plist-get candidate :claim)))
+            (when claim
+              (agent-river-launch--row key 'detail
+                (insert (propertize (format "         \"%s\"\n"
+                                            (agent-river--clip
+                                             (agent-river--squish claim) 60))
+                                    'face 'agent-river-intent)))))))))
     (insert (propertize "\ndecisions\n" 'face 'agent-river-prompt))
     (if (null agent-river-launch--decisions)
         (insert (propertize "  none yet\n" 'face 'agent-river-stale))
       (dolist (entry agent-river-launch--decisions)
-        (insert (propertize (agent-river-launch--when (plist-get entry :at))
-                            'face 'agent-river-time)
-                " "
-                (propertize (format "%-10s" (plist-get entry :decision))
-                            'face (or (alist-get (plist-get entry :decision)
-                                                 agent-river-launch--decision-faces)
-                                      'default))
-                (propertize (or (plist-get entry :title)
-                                (plist-get entry :key) "")
-                            'face 'agent-river-think)
-                (propertize (format "  (%s)" (plist-get entry :reason))
-                            'face 'agent-river-time)
-                "\n")))
-    (goto-char (point-min))))
+        (agent-river-launch--row (format "d%s" (plist-get entry :n)) 'decision
+          (insert (propertize (agent-river-launch--when (plist-get entry :at))
+                              'face 'agent-river-time)
+                  " "
+                  (propertize (format "%-10s" (plist-get entry :decision))
+                              'face (or (alist-get (plist-get entry :decision)
+                                                   agent-river-launch--decision-faces)
+                                        'default))
+                  (propertize (or (plist-get entry :title)
+                                  (plist-get entry :key) "")
+                              'face 'agent-river-think)
+                  (propertize (format "  (%s)" (plist-get entry :reason))
+                              'face 'agent-river-time)
+                  "\n"))))
+    (agent-river-launch--goto here)))
 
 (defun agent-river-launch--redraw ()
   "Redraw the queue buffer if it is open.
@@ -1461,9 +1625,41 @@ rebuild-per-tool-call problem here to debounce away."
   (let ((buffer (get-buffer agent-river-launch-queue-buffer-name)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (let ((line (line-number-at-pos)))
-          (agent-river-launch--draw)
-          (forward-line (1- line)))))))
+        (agent-river-launch--draw)))))
+
+(defun agent-river-queue-launch ()
+  "Start the candidate at point now, after asking.
+
+Deliberately overrides its gate: a gate is this layer\='s guess about
+whether the moment is right, and a person pressing RET is not a guess.
+
+And it asks, where the approval queue spends a prompt on the two
+`_always\=' answers only.  That reason does not carry over: there the
+other answers each decide a single tool call, here every RET starts a
+*process* -- the most expensive thing this package does, and the one
+gesture with nothing on the far side that can take it back -- so the
+second keystroke is earned every time rather than for a standing kind.
+`y-or-n-p\=' and not `yes-or-no-p\=', for that buffer\='s reason: a second
+gesture is a confirmation, spelling out \"yes\" is a third.
+
+What the question names is what is about to run, which is the half a row
+cannot show."
+  (interactive)
+  (let ((candidate (agent-river-launch-candidate-at-point)))
+    (unless candidate
+      (user-error "No candidate here"))
+    (let ((refusal (agent-river-launch--refusal candidate)))
+      (when refusal (user-error "%s" refusal)))
+    (if (y-or-n-p (format "Start %s on %s? "
+                          (plist-get (agent-river-launch--launcher) :name)
+                          (agent-river--clip
+                           (agent-river--squish
+                            (or (plist-get candidate :title)
+                                (plist-get candidate :key)))
+                           50)))
+        (progn (agent-river-launch-now candidate)
+               (message "agent-river: launched"))
+      (message "agent-river: left in the queue"))))
 
 (defun agent-river-queue-refresh ()
   "Take in anything waiting, then redraw."
@@ -1475,10 +1671,25 @@ rebuild-per-tool-call problem here to debounce away."
   "Major mode for the launch queue and its decisions."
   (setq-local truncate-lines t)
   (setq-local header-line-format nil)
+  ;; On, like the map and the approval queue and unlike the HUD: this buffer
+  ;; pins its point nowhere, so wherever point is is where a reader put it,
+  ;; and the highlight is what says which candidate RET would start.
+  (when (fboundp 'hl-line-mode) (hl-line-mode 1))
   (buffer-disable-undo))
 
-(define-key agent-river-queue-mode-map (kbd "g") #'agent-river-queue-refresh)
-(define-key agent-river-queue-mode-map (kbd "RET") #'agent-river-queue-launch)
+(let ((map agent-river-queue-mode-map))
+  (define-key map (kbd "g") #'agent-river-queue-refresh)
+  (define-key map (kbd "RET") #'agent-river-queue-launch)
+  (define-key map (kbd "n") #'agent-river-queue-next-line)
+  (define-key map (kbd "p") #'agent-river-queue-previous-line)
+  (define-key map (kbd "SPC") #'agent-river-queue-next-line)
+  (define-key map (kbd "DEL") #'agent-river-queue-previous-line)
+  (define-key map [remap next-line] #'agent-river-queue-next-line)
+  (define-key map [remap previous-line] #'agent-river-queue-previous-line)
+  (define-key map (kbd "M-n") #'agent-river-queue-next-candidate)
+  (define-key map (kbd "M-p") #'agent-river-queue-previous-candidate)
+  (define-key map (kbd ">") #'agent-river-queue-next-armed)
+  (define-key map (kbd "<") #'agent-river-queue-previous-armed))
 
 ;;;###autoload
 (defun agent-river-queue ()

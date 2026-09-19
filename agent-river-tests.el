@@ -7276,5 +7276,144 @@ headless launcher rung 4 wants could not be dropped in beside it."
       (should-not (string-match-p "^> .*Handing off" prompt))
       (should (string-match-p "^## Handing off" prompt)))))
 
+;;; The queue, looked at
+;;
+;; A view of a store written elsewhere, rebuilt whole on every intake and
+;; every drain -- so what is tested here is what survives the rebuild, and
+;; what the three motions may stop on.  Geometry is not: the derivation is
+;; ours and the rendering is there to be changed.
+
+(defmacro agent-river-launch-test--with-view (&rest body)
+  "Draw the queue into a buffer of its own and run BODY inside it."
+  (declare (indent 0))
+  `(let ((agent-river-launch-queue-buffer-name "*agent-river-test-queue*"))
+     (unwind-protect
+         (with-current-buffer (get-buffer-create
+                               agent-river-launch-queue-buffer-name)
+           (agent-river-queue-mode)
+           (agent-river-launch--draw)
+           ,@body)
+       (when-let* ((buffer (get-buffer "*agent-river-test-queue*")))
+         (kill-buffer buffer)))))
+
+(defun agent-river-launch-test--rows (test)
+  "Return the lines of the current buffer TEST stops on, top down."
+  (goto-char (point-min))
+  (let (seen)
+    (when (funcall test)
+      (push (buffer-substring-no-properties (line-beginning-position)
+                                            (line-end-position))
+            seen))
+    (while (agent-river-launch--scan 1 test)
+      (push (buffer-substring-no-properties (line-beginning-position)
+                                            (line-end-position))
+            seen))
+    (nreverse seen)))
+
+(ert-deftest agent-river-launch-test-a-redraw-does-not-move-a-candidate-under-a-finger ()
+  ;; Found by position, a candidate that left from above would slide a
+  ;; different candidate under a finger already on its way down to RET --
+  ;; which in this buffer does not answer a question, it starts a process.
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--deliver
+     '((source . "river") (id . "1") (title . "one")))
+    (agent-river-launch-test--deliver
+     '((source . "river") (id . "2") (title . "two")))
+    (agent-river-launch-scan)
+    (should (= 2 (length agent-river-launch--queue)))
+    (agent-river-launch-test--with-view
+      (goto-char (point-min))
+      (search-forward "two")
+      (let ((was (agent-river-launch--here)))
+        (should (equal was '("river/2" . candidate)))
+        ;; The other candidate is decided elsewhere and the view redraws.
+        (setq agent-river-launch--queue
+              (seq-remove (lambda (c) (equal (plist-get c :key) "river/1"))
+                          agent-river-launch--queue))
+        (agent-river-launch--draw)
+        (should (equal (agent-river-launch--here) was))
+        (should (string-match-p "two" (buffer-substring-no-properties
+                                       (line-beginning-position)
+                                       (line-end-position))))))))
+
+(ert-deftest agent-river-launch-test-queue-motion-has-the-same-three-grains ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher (nil nil)
+      (let ((agent-river-launch-rules
+             (list (list :name "hold" :match '((:key . "river/1"))
+                         :gate (lambda (_c) "not now") :prompt "go")
+                   (list :name "arm" :match '((:key . "river/2"))
+                         :prompt "go"))))
+        (agent-river-launch-test--deliver
+         '((source . "river") (id . "1") (title . "one")))
+        (agent-river-launch-test--deliver
+         '((source . "river") (id . "2") (title . "two")))
+        (agent-river-launch-scan)
+        (agent-river-launch-test--with-view
+          (let ((fine (agent-river-launch-test--rows
+                       #'agent-river-launch--line-p))
+                (coarse (agent-river-launch-test--rows
+                         #'agent-river-launch--candidate-line-p))
+                (armed (agent-river-launch-test--rows
+                        #'agent-river-launch--armed-line-p)))
+            ;; Two candidates, a rule line under each, and the four
+            ;; decisions they have been through: taken in twice, then held
+            ;; and armed.  The header and the switch line are not stopped
+            ;; on -- they name nothing.
+            (should (= (length fine) 8))
+            (should (= (length coarse) 2))
+            ;; And the attention grain is the one RET could act on, which is
+            ;; the same question RET itself asks.
+            (should (= (length armed) 1))
+            (should (string-match-p "two" (car armed))))
+          ;; A motion with nowhere to go refuses and leaves point where it
+          ;; was, rather than landing near: the next RET would otherwise
+          ;; start something the eye never chose.
+          (goto-char (point-min))
+          (agent-river-queue-next-armed)
+          (let ((was (point)))
+            (should-error (agent-river-queue-next-armed) :type 'user-error)
+            (should (= was (point)))))))))
+
+(ert-deftest agent-river-launch-test-ret-asks-before-starting-a-process ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher (nil nil)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule :prompt "go"))))
+        (agent-river-launch-test--deliver
+         '((source . "river") (id . "1") (title . "one")))
+        (agent-river-launch-scan)
+        (agent-river-launch-test--with-view
+          (goto-char (point-min))
+          (agent-river-queue-next-armed)
+          ;; Declined: nothing is started and the candidate keeps its place.
+          ;; Every RET here starts a process, which is the one gesture with
+          ;; nothing on the far side that can take it back.
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+            (agent-river-queue-launch))
+          (should (null agent-river-launch-test--started))
+          (should (= 1 (length agent-river-launch--queue)))
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+            (agent-river-queue-launch))
+          (should (equal '(("river/1" . "go"))
+                         agent-river-launch-test--started)))))))
+
+(ert-deftest agent-river-launch-test-ret-does-not-ask-what-it-cannot-do ()
+  ;; Shadow mode: there is no launcher, so the refusal comes first and the
+  ;; reader is never asked to confirm a launch that was never going to
+  ;; happen.  One account of the three things RET cannot override, read
+  ;; here and signalled by `agent-river-launch-now'.
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+    (agent-river-launch-scan)
+    (agent-river-launch-test--with-view
+      (goto-char (point-min))
+      (agent-river-queue-next-candidate)
+      (let ((asked nil))
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (&rest _) (setq asked t))))
+          (should-error (agent-river-queue-launch) :type 'user-error))
+        (should-not asked)))))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here

@@ -31,7 +31,7 @@ is the bridge, and there is one example hook wiring per host —
 ## Commands
 
 ```sh
-# Full suite (446 tests). -L . is required: the tests require all three .el files.
+# Full suite (451 tests). -L . is required: the tests require all three .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -954,24 +954,44 @@ process or a no-op. What is load-bearing already:
   docstring said "subagents count" for as long as they had stopped: a number
   whose meaning moves under a caller is worth a line saying what it now
   means, which it has.
+- **The queue is a view like the others, and answers to their rules**
+  (`agent-river-launch--goto`, `agent-river-launch--row`). Its lines are
+  found again by what they *name* after every rebuild, which is the third
+  time this package has paid for that — and the sharpest, since a slid line
+  under RET here does not answer a question, it starts a process. It carries
+  the three motions below. And **RET asks**, which the approval queue spends
+  a prompt on only for the two `_always` answers: there the other answers
+  each decide one tool call, here every RET is the expensive kind. The three
+  refusals it cannot override live in one place (`--refusal`), read by the
+  command before it asks and signalled by `agent-river-launch-now`, or a
+  reader would be made to confirm a launch that was never going to happen.
 
 ### One set of motions, every buffer
 
-The HUD, the map and the approval queue take the same keys for the same three
+The HUD, the map, the approval queue and the launch queue take the same keys
+for the same three
 grains, because they are views of one state and learning each separately buys
 nothing: `n`/`p` (plus `SPC`/`DEL` and the remapped arrows) walk every line
 worth stopping on, `M-n`/`M-p` walk the coarse structure, `>`/`<` walk the
-lines that want attention. A session line is a map entry is a queue heading; a
+lines that want attention. A session line is a map entry is a question
+heading is a candidate; a
 detail heading is a map file line is an answer row; a log line has no analogue
-and rides the fine grain. The map's *section* headings have no analogue in
+and rides the fine grain — which is where the launch queue's *decision* lines
+sit, being its log. The map's *section* headings have no analogue in
 the block, which is flat. `>` is `agent-river-notable-kinds` in the HUD —
 which includes `artifact`, because a record arriving is one step further out
 than a note (nobody in the session saw it) and it lands when nothing else is
 happening, which is when a log is worth scanning at all — "some
-agent is under this" on the map, and in the queue it coincides with `M-n` —
+agent is under this" on the map, and in the approval queue it coincides with
+`M-n` —
 bound all the same, because a reader arriving from either of the others
 presses it expecting the next thing that wants them, and getting it is the
-whole point of the keys being shared.
+whole point of the keys being shared. In the launch queue it is **armed** —
+rule matched, gate open, prompt present, launcher configured — so `>` and
+RET agree exactly about what is actionable, which is the one property that
+motion is worth having. In shadow mode nothing is armed and it refuses, and
+that is the true answer rather than a dead key: nothing being armed is what
+shadow mode *is*.
 
 Three rules, shared by `agent-river--scan` and `agent-river--map-scan`:
 

@@ -956,6 +956,18 @@ It is deliberately **not** in the registry. The fold's docstring promises a
 state can be rebuilt by replaying its events, and a candidate that has not
 started is none of its events.
 
+Being a view, it takes the keys the other views take: `n`/`p` walk every
+line, `M-n`/`M-p` walk the candidates past their own detail, `>`/`<` walk
+the ones `RET` could start. And being rebuilt on every intake and every
+drain, it finds its lines again by what they *name* rather than by where
+they were — a candidate that left from above would otherwise slide a
+different one under a finger already on its way down, and here that finger
+does not answer a question, it starts a process.
+
+Which is also why `RET` asks first. The approval queue spends a prompt only
+on the two `_always` answers, because the rest decide a single tool call;
+in this buffer every `RET` is the expensive kind.
+
 ### Refusals are the measurement
 
 The path from *watch it decide* to *let it run overnight* is the whole
