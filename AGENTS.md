@@ -35,7 +35,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (437 tests). -L . is required: the tests require all four .el files.
+# Full suite (441 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1084,16 +1084,22 @@ agent-shell's: `:context-used` says how full the window is, `:cost-amount` what
 has been spent, and they sit in one alist the sampler reads once per event.
 
 **Which of them the graph is made of was decided by measurement, not by
-preference.** The token counts come back on the *response* to `session/prompt`,
-so they exist once a turn by construction. The cost rides the `usage_update`
-notification — a channel that could carry it at any moment — and is changed only
-at the end of a turn all the same: measured on 2026-09-19, four readings over
-two and a half minutes, the cost and the token counts moving together exactly
-once, on the turn boundary, while the context fill climbed through all four. A
-graph of either is a graph with one point per turn, so a twenty-minute turn
-lands as a single spike in the bar it ended in and says the work happened when
-it was *reported*. The context has seconds of resolution, so the bars are the
-context: a bar holds how many tokens the window grew by while it ran.
+preference — and what differs is not the channel.** Both come off the one
+`usage_update` notification, written by one function
+(`agent-shell--update-usage-from-notification`); what differs is which of them
+the server bothers to *move*. Measured on 2026-09-19, four readings over two and
+a half minutes: the context fill climbed through all four while the cost stood
+still and then moved exactly once, on the turn boundary. So a graph of cost is a
+graph with one point per turn, and a twenty-minute turn lands as a single spike
+in the bar it ended in, saying the work happened when it was *reported*. The
+context has seconds of resolution, so the bars are the context: a bar holds how
+many tokens the window grew by while it ran.
+
+The third figure is not a way out, which is worth writing down because the shape
+of it invites the question: `:total-tokens` and the input/output counts beside it
+come back on the *response* to `session/prompt` (`agent-shell--save-usage`), so
+they exist once a turn by construction rather than by a server's habit. The graph
+never reads them.
 
 That is also what retired the open question this section used to carry — whether
 to spread a turn's figure back across the bars it ran through. Nothing needs
@@ -1104,6 +1110,25 @@ spreading now, and the invention that would have been is not needed either.
   one spike, and the session Emacs has just adopted — reloaded into, or started
   watching mid-task — is exactly the one that would draw the biggest. The first
   reading establishes `:since` and nothing else.
+- **A zero is agent-shell's starting value, not a reading** (`agent-river--usage-read`).
+  `:context-used` is born `0` and `:cost-amount` `0.0`, so by type alone every
+  session looks like it is reporting both from its first event. Taken at face
+  value, a server that reports no context has the graph draw a full row of
+  single dots — *the agent is here and nothing is arriving*, the strongest
+  statement this view can make — about a session that may be working hard; and a
+  server that reports no cost puts an unnamed `0.00` in the totals of the one
+  command whose whole subject is money, which is neither named nor unnamed. So a
+  context counts only when positive (a session that has been prompted holds
+  thousands of tokens before the agent says a word), and a cost when it is
+  positive **or** a currency was named beside it — the currency being the
+  evidence that the figure is the server's rather than the value the state was
+  born with, which is also what leaves a genuinely free run its zero.
+- **An entry is not a meter** (`:since`, read by `agent-river--usage-graph` and
+  `agent-river--usage-measured-p`). `:since` is set by the first *context*
+  reading rather than by the first sample of anything, so a session on record
+  for its cost alone has an entry and no graph — and no column reserved across
+  the block for one that nothing can ever fill, which is the blank half of the
+  same mistake.
 - **The two meters are kept under opposite rules, and the asymmetry is the
   point** (`agent-river--usage-cost`). A context that falls has been compacted,
   which is ordinary and true, so the reading is taken as it comes and growth is
@@ -1197,7 +1222,10 @@ spreading now, and the invention that would have been is not needed either.
   so it carries the currency agent-shell named and sums **per currency**: a table
   of bare numbers added into one headline is how two currencies become a total
   true of neither. A later reading that carries no currency does not unname the
-  money, because only the notification carrying a cost carries one.
+  money, because only the notification carrying a cost carries one. And the word
+  *total* leads the sums rather than trailing them — after a list of sessions it
+  attached to whichever currency happened to be last, and read as that one being
+  the total of the others.
 - **The total is a query, not a line** (`agent-river-spend`). A total across
   sessions belongs to no session, so it would need a line or a header of its
   own, and this view has spent one of those before and taken it back. The totals

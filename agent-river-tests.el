@@ -667,6 +667,75 @@
     (agent-river--usage-record "s1" '(:used 200 :cost 2.0))
     (should (equal "USD" (plist-get (gethash "s1" agent-river--usage) :currency)))))
 
+(defmacro agent-river-test--with-meters (usage &rest body)
+  "Run BODY with one fake agent-shell buffer whose session reports USAGE."
+  (declare (indent 1))
+  `(agent-river-test--with-usage
+     (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
+       (with-current-buffer (agent-river--shell-buffer "s1")
+         (setf (alist-get :usage agent-shell--state) ,usage))
+       (agent-river-test--usage-session "s1")
+       ,@body)))
+
+(ert-deftest agent-river-test-a-context-nobody-reports-is-not-an-idle-one ()
+  ;; agent-shell starts `:context-used' at 0, so a server that never reports
+  ;; one leaves it there for the session's whole life.  Read as a
+  ;; measurement it is the strongest thing this graph can say -- a full row
+  ;; of single dots, the agent here and nothing arriving -- about a session
+  ;; that may be working hard.  A session that has been prompted holds
+  ;; thousands of tokens before the agent says a word, so zero is nobody
+  ;; saying rather than nothing happening.
+  (agent-river-test--with-meters
+      (list (cons :context-used 0) (cons :context-size 0)
+            (cons :cost-amount 4.0) (cons :cost-currency "USD"))
+    (should (null (plist-get (agent-river--usage-read "s1") :used)))
+    (agent-river--usage-sample "s1")
+    ;; The cost beside it is still recorded, so the entry exists -- and an
+    ;; entry is not a meter: no `:since', no graph, and no column reserved
+    ;; across the block for one that nothing can ever fill.
+    (should (gethash "s1" agent-river--usage))
+    (should (null (plist-get (gethash "s1" agent-river--usage) :since)))
+    (should (null (agent-river--usage-graph "s1" 1000)))
+    (should (null (agent-river--usage-column "s1")))))
+
+(ert-deftest agent-river-test-a-context-that-is-reported-draws ()
+  (agent-river-test--with-meters
+      (list (cons :context-used 5000) (cons :context-size 200000)
+            (cons :cost-amount 0.0) (cons :cost-currency nil))
+    (agent-river--usage-sample "s1")
+    ;; The other side of the rule above: a reported context is a meter from
+    ;; the first reading, whatever the cost beside it is doing.
+    (should (plist-get (gethash "s1" agent-river--usage) :since))
+    (should (agent-river--usage-column "s1"))))
+
+(ert-deftest agent-river-test-a-cost-nobody-reports-is-not-money ()
+  ;; `:cost-amount' is born 0.0 and `:cost-currency' nil, so every
+  ;; agent-shell session looks like a reading by type alone.  Printed, that
+  ;; is an unnamed zero standing in the totals of the one command whose
+  ;; whole subject is the money -- neither named nor unnamed, which is the
+  ;; rule this section keeps.
+  (agent-river-test--with-meters
+      (list (cons :context-used 5000) (cons :cost-amount 0.0)
+            (cons :cost-currency nil))
+    (should (null (plist-get (agent-river--usage-read "s1") :cost)))
+    (agent-river--usage-sample "s1")
+    (let ((report (agent-river-spend)))
+      (should (null (plist-get report :sessions)))
+      (should (null (plist-get report :totals))))))
+
+(ert-deftest agent-river-test-a-run-reported-as-free-keeps-its-zero ()
+  ;; The currency is the evidence that the figure is the server's rather
+  ;; than the value the state was born with, so a zero named in a currency
+  ;; is a free run and is reported as one.
+  (agent-river-test--with-meters
+      (list (cons :context-used 5000) (cons :cost-amount 0.0)
+            (cons :cost-currency "USD"))
+    (agent-river--usage-sample "s1")
+    (let ((report (agent-river-spend)))
+      (should (= 1 (length (plist-get report :sessions))))
+      (should (= 0.0 (alist-get "USD" (plist-get report :totals)
+                                nil nil #'equal))))))
+
 (ert-deftest agent-river-test-the-session-line-carries-the-token-graph ()
   (agent-river-test--with-block
     (let ((agent-river--usage (make-hash-table :test 'equal)))

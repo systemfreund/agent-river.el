@@ -3993,19 +3993,23 @@ it back off again, unless it was already on when this was opened."
 ;;
 ;; agent-shell keeps two figures for every session it hosts: how full the
 ;; context window is (`:context-used') and what the session has cost
-;; (`:cost-amount').  They arrive by different roads, and that is what
-;; decides which of them the graph is made of.
+;; (`:cost-amount').  They arrive together, by one road -- both are written
+;; by `agent-shell--update-usage-from-notification' off the one
+;; `usage_update' notification -- and what decides which of them the graph
+;; is made of is not the road but which of them the server bothers to
+;; *move*.
 ;;
-;; The token counts come back on the *response* to `session/prompt', so
-;; they exist once a turn by construction.  The cost rides the
-;; `usage_update' notification, which could carry it at any time, and is
-;; changed only at the end of a turn all the same -- measured on
-;; 2026-09-19: four readings over two and a half minutes, the cost and the
-;; token counts moving together exactly once, on the turn boundary, while
-;; the context fill climbed through all four.  A graph of either is a graph
-;; with one point per turn, and a twenty-minute turn lands as a single
-;; spike in the bar it ended in, saying the work happened at the moment it
-;; was reported.
+;; Measured on 2026-09-19: four readings over two and a half minutes, the
+;; context fill climbing through all four while the cost stood still and
+;; then moved exactly once, on the turn boundary.  So a graph of cost is a
+;; graph with one point per turn, and a twenty-minute turn lands as a
+;; single spike in the bar it ended in, saying the work happened at the
+;; moment it was reported.
+;;
+;; There is a third figure and it is not a way out: `:total-tokens' and the
+;; input/output counts beside it come back on the *response* to
+;; `session/prompt' (`agent-shell--save-usage'), so they exist once a turn
+;; by construction rather than by habit.  The graph never reads them.
 ;;
 ;; So the bars are the context: what a bar holds is how many tokens the
 ;; window grew by while that bar ran, which is the work arriving as it
@@ -4090,8 +4094,10 @@ than coloured, so how faint is the theme\\='s answer and not ours.")
 `:used' is the last context reading, taken as it comes because a context
 that falls has been compacted.  `:cost' is the high-water cost and
 `:currency' what that is denominated in, which together are the whole of
-what `agent-river-spend' answers with.  `:since' is when this session was
-first sampled.  `:bars' is an alist of BAR -> TOKENS keyed by
+what `agent-river-spend' answers with.  `:since' is when the context was
+first *read*, which is not the same as when the session was first sampled
+and is what an entry without a graph is missing.  `:bars' is an alist of
+BAR -> TOKENS keyed by
 `agent-river--usage-bar', holding only the bars the window grew in: a bar
 inside the session\\='s life with no entry is one nothing arrived in, and
 that is a different thing from a bar before the session was ever seen.")
@@ -4118,19 +4124,33 @@ still not allowed to take the HUD dark."
 
 One buffer read for both meters, since they live in one alist and are
 wanted on the same event: `:used' is the context fill, `:cost' what has
-been spent, `:currency' what that is in.  Any of the three may be missing
-and the whole may be nil, which is the ordinary answer rather than a
+been spent, `:currency' what that is in.
+
+Both are read past agent-shell\='s own starting values, which are 0 and 0.0
+and are indistinguishable from a reading by their type alone.  A context
+of zero is not a session using nothing -- one that has been prompted holds
+thousands of tokens before the agent says a word -- it is a server that
+does not report one, and taken as a measurement it would have the graph
+draw a full row of idle bars for a session that may be working hard.  A
+cost counts as reported when it is positive, or when a currency was named
+beside it: that is the evidence the figure is the server\='s rather than the
+value the state was born with, and it leaves a run that is genuinely
+reported as free with its zero while keeping an unreported one out of the
+money in `agent-river-spend'.
+
+Nil, and nil fields within it, are the ordinary answer rather than a
 failure -- a session nobody here hosts has no meter to read, and one whose
 ACP server reports no cost never will have."
   (when-let* ((buffer (agent-river--shell-buffer session))
               (state (buffer-local-value 'agent-shell--state buffer))
               (usage (alist-get :usage state)))
-    (let ((used (alist-get :context-used usage))
-          (cost (alist-get :cost-amount usage))
-          (currency (alist-get :cost-currency usage)))
-      (list :used (and (numberp used) used)
-            :cost (and (numberp cost) cost)
-            :currency (and (stringp currency) currency)))))
+    (let* ((used (alist-get :context-used usage))
+           (cost (alist-get :cost-amount usage))
+           (currency (alist-get :cost-currency usage))
+           (named (and (stringp currency) currency)))
+      (list :used (and (numberp used) (> used 0) used)
+            :cost (and (numberp cost) (or (> cost 0) named) cost)
+            :currency named))))
 
 (defun agent-river--usage-record (session reading &optional now)
   "Record READING as what SESSION was using as of NOW.
@@ -4142,6 +4162,11 @@ draw its whole context as one spike at the moment we first looked, which
 is the one shape this view must never invent.  What the first reading does
 establish is `:since', which is what tells a bar nothing arrived in from a
 bar before there was anything to arrive.
+
+`:since' is set by the first *context* reading and not by the first sample
+of anything, which makes it the graph\='s own start: a session whose server
+reports no context never gets one, and so is left without a graph rather
+than with a row of bars asserting that nothing arrived.
 
 A drop in the context is a compaction and is taken as it comes: it adds
 nothing to the bar, and the growth after it is measured from the new
@@ -4165,7 +4190,7 @@ floor.  A drop in the cost is not taken as it comes; see
                                                   (plist-get reading :cost))
                    :currency (or (plist-get reading :currency)
                                  (plist-get entry :currency))
-                   :since (or (plist-get entry :since) at)
+                   :since (or (plist-get entry :since) (and used at))
                    :bars bars)
              agent-river--usage)
     (agent-river--usage-trim at)))
@@ -4305,12 +4330,17 @@ this session has never been sampled, which is what leaves a hooks-only
 session with a blank column rather than a made-up one."
   (when-let* ((width agent-river-tokens-width)
               ((> width 0))
-              (entry (gethash session agent-river--usage)))
+              (entry (gethash session agent-river--usage))
+              ;; An entry is not yet a meter.  A session whose server
+              ;; reports a cost and no context has one of these with no
+              ;; `:since', and drawing it would answer "nothing arrived"
+              ;; where the truth is that nobody said.
+              (since (plist-get entry :since)))
     (let* ((window (* 2 width))
            (bar (agent-river--usage-bar now))
-           ;; Two floors, and both mean "we cannot say": before the session
+           ;; Two floors, and both mean "we cannot say": before the context
            ;; was first read, and before the table stopped keeping bars.
-           (first (max (agent-river--usage-bar (plist-get entry :since))
+           (first (max (agent-river--usage-bar since)
                        (- bar agent-river--usage-horizon -1)))
            (bars (plist-get entry :bars))
            (heights nil))
@@ -4335,11 +4365,17 @@ The question the column is reserved on, and pointedly not \"has anything
 ever been sampled\": an entry outlives its session on purpose, so that
 `agent-river-spend' can answer for one whose buffer is gone, and asking
 the table whether it is empty would keep the column on every line of an
-Emacs whose agent-shell sessions all ended hours ago."
+Emacs whose agent-shell sessions all ended hours ago.
+
+`:since' is asked for the same reason one grain down: an entry made for a
+cost alone has no graph in it, and reserving room across the block for a
+column nothing can ever fill is the blank half of that mistake."
   (catch 'measured
-    (maphash (lambda (session _entry)
+    (maphash (lambda (session entry)
                (when-let* ((state (gethash session agent-river-registry)))
-                 (when (agent-river--active-p state) (throw 'measured t))))
+                 (when (and (plist-get entry :since)
+                            (agent-river--active-p state))
+                   (throw 'measured t))))
              agent-river--usage)
     nil))
 
@@ -4408,29 +4444,39 @@ own, and this view has spent one of those before and taken it back."
   (interactive)
   (let (rows totals)
     (maphash (lambda (session entry)
-               (let* ((cost (or (plist-get entry :cost) 0))
-                      (currency (plist-get entry :currency))
-                      (state (gethash session agent-river-registry))
-                      (sum (assoc currency totals)))
-                 (push (list :label (or (and state (agent-river-state-label state))
-                                        session)
-                             :cost cost :currency currency)
-                       rows)
-                 (if sum
-                     (setcdr sum (+ (cdr sum) cost))
-                   (push (cons currency cost) totals))))
+               ;; Only what somebody reported.  A session with no `:cost' is
+               ;; one whose server never sent a figure, and a row of 0.00
+               ;; for it is this command inventing the one thing it exists
+               ;; to state -- while an unnamed zero in the totals is neither
+               ;; named nor unnamed, which is the rule here in so many
+               ;; words.  A reported zero is kept: that is a free run.
+               (when-let* ((cost (plist-get entry :cost)))
+                 (let* ((currency (plist-get entry :currency))
+                        (state (gethash session agent-river-registry))
+                        (sum (assoc currency totals)))
+                   (push (list :label (or (and state (agent-river-state-label state))
+                                          session)
+                               :cost cost :currency currency)
+                         rows)
+                   (if sum
+                       (setcdr sum (+ (cdr sum) cost))
+                     (push (cons currency cost) totals)))))
              agent-river--usage)
     (setq rows (sort rows (lambda (a b) (> (plist-get a :cost)
                                            (plist-get b :cost)))))
     (message "%s"
              (if rows
-                 (format "%s · %s total"
+                 ;; The word leads the sums rather than trailing them: after
+                 ;; a list of sessions it attached to whichever currency
+                 ;; happened to be last, and read as that one being the
+                 ;; total of the others.
+                 (format "%s · total %s"
                          (mapconcat #'agent-river--usage-money rows " · ")
                          (mapconcat (lambda (sum)
                                       (agent-river--usage-money
                                        (list :cost (cdr sum) :currency (car sum))))
-                                    totals " · "))
-               "Nothing measured -- no session here reports what it uses"))
+                                    totals ", "))
+               "Nothing measured -- no session here reports what it costs"))
     (list :totals totals :sessions rows)))
 
 
