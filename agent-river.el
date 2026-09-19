@@ -695,8 +695,15 @@ itself."
        (not (agent-river-state-idle state))))
 
 (defun agent-river--active-count ()
-  "Return how many states are currently running.
-Subagents count: while one is running, the view has to say who acted."
+  "Return how many sessions are currently live.
+
+Sessions, and only sessions.  A subagent used to have a registry entry of
+its own and be counted here; it is a tally on its parent now, so a session
+with three of them running counts once.  That is right for the one thing
+this answers -- whether a second session exists, and the label column is
+therefore worth drawing -- and wrong for anything asking how many agents
+are at work, which has to add each session's running delegates
+\(`agent-river-children') to this number."
   (let ((n 0))
     (maphash (lambda (_id state)
                (when (agent-river--active-p state) (setq n (1+ n))))
