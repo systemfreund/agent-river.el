@@ -8,13 +8,21 @@ reads `AGENTS.md` see the same text.
 
 An Emacs package that folds the Claude Code hook event stream into a per-session
 *state* (what the agent is working on, which files it revisits, how its tools are
-faring) and renders it into `*agent-river*`.
+faring) and renders it into `*agent-river*`, with the stream it was folded
+from beside it in `*agent-river-log*`.
 
 `README.md` is the integration guide — the data model, the entry points and the
 extension protocols, written for somebody wiring their own application to this.
 It is deliberately *not* the design document any more: **this file is**. The
 reasoning behind a decision, and the failure it prevents, lives here and in the
 code comments. A change that moves behaviour updates both.
+
+The HUD is two buffers: `*agent-river*` holds the state block, one line per
+live session, and `*agent-river-log*` holds the stream it was folded from.
+They shared one buffer until the block was torn down and rebuilt directly
+above a log being written to at the same moment — see the divider bullet for
+what that cost and what the boundary gives back. Where this file says *the
+HUD* without qualifying it, it means the pair.
 
 No build system. `agent-river.el` is everything the HUD is;
 `agent-river-spool.el` is the door something from outside comes in through,
@@ -35,7 +43,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (441 tests). -L . is required: the tests require all four .el files.
+# Full suite (450 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -119,7 +127,7 @@ Claude Code hook                     agent-shell event (no hooks wired)
   → agent-river-observe               addresses the state, folds, renders, signals
   → agent-river-fold                  pure state transition
   → agent-river-registry              key → agent-river-state
-  → agent-river--update-panel / agent-river-log     the view
+  → agent-river--update-block / agent-river-log      the two views
 ```
 
 And a second, narrower path for what no session did:
@@ -268,7 +276,7 @@ These are load-bearing; the tests enforce most of them.
   the script degrades to a no-op; a payload that reaches Emacs and then throws
   writes a `hook failed` / `fold failed` line into the buffer. Silent failure is
   how this has broken before.
-- **One log line is one line** (`agent-river--log-text`). The HUD is
+- **One log line is one line** (`agent-river--log-text`). The log is
   line-based: a newline in a log line does not make two entries, it makes one
   entry and a remainder carrying none of the properties `n` and `>` read, and
   `agent-river-max-entries` then trims by counting lines that are no longer
@@ -1003,15 +1011,15 @@ before the deletion, so that deferring is not the same as forgetting.
 
 ### One set of motions, every buffer
 
-The HUD, the map and the approval queue take the same keys for the same three
-grains, because they are views of one state and learning each separately buys
-nothing: `n`/`p` (plus `SPC`/`DEL` and the remapped arrows) walk every line
-worth stopping on, `M-n`/`M-p` walk the coarse structure, `>`/`<` walk the
-lines that want attention. A session line is a map entry is a question
-heading; a
+The block, the log, the map and the approval queue take the same keys for the
+same three grains, because they are views of one state and learning each
+separately buys nothing: `n`/`p` (plus `SPC`/`DEL` and the remapped arrows)
+walk every line worth stopping on, `M-n`/`M-p` walk the coarse structure,
+`>`/`<` walk the lines that want attention. A session line is a map entry is a
+question heading; a
 detail heading is a map file line is an answer row; a log line has no analogue
 and rides the fine grain. The map's *section* headings have no analogue in
-the block, which is flat. `>` is `agent-river-notable-kinds` in the HUD —
+the block, which is flat. `>` is `agent-river-notable-kinds` in the log —
 which includes `artifact`, because a record arriving is one step further out
 than a note (nobody in the session saw it) and it lands when nothing else is
 happening, which is when a log is worth scanning at all — "some
@@ -1019,6 +1027,17 @@ agent is under this" on the map, and in the queue it coincides with `M-n` —
 bound all the same, because a reader arriving from either of the others
 presses it expecting the next thing that wants them, and getting it is the
 whole point of the keys being shared.
+
+**A view takes only the grains its own content answers**, which the split
+made plain rather than changed. The block has the fine grain and the coarse
+one — session lines and the details under them — and no landmarks, because
+nothing in it is a log line and `>` would have stopped on nothing; the log is
+the other way round, since it has lines and landmarks among them and no
+structure over them. Both were bound in the one buffer they used to share and
+each was dead in half of it. A key bound where its content is not is worse
+than an unbound one: pressing it answers with an error about there being no
+further anything, which reads as the state being empty rather than as the
+question being the wrong one to ask here.
 
 Three rules, shared by `agent-river--scan` and `agent-river--map-scan`:
 
@@ -1035,45 +1054,48 @@ Three rules, shared by `agent-river--scan` and `agent-river--map-scan`:
   chose.
 
 `agent-river--scan` deliberately starts *past* the current line — right for a
-command, and the reason `agent-river-test--hud-lines` has to test the current
-line before it starts scanning.
+command, and the reason `agent-river-test--marked-lines` has to test the
+current line before it starts scanning.
 
-**The HUD follows only the windows still at its head** (`agent-river--head-end`,
+**Each half keeps a reader's place its own way, and that is what the split
+left standing.** Both answers were arrived at while the two shared a buffer and
+both were about only one of them; apart, each is stated where it belongs and
+neither has to be true of the other.
+
+**The log follows only the windows still at its tail** (`agent-river--tail-start`,
 `agent-river--following-windows`, read *before* the edit because the edit moves
-the head). It used to pin every window to `point-min` on every event, which
+the tail). It used to pin every window to the newest line on every event, which
 makes the buffer unreadable by hand and would have made these motions
 pointless. Two halves to it: window points are filtered, and `agent-river-log`
 wraps its edit in `agent-river--keeping-place` — in the selected window buffer
 point *is* window point, so without it the one window most likely to be the one
-being read was dragged back to the top regardless.
+being read was carried along by every tool call regardless. The tail is **the
+last line alone**: it was the *first* line once, with the block underneath it
+in the same buffer, and the block is where `n` and `M-n` did most of their
+walking, so navigating anywhere in it left a reader still counting as
+following. That is exactly the span `agent-river--follow` pins to, so it means
+"nobody has moved this", and a reader who walks back down onto the newest entry
+rejoins the tail the way they left it. Both edits are now at the ends — the
+insertion at `point-max`, the trim at `point-min` — so every reader's marker
+rides the text, and the one case `save-excursion` cannot cover is a reader
+sitting *at* `point-max`: that is nobody's place but the tail's, and they
+follow it onto the new line rather than being left one line above it.
 
-**The head is the top line, and a block line is kept by name rather than by
-position.** Both halves above were measured against the whole head — the block
-*and* the newest log line — and the block is where `n` and `M-n` do most of
-their walking, so navigating anywhere in it left a reader still counting as
-following and the next tool call pulled them back. Three ways the point ended
-up at `point-min`, and each needed its own answer. A window navigated into the
-block was filtered back in, so the head is now the first line alone: that is
-exactly the span `agent-river--follow` pins to, so it means "nobody has moved
-this", and a reader who walks back up to the top rejoins the head the way they
-left it. A *buffer* point in the block was inside the region
-`agent-river--erase-block` deletes, so `save-excursion`'s marker collapsed to
-`point-min` and the rebuilt block went in front of it — silently, on every
-refresh tick, which is the block redrawing itself out from under whoever was
-reading it. So block lines carry `agent-river-block` (the session id, plus an
-index for a detail line) and `agent-river--block-goto` finds the line again by
-what it names, the way `agent-river--map-here` does one grain up; a session
-that has gone from the block sends point to the head rather than to whatever
-that line number now holds. And the newest log line begins exactly at
-`agent-river--block-end`, so a marker there was swept up with the block like
-any other — it is the one log line that does not ride the text on its own, and
-the marker is given an insertion type to keep it in front of what replaces it.
-Everything else the log edits is above a reader's position, so their marker
-rides the text rather than the offset.
+**A block line is kept by name rather than by position**
+(`agent-river--keeping-block-place`). A buffer point in the block is inside the
+region the rebuild deletes, so `save-excursion`'s marker collapsed to
+`point-min` and the new block went in front of it — silently, on every refresh
+tick, which is the block redrawing itself out from under whoever was reading
+it. So block lines carry `agent-river-block` (the session id, plus an index
+for a detail line) and `agent-river--block-goto` finds the line again by what
+it names, the way `agent-river--map-here` does one grain up; a session that has
+gone from the block sends point to the head rather than to whatever that line
+number now holds. No following here, and nothing to filter: the block does not
+grow, so there is no head to lose.
 
-`hl-line-mode` is on in the map and deliberately off in the HUD: the HUD pins
-its point to the head until someone navigates, so a permanent highlight there
-would mark nothing anyone chose.
+`hl-line-mode` is on in the map and deliberately off in both of these: each
+pins its point until someone navigates, so a permanent highlight would mark
+nothing anyone chose.
 
 ### What a session is using — two meters read from outside, one drawn
 
@@ -1238,12 +1260,16 @@ spreading now, and the invention that would have been is not needed either.
 ### Markdown belongs where the state leaves, not where it is watched
 
 `agent-river-markdown` / `agent-river-copy-report` render the state for an
-issue, a PR or a message. The HUD is deliberately *not* Markdown and must stay
-that way: its log carries prompts, reasoning and tool arguments — text the
+issue, a PR or a message. Neither HUD buffer is Markdown and neither may
+become one: the log carries prompts, reasoning and tool arguments — text the
 package does not control — and Markdown would hand that text the power to
 restructure the view watching it. A prompt beginning `# ` becomes a heading.
 Wrapping the whole payload in code spans would fix that and destroy the
-per-kind colouring that is the HUD's main signal.
+per-kind colouring that is the log's main signal. The block holds only text
+this package wrote, so it is the one that could have gone Markdown, and it
+does not: it is a fixed handful of lines with no structure to fake, so the
+four conditions below are not met by it either, and a rendering that differed
+between the two halves of one view would have to be learned twice.
 
 The map could go Markdown because four things held: the content *is* a
 document, every token in it is ours, it is rebuilt every few seconds rather
@@ -1925,15 +1951,57 @@ together:
   tool call. A flag means the rebuilt block is drawn already open and stays
   that way until it is asked to close. Same rule as `agent-river-map-toggle`,
   which folds by deciding what gets drawn, and for the same reason.
-- **The blank line between block and log is the whole divider.** There was a
-  `* -- eventlog` heading there once, and it was removed: a divider that
-  exists to be a fold handle earns its line from nobody who is reading, and a
-  blank one separates just as well at no cost in labels. It belongs to the
-  block and is redrawn with it, so a session ending cannot leave it behind.
-- **The buffer is newest-first** with the state block pinned at the top
-  (`agent-river--block-end`), so nothing has to be tailed and trimming takes from
-  the bottom. The block is deliberately *not* `header-line-format` (single-line,
-  can't show two sessions); the mode sets that to nil explicitly.
+- **The divider is a buffer boundary, and everything before it was an
+  attempt at the same thing one notch cheaper.** There was a `* -- eventlog`
+  heading between block and log once — a divider that exists to be a fold
+  handle earns its line from nobody who is reading — and then a blank line
+  that separated just as well at no cost in labels. What neither could buy
+  is what the boundary gives for nothing: the block redrawn without an offset
+  saying where to stop deleting, the log trimmed without one saying where to
+  start counting, and each half sized, scrolled and navigated without the
+  other moving under it. Two buffers is also two windows, which is the one
+  thing that is worse, and it is answered where it arises. The slots are
+  adjacent (`agent-river-show`, `agent-river-show-log`) so the layout is the
+  one they used to share, and the block's window is fitted to the block
+  (`agent-river--fit-block-windows`) so it takes a line per session rather
+  than half a column. **And only the block opens itself**: one buffer meant
+  one answer to `agent-river-auto-display`, and the log inherited an opening
+  that was right for the pair and wrong for it alone — it reappeared on the
+  event *after* the one a reader had closed it on, which is a view overruling
+  a decision somebody had just made. The log is asked for (`l` in the block,
+  `agent-river-show-log`). What that gives up is that a line nobody is
+  looking at is a line nobody sees; the never-go-quiet rule is about writing
+  the line, not about seizing a window for it.
+- **The log runs oldest to newest**, the way every other log does: the new
+  line goes on at the bottom, the trim takes from the top, and a window
+  nobody has moved tails it (`agent-river--tail-start`,
+  `agent-river--follow`). It ran the other way for as long as the state block
+  was pinned above it in the same buffer — newest first put the two things
+  worth seeing together at the top, where neither could scroll away and
+  nothing had to be tailed — and that was an answer to the block being there,
+  not a claim about logs. With the block in its own buffer the reason was
+  gone and only the surprise was left. What the reversal costs is one
+  computation: `agent-river--follow` works out `window-start` itself rather
+  than leaving it to redisplay, which finds point below the window and
+  recentres — the newest line in the middle with half a window of nothing
+  under it, once per tool call. `vertical-motion` is given the window, so it
+  counts screen lines and stays right where the long lines wrap. The block is
+  deliberately *not* `header-line-format` (single-line, can't show two
+  sessions); both modes set that to nil explicitly, since the state used to
+  live there and a value left behind by an older version of this file sits
+  frozen at the top of a buffer.
+- **The block is drawn by whatever folded, never by whatever logged**
+  (`agent-river--update-block`). It used to come along with the log line, in
+  `agent-river-log`, which is why the split has to name the four places a
+  state changes — `observe`, `set-intent`, `note`, and a permission request
+  arriving — rather than one. That is the price, and it is paid where it
+  catches something the old arrangement got wrong by luck: an outcome written
+  onto the line that opened its call writes no line of its own, so a `fail`
+  landing that way used to leave the block claiming nothing had failed until
+  the next event. Two ways in, and the difference is what a *tick* may do:
+  `agent-river--redraw-block` creates nothing, so a buffer the user killed
+  stays killed, and `agent-river--update-block` may, because an event is the
+  something that brings it back.
 - **One tool call is one line.** The `act` line carries the call's id as
   `agent-river-call`, and its outcome is written onto that line rather than
   taking one of its own (`agent-river--log-outcome`) — so the timestamp stays
@@ -1988,8 +2056,11 @@ together:
   `*`, because `outline-regexp` is matched against the text and animating the
   character would stop the block being a document the moment an agent started
   working; the spinning stars are found by that property rather than by
-  looking for a star in the text, since the log below carries the agent's own
-  words and a line may well begin with one; **clearing is part of stopping**
+  looking for a star in the text — which the log running underneath made
+  urgent, since a line of the agent's own words may well begin with one, and
+  which is kept now that it does not, because the property is also what says
+  which session a star belongs to and no search of the text could answer
+  that; **clearing is part of stopping**
   (`agent-river--stop-spinner`) — the last frame is a `display` property, so
   a timer that merely cancelled itself would leave every finished session
   showing whichever glyph it stopped on; **the phase belongs to the session,

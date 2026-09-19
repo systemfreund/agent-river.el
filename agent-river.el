@@ -52,22 +52,65 @@
   :prefix "agent-river-")
 
 (defcustom agent-river-buffer-name "*agent-river*"
-  "Name of the buffer the agent's attention is logged to."
+  "Name of the buffer the folded state is drawn into."
+  :type 'string)
+
+(defcustom agent-river-log-buffer-name "*agent-river-log*"
+  "Name of the buffer the event stream is logged to.
+
+A buffer of its own rather than the foot of the block\='s.  The two are
+readings of one state, but they answer different questions -- what is
+happening now, and what has happened -- and holding them in one buffer
+charged every event for it: the block was torn down and rebuilt directly
+above a log that was being written to at the same moment, so whichever
+half a reader was in moved under them for reasons belonging to the other.
+Every guard that cost is still here and still needed, because each is
+about one half; what has gone is their meeting.  Apart, the block is a
+short window that never scrolls and the log is a long one nobody has to
+walk back up through to see the state."
   :type 'string)
 
 (defcustom agent-river-max-entries 100
   "How many log lines to keep.
-The buffer is newest-first, so the oldest lines sit at the bottom and are
+The log runs oldest to newest, so the oldest sit at the top and are
 dropped from there.  Zero or less keeps everything, which will grow
 without bound."
   :type 'integer)
 
 (defcustom agent-river-window-width 56
-  "Width of the side window opened by `agent-river-show'."
+  "Width of the side windows the two views are opened in."
+  :type 'integer)
+
+(defcustom agent-river-block-max-height 12
+  "Most lines the block\='s own side window is grown to.
+
+The block is sized to what it holds after every redraw, not once when it
+is displayed: it is a line per live session, so a window fitted while one
+agent was working would hide the second the moment it arrived.  The limit
+is what stops a morning\='s worth of sessions pushing the log off the
+screen, and it is a maximum rather than a height because the usual answer
+is one line."
   :type 'integer)
 
 (defcustom agent-river-auto-display t
-  "Whether logging pops the HUD open when no window shows it."
+  "Whether an event opens the state block when no window is showing it.
+
+The block only.  It is bounded -- a line per live session -- and it is
+what an onlooker is for, so a window appearing for it when an agent
+starts working is the package doing its job.  The log is the opposite on
+both counts, and while the two shared a buffer that could not be said:
+one buffer, one window, one answer.  Apart, an event that opened the log
+opened it *again* every time, on the event after the one the reader had
+closed it on -- a view reopening itself is not a view being helpful, it
+is a view overruling a decision somebody just made.  So the log is
+opened by asking (`agent-river-show-log', or `l' in the block).
+
+What that gives up is that a line nobody is looking at is a line nobody
+sees.  The rule it appears to bend -- never go quiet -- is about writing
+the line, not about seizing a window for it: the failure is in the log
+whenever the log is opened, and the commands that mean it (`M-x
+agent-river-spend', the forget commands) say so in the echo area
+besides."
   :type 'boolean)
 
 (defcustom agent-river-fail-streak-threshold 3
@@ -3196,6 +3239,10 @@ most sessions in it."
            ;; which reads the table above.
            (agent-river-log "ask" (agent-river--offer-text offer)
                             (agent-river--shell-label session))
+           ;; The block carries the open question ahead of everything
+           ;; measured on the line, so it has to be redrawn for one -- the
+           ;; log line used to do that on its way past and no longer does.
+           (agent-river--redraw-block)
            ;; Drawn rather than marked dirty, which is the opposite of what
            ;; the map does and for the opposite reason: that observer fires
            ;; on every tool call, this fires when somebody is asked a
@@ -4602,6 +4649,11 @@ often the agent had to be told something is itself part of the state."
        ((agent-river--log-outcome call (plist-get event :outcome) kind))
        ((not (string-empty-p detail))
         (agent-river-log kind detail label call)))
+      ;; And the block, which the log line used to bring with it.  Before
+      ;; the timers, because both of them read what this draws: the refresh
+      ;; timer to leave the elapsed times honest, the animation because the
+      ;; marks it paints are made here.
+      (agent-river--update-block)
       (agent-river--ensure-timer)
       (agent-river--ensure-spinner)
       ;; Only ask for an observation on an event that can actually deliver
@@ -4694,6 +4746,7 @@ defaults to the session that most recently acted."
      (t (agent-river-fold state (list :kind "intent" :text text))
         (agent-river--update-panel state)
         (agent-river-log "intent" text (agent-river-state-label state))
+        (agent-river--update-block)
         text))))
 
 (defvar agent-river--noting nil
@@ -4746,6 +4799,7 @@ session that most recently acted."
         (agent-river-fold state event)
         (agent-river--update-panel state)
         (agent-river-log "note" text (agent-river-state-label state))
+        (agent-river--update-block)
         (agent-river--run-observers 'agent-river-observers state event)
         text)))))
 
@@ -5046,12 +5100,20 @@ for; anywhere else it takes them all.  ID overrides both."
 ;;; The view
 
 (define-derived-mode agent-river-mode special-mode "Agent-Focus"
-  "Major mode for the agent attention HUD."
-  ;; Tool lines fit the side window, but reasoning and signal lines are
-  ;; prose and do not -- truncating them would hide most of what they say.
+  "Major mode for the state block.
+
+The log used to run underneath this, and what the split bought is the
+whole of what this buffer now is: one line per live session, redrawn on
+every fold, in a window that can be sized to exactly that.  Nothing here
+grows, so nothing here scrolls."
+  ;; A session line carries a dozen fields and does not fit the side
+  ;; window; truncating it would drop the numbers at the end of it.
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
-  (setq-local wrap-prefix (make-string 11 ?\s))
+  ;; Clear of the outline star, which is structure rather than content.
+  ;; The log clears its timestamp column instead -- the one width the two
+  ;; buffers used to share and no longer have a reason to.
+  (setq-local wrap-prefix "  ")
   ;; The session lines are outline headings, so `outline-cycle' (TAB) can
   ;; fold each session's details.  The fold is for looking, not state: it
   ;; lives in overlays, and the block is erased and rebuilt on every fold,
@@ -5062,6 +5124,26 @@ for; anywhere else it takes them all.  ID overrides both."
   ;; by an older version of this file would sit frozen at the top of the
   ;; buffer, showing a step count and an elapsed time from whenever it was
   ;; last written.
+  (setq-local header-line-format nil)
+  (buffer-disable-undo))
+
+(define-derived-mode agent-river-log-mode special-mode "Agent-Log"
+  "Major mode for the event log.
+
+Oldest to newest, the way every other log is read: the line that has just
+arrived is at the bottom, the oldest are trimmed off the top, and a
+window nobody has moved is kept on the end of it.  Deliberately
+not Markdown, and this is the buffer that decides it for both -- what it
+holds is prompts, reasoning and tool arguments, text this package does
+not control, and Markdown would hand that text the power to restructure
+the view watching it."
+  ;; Tool lines fit the side window, but reasoning and signal lines are
+  ;; prose and do not -- truncating them would hide most of what they say.
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t)
+  ;; Clear of the timestamp.  Every line carries its own besides, because
+  ;; whether it has a session column is decided per line.
+  (setq-local wrap-prefix (make-string 11 ?\s))
   (setq-local header-line-format nil)
   (buffer-disable-undo))
 
@@ -5474,11 +5556,19 @@ here."
   (setq agent-river--current (agent-river-state-id state)))
 
 (defun agent-river--buffer ()
-  "Return the HUD buffer, creating and initialising it if needed."
+  "Return the block buffer, creating and initialising it if needed."
   (let ((buffer (get-buffer-create agent-river-buffer-name)))
     (with-current-buffer buffer
       (unless (derived-mode-p 'agent-river-mode)
         (agent-river-mode)))
+    buffer))
+
+(defun agent-river--log-buffer ()
+  "Return the log buffer, creating and initialising it if needed."
+  (let ((buffer (get-buffer-create agent-river-log-buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'agent-river-log-mode)
+        (agent-river-log-mode)))
     buffer))
 
 (defun agent-river--label-column (label)
@@ -5528,51 +5618,40 @@ later finds it by."
                 'agent-river-kind kind
                 'agent-river-call call)))
 
-(defvar-local agent-river--block-end nil
-  "Marker just past the state block, or nil while none is drawn.")
-
-(defun agent-river--erase-block ()
-  "Remove the state block from the head of the current buffer."
-  (when (and (markerp agent-river--block-end)
-             (marker-position agent-river--block-end))
-    (delete-region (point-min) agent-river--block-end)
-    (set-marker agent-river--block-end nil)))
-
 (defun agent-river--insert-block ()
-  "Draw the state block at the head of the current buffer.
+  "Draw the state block into the current buffer, which holds nothing else.
 
-The blank line closing it belongs to the block, not to the log: it is
-erased and redrawn with it, so it cannot be left behind by a session
-ending, and `agent-river--block-end' goes on meaning what everything
-downstream reads it as -- the start of the newest log line, which is
-where `agent-river--head-end' measures the head to and where
-`agent-river--log-outcome' starts looking.
-
-The separator is what a heading over the log used to be, at a line's
-cost rather than a line plus a label.  Without it the block's last
-session runs straight into the newest event, and the two halves of the
-buffer -- the state, and the stream it was folded from -- read as one
-list."
+There is no separator to draw any more, and no marker to keep.  Both were
+the price of the log starting where the block stopped: the blank line was
+what kept the state from reading as the head of the stream, and
+`agent-river--block-end' was where everything downstream had to start
+looking to be sure it was in the log.  With the log in a buffer of its
+own, the block is the buffer and `point-max' is the answer to every
+question either of them used to be asked."
   (let ((block (agent-river--panel-block)))
     (when block
       (goto-char (point-min))
-      (insert block "\n\n")
-      (setq agent-river--block-end (copy-marker (point) nil)))))
+      (insert block "\n"))))
 
 (defun agent-river--trim ()
   "Drop the oldest lines past `agent-river-max-entries'.
-Called with the block erased, so the line count covers only the log.
-Oldest is now at the bottom, so this trims the tail."
+The log buffer holds nothing but log lines, so the count is of entries.
+Oldest is at the top, so this trims the head -- counted back from the end
+rather than forward from the start, because what is kept is the newest N
+and where those begin depends on how many there are.
+
+Everything it deletes is above whoever is reading, so their marker rides
+the text, the way it does for the insertion at the other end."
   (when (> agent-river-max-entries 0)
     (save-excursion
-      (goto-char (point-min))
-      (forward-line agent-river-max-entries)
-      (delete-region (point) (point-max)))))
+      (goto-char (point-max))
+      (forward-line (- agent-river-max-entries))
+      (delete-region (point-min) (point)))))
 
 (defun agent-river--block-here ()
-  "Return what names the block line point is on, or nil when it is in the log.
+  "Return what names the block line point is on, or nil when it is on none.
 The id of the session for its header, that id and an index for one of its
-detail lines.  This is the map\\='s `agent-river--map-here' at the HUD\\='s
+detail lines.  This is the map\\='s `agent-river--map-here' at the block\\='s
 grain, for the same reason: the block is torn down and rebuilt, so a place
 in it has to be named rather than remembered as a position."
   (get-text-property (line-beginning-position) 'agent-river-block))
@@ -5584,11 +5663,8 @@ its details with it, and the head is where a reader who has lost their
 subject resumes.  Point lands past the outline stars, where a motion would
 have left it."
   (goto-char (point-min))
-  (let ((limit (or (and (markerp agent-river--block-end)
-                        (marker-position agent-river--block-end))
-                   (point-min)))
-        (found nil))
-    (while (and (not found) (< (point) limit))
+  (let ((found nil))
+    (while (and (not found) (not (eobp)))
       (if (equal here (agent-river--block-here))
           (setq found t)
         (forward-line 1)))
@@ -5596,67 +5672,128 @@ have left it."
         (agent-river--beginning-of-entry)
       (goto-char (point-min)))))
 
-(defmacro agent-river--keeping-place (&rest body)
+(defmacro agent-river--keeping-block-place (&rest body)
   "Run BODY, which tears the block down and rebuilds it, and keep point.
 
 `save-excursion' cannot do this on its own, and the failure is silent:
-the marker it restores is inside the region `agent-river--erase-block'
-deletes whenever point is in the block, so it collapses to `point-min'
-and the rebuilt block is inserted in front of it.  Point at the top of
-the buffer, on every refresh tick -- which is the block redrawing itself
-under whoever navigated into it, and the motion commands made pointless
-a second way after `agent-river--following-windows' stopped doing it.
+the marker it restores is inside the region the rebuild deletes, so it
+collapses to `point-min' and the new block is inserted in front of it.
+Point at the top of the buffer, on every refresh tick -- which is the
+block redrawing itself under whoever navigated into it, and the motion
+commands made pointless a second way after
+`agent-river--following-windows' stopped doing it.
 
-So a block line is restored by name, and a log line rides the text as
-before.  The marker advancing on insertion is the one remaining case: the
-newest log line begins exactly where `agent-river--block-end' is, so a
-marker there is swept up with the block like any other and has to be told
-to stay in front of what replaces it."
+So a block line is restored by what it names.  Point on no line of the
+block is nobody\='s place and goes to the head, which is also where a line
+that has gone sends it."
   (declare (indent 0) (debug t))
-  `(let* ((here (agent-river--block-here))
-          (place (and (not here) (> (point) (point-min))
-                      (copy-marker (point) t))))
+  `(let ((here (agent-river--block-here)))
      (unwind-protect
          (progn ,@body)
-       (cond (here (agent-river--block-goto here))
-             (place (goto-char place) (set-marker place nil))))))
+       (if here
+           (agent-river--block-goto here)
+         (goto-char (point-min))))))
 
-(defun agent-river--head-end ()
-  "Return the end of the HUD\\='s first line, which is as far as following goes.
+(defmacro agent-river--keeping-place (&rest body)
+  "Run BODY, which writes a line at the end of the log, and keep point.
 
-A window is following while it shows the top of the buffer and has not
-been navigated, and `agent-river--follow' pins one to `point-min', so the
-first line is exactly the span that means \"nobody has moved this\".  The
-head used to run to the end of the newest log line, taking the whole block
-with it -- and the block is where `n' and `M-n' do most of their walking,
-so every line a reader could navigate to counted as following and the next
-tool call pulled them back to the top."
+A reader is above both edits -- the new line goes on at the bottom and
+the trim comes off the top -- so their marker rides the text it was on
+rather than the offset it was at.  `save-excursion' would manage that
+much; what it cannot do is the other case, which is why this exists.
+
+Point at `point-max' is nobody\\='s place: that is the tail, and a reader
+who has not moved follows it onto the new line rather than being left
+one line above it.  Without this the `goto-char' in the body moved buffer
+point, and in the selected window buffer point *is* window point -- so
+the one window most likely to be the one being read was dragged along by
+every tool call, whatever `agent-river--following-windows' had decided."
+  (declare (indent 0) (debug t))
+  `(let ((place (and (< (point) (point-max)) (copy-marker (point)))))
+     (unwind-protect
+         (progn ,@body)
+       (if place
+           (progn (goto-char place) (set-marker place nil))
+         (goto-char (point-max))))))
+
+(defun agent-river--tail-start ()
+  "Return where the log\\='s last line begins, which is as far as following goes.
+
+A window is following while it shows the end of the buffer and has not
+been navigated, and `agent-river--follow' pins one to `point-max', so the
+last line is exactly the span that means \"nobody has moved this\".  The
+line alone, never more: this used to be the *first* line, with the state
+block underneath it in the same buffer, and counting the block in meant
+every line a reader could navigate to still counted as following -- so
+the next tool call pulled them off it.
+
+The trailing newline is why this steps back a line.  `point-max' sits at
+the start of an empty line after the newest entry, and a reader on the
+entry itself has not moved either."
   (save-excursion
-    (goto-char (point-min))
-    (line-end-position)))
+    (goto-char (point-max))
+    (when (and (bolp) (> (point) (point-min)))
+      (forward-line -1))
+    (line-beginning-position)))
 
 (defun agent-river--following-windows (buffer)
-  "Return the windows on BUFFER that are still showing its head.
+  "Return the windows on log BUFFER that are still showing its tail.
 
-Read before the buffer is touched, because the head is about to move.
+Read before the buffer is touched, because the tail is about to move.
 Only these get pinned back afterwards: a window someone has scrolled or
 navigated away from is one they moved on purpose, and snapping it to the
-top on the next tool call makes the buffer unreadable by hand.  That is
+end on the next tool call makes the buffer unreadable by hand.  That is
 what it used to do, which is why the motion commands had to arrive with
 this."
   (with-current-buffer buffer
-    (let ((head (agent-river--head-end)))
-      (seq-filter (lambda (window) (<= (window-point window) head))
+    (let ((tail (agent-river--tail-start)))
+      (seq-filter (lambda (window) (>= (window-point window) tail))
                   (get-buffer-window-list buffer nil t)))))
 
 (defun agent-river--follow (buffer windows)
-  "Pin WINDOWS on BUFFER back to the head.
-Newest first means there is nothing to tail: the state block and the
-latest event are both at the top, and stay put as the log grows."
-  (dolist (window windows)
-    (when (window-live-p window)
-      (set-window-point window (with-current-buffer buffer (point-min)))
-      (set-window-start window (with-current-buffer buffer (point-min))))))
+  "Pin WINDOWS on log BUFFER back to the tail.
+
+Oldest to newest, so this is an ordinary log and this is the ordinary
+thing to do with one: the newest entry is at the bottom and a window
+nobody has moved stays on it.  It was the other way round while the state
+block was pinned above the log in the same buffer -- newest first put the
+two things worth seeing together at the top, where neither could scroll
+away and nothing had to be tailed -- and that reason left with the block.
+
+`window-start' is computed rather than left to redisplay, which would
+find point below the window and recentre: the newest line would land in
+the middle with half a window of nothing under it, once per tool call.
+`vertical-motion' counts *screen* lines through the window it is given,
+so the answer stays right in a buffer where the long lines wrap."
+  (with-current-buffer buffer
+    (save-excursion
+      (dolist (window windows)
+        (when (window-live-p window)
+          (goto-char (point-max))
+          (set-window-point window (point))
+          (vertical-motion (- (1- (window-body-height window))) window)
+          (set-window-start window (point)))))))
+
+(defun agent-river--fit-block-windows (buffer)
+  "Size the side windows this package opened on block BUFFER to what it holds.
+
+Asked after every redraw rather than once when the window appears, because
+the block is a line per live session and that number moves: a window
+fitted while one agent was working hides the second the moment it starts.
+`agent-river-block-max-height' is what stops a busy morning pushing the
+log off the screen.
+
+Only the windows `agent-river-show' opened, which is what the
+`agent-river-fit' parameter says.  A window somebody put the block in
+themselves is theirs to size, and the rule for writing into windows the
+user did not point this at is the one the observers keep.  A
+`display-buffer-alist' entry matching this buffer counts as somebody: it
+takes precedence over the action `agent-river-show' passes and supplies
+its own parameters, so a reader who has said where the block goes has
+said how tall it is in the same breath, and this leaves them to it."
+  (dolist (window (get-buffer-window-list buffer nil t))
+    (when (window-parameter window 'agent-river-fit)
+      (fit-window-to-buffer window agent-river-block-max-height 1))))
 
 (defun agent-river--log-outcome (call outcome kind)
   "Write OUTCOME onto the logged line that opened tool CALL, if it is still here.
@@ -5672,20 +5809,20 @@ colouring of the line it is written onto.  The call is cleared from the
 line afterwards: a second outcome for one call would otherwise append a
 second verdict to a line that already carries its own."
   (let ((buffer (and call outcome (not (string-empty-p outcome))
-                     (get-buffer agent-river-buffer-name))))
+                     (get-buffer agent-river-log-buffer-name))))
     (when buffer
       (with-current-buffer buffer
         (save-excursion
-          ;; From the end of the block: everything above it is the state, and
-          ;; only log lines ever carry a call.
-          (goto-char (or (and (markerp agent-river--block-end)
-                              (marker-position agent-river--block-end))
-                         (point-min)))
+          ;; Backwards from the end, which is where the newest line is: the
+          ;; call being answered is nearly always one of the last few, so
+          ;; the walk stops on it rather than reading a hundred lines of
+          ;; history to reach it.
+          (goto-char (point-max))
           (let (found)
-            (while (and (not found) (not (eobp)))
-              (if (equal call (get-text-property (point) 'agent-river-call))
-                  (setq found t)
-                (forward-line 1)))
+            (while (and (not found) (not (bobp)))
+              (forward-line -1)
+              (when (equal call (get-text-property (point) 'agent-river-call))
+                (setq found t)))
             (when found
               (let* ((inhibit-read-only t)
                      (face (nth 2 (or (assoc kind agent-river-kinds)
@@ -5704,63 +5841,84 @@ second verdict to a line that already carries its own."
 
 ;;;###autoload
 (defun agent-river-log (kind detail &optional label call)
-  "Append DETAIL to the HUD as an event of KIND, tagged with session LABEL.
+  "Append DETAIL to the log as an event of KIND, tagged with session LABEL.
 CALL names the tool call this line opens, so its outcome can later be
 written onto this line instead of taking one of its own.
 This is the view half, usable on its own; `agent-river-observe' is the
-half that also folds."
-  (let* ((buffer (agent-river--buffer))
-         (shown (get-buffer-window buffer t))
+half that also folds -- and the half that draws the block, which no
+longer happens here because the two are no longer one buffer."
+  (let* ((buffer (agent-river--log-buffer))
          ;; Asked before the edit, because the edit moves the head.
          (following (agent-river--following-windows buffer)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
-        ;; Newest first, block on top.  Tear the block down, put the new
-        ;; line at the head of the log, trim the tail, rebuild the block --
-        ;; so the two things worth seeing never move and never scroll away.
-        ;;
+        ;; Oldest to newest, which is what a log is and what everything
+        ;; that reads one expects: the new line goes on at the bottom and
+        ;; the oldest come off the top.  It was the other way round while
+        ;; the state block sat pinned above the log in this same buffer --
+        ;; newest first put the two things worth seeing together at the top
+        ;; and left nothing to tail -- and that reason went with the block.
         ;; `agent-river--keeping-place' is what lets a reader keep theirs.
-        ;; Every edit here is above them, so a log line rides the text it was
-        ;; on rather than the offset it was at; a block line is torn down
-        ;; under them and has to be found again by name.  Without either the
-        ;; `goto-char' below moved buffer point, and in the selected window
-        ;; buffer point *is* window point -- so the one window most likely
-        ;; to be the one being read was dragged back to the top by every
-        ;; tool call, whatever `agent-river--following-windows' had decided.
         (agent-river--keeping-place
-          (agent-river--erase-block)
-          (goto-char (point-min))
+          (goto-char (point-max))
           (insert (agent-river--render kind detail label call) "\n")
-          (agent-river--trim)
-          (agent-river--insert-block))))
-    (when (and agent-river-auto-display (not shown))
-      (agent-river-show)
-      ;; A window that has only just appeared has never been navigated, so
-      ;; it follows whatever the windows before it were doing.
-      (setq following (get-buffer-window-list buffer nil t)))
+          (agent-river--trim))))
+    ;; No window is opened here, whatever `agent-river-auto-display' says:
+    ;; that is the block's, and a log that appeared on an event appeared on
+    ;; every event, including the one after a reader closed it.  The buffer
+    ;; is still written and still created -- being there to be opened is the
+    ;; whole of what it owes.
     (agent-river--follow buffer following)
     kind))
 
 ;;;###autoload
 (defun agent-river-show ()
-  "Display the HUD in a side window on the right."
+  "Display the state block in a side window on the right.
+
+The `agent-river-fit' parameter is what marks this window as one to keep
+sized to the block.  Only the windows opened here carry it: a window
+somebody put the block in themselves is theirs, and resizing it under
+them would be this package writing into a window it was never pointed
+at."
   (interactive)
   (display-buffer (agent-river--buffer)
                   `((display-buffer-in-side-window)
                     (side . right)
                     (slot . 0)
                     (window-width . ,agent-river-window-width)
+                    (window-parameters . ((no-delete-other-windows . t)
+                                          (agent-river-fit . t)))))
+  (agent-river--fit-block-windows (agent-river--buffer)))
+
+;;;###autoload
+(defun agent-river-show-log ()
+  "Display the event log in a side window under the block.
+
+The slot below the block\='s, so the two open into the layout they used to
+share as one buffer: the state on top, the stream beneath it.  Which is
+where the resemblance stops -- this window is the one that scrolls, and
+nothing here is ever pinned for the block\='s sake."
+  (interactive)
+  (display-buffer (agent-river--log-buffer)
+                  `((display-buffer-in-side-window)
+                    (side . right)
+                    (slot . 1)
+                    (window-width . ,agent-river-window-width)
                     (window-parameters . ((no-delete-other-windows . t))))))
 
 ;;;###autoload
 (defun agent-river-clear ()
-  "Empty the HUD buffer.  The folded state is left alone."
+  "Empty the event log.  The folded state is left alone.
+
+The block is left alone too, and there is nothing here for it: it is
+derived, redrawn from the registry by the next event, and emptying it
+would put a picture of the state on screen that is wrong until something
+happens.  `agent-river-reset' is the one that forgets what it is drawn
+from."
   (interactive)
-  (with-current-buffer (agent-river--buffer)
+  (with-current-buffer (agent-river--log-buffer)
     (let ((inhibit-read-only t))
-      (erase-buffer)
-      ;; The marker pointed into what was just erased.
-      (setq agent-river--block-end nil))))
+      (erase-buffer))))
 
 ;;;###autoload
 (defun agent-river-reset ()
@@ -5828,10 +5986,12 @@ KIND defaults to `note', which is what a forget on a session is.  A
 forget on an artifact passes `artifact', so the line is coloured by what
 it was about rather than by which command wrote it.
 
-Logged only into a HUD that already exists.  `agent-river-log' would
-otherwise create the buffer and `agent-river-auto-display' pop a window
-for it, which is a lot of furniture to move in answer to a command run
-from the map.
+Logged only into a log buffer that already exists.  `agent-river-log'
+would otherwise create the buffer and `agent-river-auto-display' pop a
+window for it, which is a lot of furniture to move in answer to a command
+run from the map.  The block is redrawn unconditionally instead, since
+that costs nothing where its buffer is gone and the numbers on it are
+exactly what was just forgotten.
 
 The map is drawn rather than marked dirty: its timer only runs while an
 agent is working, so a flag set between turns would sit there until the
@@ -5839,9 +5999,9 @@ next one and the view would go on naming what was just forgotten.  Which
 is the whole reason the artifact commands come through here too -- they
 remove a subject rather than fold it, so the observer hook the map now
 listens on never hears about them."
-  (if (get-buffer agent-river-buffer-name)
-      (agent-river-log (or kind "note") text)
-    (agent-river--redraw-block))
+  (when (get-buffer agent-river-log-buffer-name)
+    (agent-river-log (or kind "note") text))
+  (agent-river--redraw-block)
   (agent-river--map-draw)
   (message "agent-river: %s" text))
 
@@ -6015,16 +6175,40 @@ it after everything has gone quiet and the timer has retired."
   (agent-river--redraw-block))
 
 (defun agent-river--redraw-block ()
-  "Redraw the state block in place, leaving the log untouched."
+  "Redraw the state block, if its buffer is still there.
+
+The timer\='s way in, and the one that creates nothing: get-buffer rather
+than `agent-river--buffer', because a tick must never resurrect a buffer
+the user has killed.  `agent-river--update-block' is the event\='s way in,
+which may."
   (let ((buffer (get-buffer agent-river-buffer-name)))
-    ;; get-buffer, not agent-river--buffer: a tick must never resurrect a
-    ;; buffer the user has killed.
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (let ((inhibit-read-only t))
-          (agent-river--keeping-place
-            (agent-river--erase-block)
-            (agent-river--insert-block)))))))
+          (agent-river--keeping-block-place
+            (erase-buffer)
+            (agent-river--insert-block))))
+      (agent-river--fit-block-windows buffer))))
+
+(defun agent-river--update-block ()
+  "Draw the block for something that has just been folded.
+
+The event\='s way in, where `agent-river--redraw-block' is the timer\='s: this
+creates the buffer when it has been killed and opens a window for it under
+`agent-river-auto-display', and a tick must do neither.  A buffer the user
+killed stays killed until something happens, and then it is the something
+that brings it back -- which is how it has always worked, from when every
+event went through `agent-river-log' and the block came with it.
+
+Called wherever a fold has moved what the block draws, which is now an
+explicit step rather than a side effect of logging.  That is the price of
+the split, and it is paid in the four places a state changes rather than
+on every line that is written about one."
+  (let* ((buffer (agent-river--buffer))
+         (shown (get-buffer-window buffer t)))
+    (agent-river--redraw-block)
+    (when (and agent-river-auto-display (not shown))
+      (agent-river-show))))
 
 ;;;###autoload
 (defun agent-river-toggle-details ()
@@ -6055,10 +6239,17 @@ for opening or closing the thing under the heading."
 ;; heading navigation has to be on the mode's own map to be there at all.
 (define-key agent-river-mode-map (kbd "TAB") #'agent-river-toggle-at-point)
 
-;; The map's keys, on the same gestures, because the two buffers are two
-;; views of one state and learning each separately is a cost with nothing
-;; bought by it.  SPC and DEL give up `special-mode's scrolling for line
-;; motion, the way dired's do.
+;; The map's keys, on the same gestures, because the views are views of one
+;; state and learning each separately is a cost with nothing bought by it.
+;; SPC and DEL give up `special-mode's scrolling for line motion, the way
+;; dired's do.
+;;
+;; Which grains each buffer has is decided by what it holds, and the split
+;; is what made that plain: the block has the fine grain and the coarse one
+;; -- session lines and the details under them -- and no landmarks, since
+;; nothing in it is a log line and `>' would have stopped on nothing.  The
+;; log is the other way round.  Neither is missing a key it could have used;
+;; each has the ones its own content answers.
 (define-key agent-river-mode-map (kbd "n") #'agent-river-next-line)
 (define-key agent-river-mode-map (kbd "p") #'agent-river-previous-line)
 (define-key agent-river-mode-map (kbd "SPC") #'agent-river-next-line)
@@ -6067,19 +6258,38 @@ for opening or closing the thing under the heading."
 (define-key agent-river-mode-map [remap previous-line] #'agent-river-previous-line)
 (define-key agent-river-mode-map (kbd "M-n") #'agent-river-next-session)
 (define-key agent-river-mode-map (kbd "M-p") #'agent-river-previous-session)
-(define-key agent-river-mode-map (kbd ">") #'agent-river-next-notable)
-(define-key agent-river-mode-map (kbd "<") #'agent-river-previous-notable)
 ;; RET works on a session line through a keymap text property, which leaves
 ;; it doing nothing everywhere else.  Bound here it says why instead.
 (define-key agent-river-mode-map (kbd "RET") #'agent-river-visit-session)
 ;; `special-mode' puts `revert-buffer' on g, which has nothing to revert to.
 (define-key agent-river-mode-map (kbd "g") #'agent-river-refresh)
 ;; The one key here that writes to a session rather than reading one, and it
-;; still asks which option before it does: the HUD is a view, so a keystroke
-;; that granted an agent `allow_always' outright would be the wrong place for
-;; a typo.  Bound whether or not `agent-river-approvals-mode' is on, so the
-;; answer to pressing it is a sentence rather than nothing happening.
+;; still asks which option before it does: the block is a view, so a
+;; keystroke that granted an agent `allow_always' outright would be the
+;; wrong place for a typo.  Bound whether or not `agent-river-approvals-mode'
+;; is on, so the answer to pressing it is a sentence rather than nothing
+;; happening.
 (define-key agent-river-mode-map (kbd "a") #'agent-river-answer)
+;; The log hangs off the block rather than the other way about: this is the
+;; buffer that is opened first and the one a reader comes back to, so the
+;; way to the other is here and there is none going back.  `q' is.
+(define-key agent-river-mode-map (kbd "l") #'agent-river-show-log)
+
+;; The log's own two grains.  No `M-n': a log line has no coarse structure
+;; over it, which is exactly what the block took away with it.
+(define-key agent-river-log-mode-map (kbd "n") #'agent-river-next-line)
+(define-key agent-river-log-mode-map (kbd "p") #'agent-river-previous-line)
+(define-key agent-river-log-mode-map (kbd "SPC") #'agent-river-next-line)
+(define-key agent-river-log-mode-map (kbd "DEL") #'agent-river-previous-line)
+(define-key agent-river-log-mode-map [remap next-line] #'agent-river-next-line)
+(define-key agent-river-log-mode-map [remap previous-line] #'agent-river-previous-line)
+(define-key agent-river-log-mode-map (kbd ">") #'agent-river-next-notable)
+(define-key agent-river-log-mode-map (kbd "<") #'agent-river-previous-notable)
+;; Nothing here can be behind -- the log is written as it happens -- so `g'
+;; redraws the other buffer, which is the only thing either of them has that
+;; can be.  It is still better than `special-mode's `revert-buffer', which
+;; would answer a reader with an error about a file this buffer has not got.
+(define-key agent-river-log-mode-map (kbd "g") #'agent-river-refresh)
 
 (defun agent-river--stop-timer ()
   "Stop the refresh timer."
@@ -6137,12 +6347,6 @@ than at whatever the previous tick drew."
 (defvar agent-river--spinner-timer nil
   "Repeating timer animating the session markers, or nil while none runs.")
 
-(defun agent-river--block-limit ()
-  "Return where the state block ends in the current buffer."
-  (or (and (markerp agent-river--block-end)
-           (marker-position agent-river--block-end))
-      (point-min)))
-
 (defun agent-river--spinning-p (buffer)
   "Return non-nil while BUFFER's state block has a marker to animate.
 
@@ -6155,7 +6359,7 @@ for an agent-shell session walks every buffer in Emacs.  Six times a
 second, that was most of what the animation cost."
   (and (buffer-live-p buffer)
        (with-current-buffer buffer
-         (and (text-property-not-all (point-min) (agent-river--block-limit)
+         (and (text-property-not-all (point-min) (point-max)
                                      'agent-river-spinner nil)
               t))))
 
@@ -6164,11 +6368,12 @@ second, that was most of what the animation cost."
 With STOP, take the frames off and leave the bare stars instead.
 
 Each star carries its session's phase as the value of its
-`agent-river-spinner' property, so what to draw is read off the mark.
-Scoped to the state block, which is the only place the marks are, and
-found by the property rather than by looking for a star in the text --
-the log below carries the agent's own words and a line of it may well
-begin with one.
+`agent-river-spinner' property, so what to draw is read off the mark,
+and the stars are found by that property rather than by looking for one
+in the text.  That mattered most while the log ran underneath -- a line
+of the agent's own words may well begin with a star -- and it is kept
+because the property is what says which session a star belongs to, which
+no search of the text could answer.
 
 `with-silent-modifications' because this is not an edit anyone should be
 able to undo, and at this rate an undo list of frame changes would grow
@@ -6176,7 +6381,7 @@ without bound."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (with-silent-modifications
-        (let ((end (agent-river--block-limit))
+        (let ((end (point-max))
               (pos (point-min)))
           (while (setq pos (text-property-not-all pos end 'agent-river-spinner nil))
             (let ((glyph (and (not stop)
