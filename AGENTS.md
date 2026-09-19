@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (459 tests). -L . is required: the tests require all four .el files.
+# Full suite (462 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1000,6 +1000,34 @@ before the deletion, so that deferring is not the same as forgetting.
   one `since` and a kind that failed or came back at the limit holds the
   mark for all of them. Loose in one direction only — the kinds that did
   answer are asked again next run, which costs their deleted files.
+  **Asking nothing is not the same as asking and being answered**
+  (`asked`): `complete` starts at 1 and an unknown kind is skipped without
+  clearing it, so a run whose every kind was a typo asked GitHub nothing and
+  then stamped the mark at the moment of the run — after which the next
+  correctly configured run asks about a window that has passed, and
+  everything before it is missed permanently. The per-kind reasoning (no
+  window is being missed, because nothing will ever ask about one) is sound
+  and does not cover every kind at once, which is precisely what a typo in a
+  crontab is.
+- **The one thing the script says out loud is a query that failed**, one
+  line on stdout, logged by `agent-river-gh--reporter`. It is the exception
+  to the no-op rule and the reason is that two kinds hide what one could
+  not: a kind failing *persistently* — an old `gh` rejecting a field, a
+  token short a scope, pull requests disabled — holds the mark for ever
+  while the other kind goes on delivering, so the window grows without bound
+  and the poll looks healthy from Emacs. With one query a failure meant no
+  deliveries at all, which is at least visible. The filter is line-buffered
+  because a filter is handed whatever arrived rather than whatever was
+  written.
+- **The poll asks `--state all`, and that is what makes the queue a queue.**
+  Asked for the open ones alone, a thing that merges simply stops being
+  delivered: `:gone` is never set and the record sits in the domain section
+  — the queue of what nobody has picked up — until somebody runs
+  `agent-river-drop-artifact` by hand. Pull requests close far faster than
+  issues, which is what made it worth fixing rather than a second thing to
+  live with. It costs no extra request, where a second query for what has
+  closed would, and what arrives is bounded by the window either way: it is
+  what *ended* since the last poll, not every closed thing there is.
 - **An issue and a pull request are one dialect and two source names**
   (`agent-river-gh--domains`, `AGENT_RIVER_GH_KINDS`). The script names
   which query an answer came out of — `gh` or `gh-pr` — and nests it under
@@ -1032,7 +1060,21 @@ before the deletion, so that deferring is not the same as forgetting.
   malformed and filed under `failed/`, which nothing re-reads. The same
   silence is why the poller is handed `AGENT_RIVER_SPOOL` — bound into
   `process-environment`, since `make-process` has no `:environment` argument
-  and ignores one without complaining.
+  and ignores one without complaining. **Everything in `--poll-1` is inside
+  the guard, the bindings included** — they were above it, and this runs on
+  a repeating timer, so a non-string in `agent-river-gh-repos` threw out of
+  `agent-river-gh-poll` before the guard could catch it: the
+  `--resolve-pending` shape at a five-minute period. The handler drops what
+  it recorded pushing rather than what it was passed, because it must not
+  assume the binding that threw ever completed.
+- **Four places know the kinds, and all four are pinned.**
+  `agent-river-gh--domains` is the table; the registering form spells the
+  source names out because it runs before the table exists; and the
+  script's two `case` arms are read by a test rather than run, since asking
+  one question is not worth becoming the first test in this suite that
+  shells out. Unpinned, the script's arms fall through to `return 1` for a
+  kind Emacs happily asks for — nothing delivered, nothing logged, an empty
+  section that reads as a quiet week.
 - **The prompt is still quoted, and the reason has changed** (`agent-river-gh-brief`).
   An issue is text written by whoever can open one and it reaches an agent
   holding tools. With a person in the loop the person is the defence, so the

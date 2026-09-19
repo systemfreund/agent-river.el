@@ -26,8 +26,24 @@
 # program either way, which is the point: an Emacs that is not running must
 # not be a reason for an issue to go unseen.
 #
+# It writes one line to stdout per query that failed, and nothing else ever.
+# That is the exception to "every step degrades to a no-op", and the reason is
+# that a *persistent* failure here is invisible from the other side: the mark
+# is then never stamped again, the window grows without bound, and the whole
+# issue set is re-delivered every interval for as long as the Emacs runs.  One
+# kind failing while another answers is the case that hides it -- deliveries
+# keep arriving, so the poll looks healthy.  `agent-river-gh--poll-1' logs the
+# line into the HUD; under cron the same line is the mail, which for a failure
+# that is not transient is the point rather than the cost.
+#
+# Both queries go through GitHub's *search* endpoint, because of `--search'.
+# Its secondary limit is much tighter than the REST one -- roughly 30 requests
+# a minute -- and this is two requests per repository per poll.  A couple of
+# dozen repositories on one tick can brush it, and a rate-limited query is a
+# failed query: it holds the watermark and now says so.
+#
 # Environment:
-#   AGENT_RIVER_SPOOL      where issues are delivered
+#   AGENT_RIVER_SPOOL      where deliveries are written
 #   AGENT_RIVER_GH_STATE   where the watermark is kept
 #   AGENT_RIVER_GH_LIMIT   how many of each to ask for (default 50)
 #   AGENT_RIVER_GH_SINCE   first-run lookback, a gh search date (default 1 day)
@@ -120,13 +136,25 @@ fi
 # in one direction only: the kinds that did answer are asked again next run,
 # which costs their deleted files.
 complete=1
+asked=0
+
+# `set -f' because `$kinds' is left unquoted deliberately -- field splitting is
+# how a list arrives through one environment variable -- and unquoted means
+# pathname expansion too.  `AGENT_RIVER_GH_KINDS=*' would otherwise iterate the
+# filenames in the checkout: every one fails `fields_for' and is skipped, so
+# the effect today is only that the run asks nothing, but that is now the
+# `asked' case below rather than nothing at all, and a configuration value that
+# reads the working directory is a surprise whatever it goes on to do.
+set -f
 
 for kind in $kinds; do
   # An unknown kind is a typo in somebody's configuration, and the mark is not
-  # held for it: there is no window being missed, because nothing will ever
-  # ask about one.  Emacs rejects it before it gets here -- see
-  # `agent-river-gh--kinds' -- so this is the cron path saying no quietly,
-  # which is what every other step in this script does too.
+  # held for it *on its own account*: there is no window being missed, because
+  # nothing will ever ask about one.  Emacs rejects it before it gets here --
+  # see `agent-river-gh--kinds' -- so this is the cron path saying no quietly,
+  # which is what every other step in this script does too.  What that
+  # reasoning does not cover is every kind being rejected, which is the
+  # `asked' guard below.
   fields=$(fields_for "$kind") || continue
   src=$(source_for "$kind") || continue
 
@@ -139,9 +167,20 @@ for kind in $kinds; do
   # degrade to a no-op: every other step loses nothing, this one loses issues
   # permanently, because the next run asks about a window that has passed.
   answer=$(mktemp 2>/dev/null) || { complete=0; continue; }
-  if ! gh "$kind" list --state open --limit "$limit" \
+  # `--state all', not `open'.  Asked for the open ones alone, a pull request
+  # that merges simply stops being delivered: `:gone' is never set, and the
+  # record sits in the domain section -- the queue of what nobody has picked
+  # up -- for ever, which is precisely what that section exists not to show.
+  # Pull requests close far faster than issues do, so this is the kind that
+  # made it worth fixing.  It costs no extra request, which a second query for
+  # what has closed would, and the reader already folds `closed' and `merged'
+  # into `:gone'; what arrives is bounded by the window either way, so it is
+  # what *ended* since the last poll rather than every closed thing there is.
+  asked=1
+  if ! gh "$kind" list --state all --limit "$limit" \
        --search "updated:>=$since" --json "$fields" \
        --jq '.[]' > "$answer" 2>/dev/null; then
+    printf 'river-gh: %s query failed in %s\n' "$kind" "$repo"
     rm -f "$answer"
     complete=0
     continue
@@ -177,8 +216,17 @@ for kind in $kinds; do
   [ "$count" -lt "$limit" ] || complete=0
 done
 
-# Only after queries that were answered and were not cut short: a failed or
-# truncated run must not move the watermark past objects it never looked at.
+set +f
+
+# At least one query ran, *and* all of them answered within the limit.  The
+# first half is not pedantry: `complete' starts at 1 and an unknown kind is
+# skipped without clearing it, so a run whose every kind was a typo asked
+# GitHub nothing and then stamped the mark at the moment of the run -- after
+# which the next correctly configured run asks `updated:>=<that moment>' and
+# everything before it is missed permanently.  A typo in a crontab is exactly
+# that, and a typo by definition gets fixed later, so the damage is done in the
+# window between the two.  Asking nothing has to read as not having looked.
+[ "$asked" -eq 1 ] || exit 0
 [ "$complete" -eq 1 ] || exit 0
 
 printf '%s' "$now" > "$mark"

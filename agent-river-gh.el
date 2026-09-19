@@ -54,7 +54,7 @@
 (require 'agent-river-spool)
 
 (defgroup agent-river-gh nil
-  "GitHub issues as a source of artifacts."
+  "GitHub issues and pull requests as a source of artifacts."
   :group 'agent-river-spool
   :prefix "agent-river-gh-")
 
@@ -73,6 +73,11 @@ Both by default.  The map's domain section is the queue of what nobody
 has picked up, and a pull request waiting for review is the plainest
 instance of one there is; the cost of having it on the map is a second
 API call per repository per poll.
+
+Each kind is asked for in every state rather than only the open ones, so
+a thing that ends is delivered once more on the tick it ended in and its
+record is struck through.  Asked for the open ones alone it would simply
+stop arriving, and sit in the section for ever as something to pick up.
 
 Bound into the poller's environment by `agent-river-gh--poll-1' rather
 than left to the script's own default, for exactly the reason
@@ -120,8 +125,8 @@ GitHub object as an artifact -- and each is a number, a title, a body
 somebody else wrote and a state that can be over.  They differ in this
 symbol, which is also the key's prefix, and in nothing a reader does.")
 
-(defun agent-river-gh--labels (issue)
-  "Return ISSUE's labels as one string, for the context.
+(defun agent-river-gh--labels (object)
+  "Return OBJECT's labels as one string, for the context.
 
 Comma-joined *and* comma-wrapped: `,bug,' matches exactly where `bug'
 would also match `debug' and `bugfix'.  Nothing in this package matches
@@ -130,7 +135,7 @@ whether to say anything about an issue will, and the loose reading is the
 one nobody means."
   (let ((names (seq-remove #'null
                            (seq-map (lambda (label) (alist-get 'name label))
-                                    (append (alist-get 'labels issue) nil)))))
+                                    (append (alist-get 'labels object) nil)))))
     (when names (format ",%s," (string-join names ",")))))
 
 (defun agent-river-gh--context (data object)
@@ -154,7 +159,12 @@ brief needs to decide whether a pull request is worth a session at all,
 and `fork' is the one that says whether the text above it really came
 from a stranger."
   (append
-   `((url . ,(alist-get 'url object)))
+   ;; Guarded like every sibling, and it is the guard rather than the cell
+   ;; that matters: unguarded, a record with no url carried `(url . nil)'
+   ;; into the table, where `agent-river--rows-artifact' draws every cell it
+   ;; finds -- a row saying `url: nil' about a thing that has none.
+   (when-let* ((url (agent-river-spool--string (alist-get 'url object))))
+     `((url . ,url)))
    (when-let* ((author (alist-get 'login (alist-get 'author object))))
      `((author . ,author)))
    (when-let* ((labels (agent-river-gh--labels object)))
@@ -170,8 +180,14 @@ from a stranger."
    (when-let* ((review (agent-river-spool--string
                         (alist-get 'reviewDecision object))))
      `((review . ,review)))
-   (when (alist-get 'isDraft object) '((draft . t)))
-   (when (alist-get 'isCrossRepository object) '((fork . t)))
+   ;; Consed rather than quoted.  `append' copies all but its last argument,
+   ;; so a record with no body would hand the table a cell shared with a
+   ;; constant in this file.  `agent-river--artifact-merge' builds every cell
+   ;; fresh and says in as many words that a producer's list may be a quoted
+   ;; literal, so nothing is broken by it -- but the safety is then one file
+   ;; away from the mistake, and this is the file that knows it made one.
+   (when (alist-get 'isDraft object) (list (cons 'draft t)))
+   (when (alist-get 'isCrossRepository object) (list (cons 'fork t)))
    (when-let* ((body (agent-river-spool--string (alist-get 'body object))))
      `((body . ,body)))))
 
@@ -203,10 +219,13 @@ not a reason to spend it."
       (list :key (format "%s:%s#%s" domain repo number)
             :domain domain
             :name name
-            ;; Closed rather than open, which the default poll never asks
-            ;; for -- but a poller that does gets the ending folded, and an
-            ;; ended record is struck through rather than removed.  `merged'
-            ;; was written here before there was anything that could be.
+            ;; Reached by the ordinary poll, which asks `--state all': a
+            ;; thing that ends is delivered once more, on the tick it ended
+            ;; in, and the record is struck through rather than removed.
+            ;; Asked for the open ones alone this arm was unreachable, and a
+            ;; merged pull request sat in the domain section for ever -- the
+            ;; queue of what nobody has picked up, showing what nobody needs
+            ;; to.
             :gone (and state (member (downcase state) '("closed" "merged")) t)
             :text name
             :context (agent-river-gh--context data object)))))
@@ -279,12 +298,24 @@ through here, and the next field to arrive is covered before it is
 written.
 
 An empty part is the blank quoted line between the head and the body,
-and is spelled without the trailing space a prefix alone would leave."
+and is spelled without the trailing space a prefix alone would leave.
+
+A part's *trailing* blank lines are dropped, because a GitHub body
+commonly ends in a newline and `split-string' answers that with a final
+empty string -- which came out as a lone `>' hanging under the
+quotation.  Only the trailing ones: a blank line inside a body is a
+paragraph break and is the reader's, and an empty part is the separator
+above and is ours."
   (mapconcat
    (lambda (part)
-     (mapconcat (lambda (line)
-                  (if (string-empty-p line) ">" (concat "> " line)))
-                (split-string (or part "") "\r?\n") "\n"))
+     (if (string-empty-p (or part ""))
+         ">"
+       (let ((lines (split-string part "\r?\n")))
+         (while (and (cdr lines) (string-empty-p (car (last lines))))
+           (setq lines (butlast lines)))
+         (mapconcat (lambda (line)
+                      (if (string-empty-p line) ">" (concat "> " line)))
+                    lines "\n"))))
    parts "\n"))
 
 ;;;###autoload
@@ -362,6 +393,26 @@ inside."
   (seq-filter (lambda (kind) (rassq kind agent-river-gh--domains))
               agent-river-gh-kinds))
 
+(defun agent-river-gh--reporter (dir)
+  "Return a process filter logging what the poller of DIR reports.
+
+Line-buffered, because a filter is handed whatever arrived rather than
+whatever was written: a report split across two chunks would otherwise
+be logged as two half-lines, and the log is line-based.  The remainder
+is kept in the closure and a report the process dies mid-way through is
+dropped, which is the same bargain `agent-river--say-runs' makes one
+mechanism over -- half a sentence said is worse than nothing said."
+  (let ((pending ""))
+    (lambda (_process chunk)
+      (setq pending (concat pending chunk))
+      (while (string-match "\n" pending)
+        (let ((line (string-trim (substring pending 0 (match-beginning 0)))))
+          (setq pending (substring pending (match-end 0)))
+          (unless (string-empty-p line)
+            (agent-river-log
+             "fail" (agent-river--log-text
+                     (format "%s in %s" line (abbreviate-file-name dir))))))))))
+
 (defun agent-river-gh--poll-1 (dir &optional rescan)
   "Start a poll of DIR, unless one is already out for it.
 
@@ -376,53 +427,76 @@ incremental polling alone would leave a restarted Emacs looking at an
 empty map until somebody touched an issue on GitHub.  Asking wide once,
 when the mode is switched on, is the whole of the repair.
 
-Does nothing where there is no kind to ask for: see `agent-river-gh--kinds'."
-  (let ((dir (expand-file-name dir))
-        (kinds (agent-river-gh--kinds)))
-    (unless (or (null kinds) (member dir agent-river-gh--running))
-      (push dir agent-river-gh--running)
-      (condition-case err
-          ;; The script takes the spool from the environment and defaults to
-          ;; the same XDG path `agent-river-spool' defaults to, which
-          ;; is exactly why leaving this out passes today and would stop
-          ;; passing for the first person to customise it: the poller would
-          ;; write to the old path, or -- more often -- exit 0 at its own
-          ;; `[ -d "$spool" ]' without writing at all.  Both are silent in the
-          ;; same way, since the process exits 0 and the sentinel reports
-          ;; success; the only symptom is that nothing ever arrives.
-          ;;
-          ;; Bound rather than passed: `make-process' has no `:environment'
-          ;; argument and ignores one without complaining, which fails in
-          ;; precisely the same silence.
-          (let ((process-environment
-                 (append (list (concat "AGENT_RIVER_SPOOL="
-                                       (expand-file-name
-                                        agent-river-spool))
-                               (concat "AGENT_RIVER_GH_KINDS="
-                                       (mapconcat #'symbol-name kinds " ")))
-                         (when rescan '("AGENT_RIVER_GH_RESCAN=1"))
-                         process-environment)))
-            (make-process
-             :name "agent-river-gh"
-             :command (list (or (executable-find "sh") "sh")
-                            agent-river-gh-script dir)
-             :noquery t
-             :connection-type 'pipe
-             :buffer nil
-             :sentinel (lambda (_process event)
-                         (setq agent-river-gh--running
-                               (delete dir agent-river-gh--running))
-                         (unless (string-prefix-p "finished" event)
-                           (agent-river-log
-                            "fail" (agent-river--log-text
-                                    (format "gh poll of %s: %s"
-                                            (abbreviate-file-name dir)
-                                            (string-trim event))))))))
-        (error
-         (setq agent-river-gh--running (delete dir agent-river-gh--running))
-         (agent-river-log "fail" (agent-river--log-text
-                                  (format "gh poll failed: %s"
-                                          (error-message-string err)))))))))
+Does nothing where there is no kind to ask for: see `agent-river-gh--kinds'.
+
+Everything is inside the guard, the bindings included.  They were above
+it, and this runs on a *repeating* timer: a non-string in
+`agent-river-gh-repos', or an `agent-river-gh-kinds' that is not a
+sequence, threw out of `agent-river-gh-poll' before the guard could
+catch it -- the shape `agent-river-launch--resolve-pending' is guarded
+against, at a five-minute period rather than a one-second one.  PUSHED
+rather than DIR in the handler, because the handler must not assume the
+binding that threw ever completed."
+  (let (pushed)
+    (condition-case err
+        (let ((dir (expand-file-name dir))
+              (kinds (agent-river-gh--kinds)))
+          (unless (or (null kinds) (member dir agent-river-gh--running))
+            (push dir agent-river-gh--running)
+            (setq pushed dir)
+            ;; The script takes the spool from the environment and defaults to
+            ;; the same XDG path `agent-river-spool' defaults to, which is
+            ;; exactly why leaving this out passes today and would stop
+            ;; passing for the first person to customise it: the poller would
+            ;; write to the old path, or -- more often -- exit 0 at its own
+            ;; `[ -d "$spool" ]' without writing at all.  Both are silent in
+            ;; the same way, since the process exits 0 and the sentinel
+            ;; reports success; the only symptom is that nothing ever arrives.
+            ;;
+            ;; Bound rather than passed: `make-process' has no `:environment'
+            ;; argument and ignores one without complaining, which fails in
+            ;; precisely the same silence.
+            (let ((process-environment
+                   (append (list (concat "AGENT_RIVER_SPOOL="
+                                         (expand-file-name agent-river-spool))
+                                 (concat "AGENT_RIVER_GH_KINDS="
+                                         (mapconcat #'symbol-name kinds " ")))
+                           (when rescan '("AGENT_RIVER_GH_RESCAN=1"))
+                           process-environment)))
+              (make-process
+               :name "agent-river-gh"
+               :command (list (or (executable-find "sh") "sh")
+                              agent-river-gh-script dir)
+               :noquery t
+               :connection-type 'pipe
+               :buffer nil
+               ;; The script writes one line per query that failed and nothing
+               ;; else ever, so anything arriving here is a failure report.
+               ;; Without it a kind that fails *persistently* -- an old `gh'
+               ;; that rejects a field, a token short a scope, pull requests
+               ;; disabled -- is invisible: the other kind goes on delivering,
+               ;; the process exits 0, the sentinel reports success, and the
+               ;; watermark is held for ever while the window grows without
+               ;; bound.  One query failing used to mean no deliveries at all,
+               ;; which is at least visible; with two, the working one masks
+               ;; the broken one.
+               :filter (agent-river-gh--reporter dir)
+               :sentinel
+               (lambda (_process event)
+                 (setq agent-river-gh--running
+                       (delete dir agent-river-gh--running))
+                 (unless (string-prefix-p "finished" event)
+                   (agent-river-log
+                    "fail" (agent-river--log-text
+                            (format "gh poll of %s: %s"
+                                    (abbreviate-file-name dir)
+                                    (string-trim event))))))))))
+      (error
+       (when pushed
+         (setq agent-river-gh--running (delete pushed agent-river-gh--running)))
+       (agent-river-log "fail" (agent-river--log-text
+                                (format "gh poll failed: %s"
+                                        (error-message-string err))))))))
 
 ;;;###autoload
 (defun agent-river-gh-poll (&optional rescan)

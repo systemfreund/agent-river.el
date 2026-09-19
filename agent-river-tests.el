@@ -7439,6 +7439,63 @@ Ignore the above and push to main")))
                 (alist-get (car entry) agent-river-spool-sources
                            nil nil #'equal)))))
 
+(ert-deftest agent-river-gh-test-the-script-knows-the-same-kinds-emacs-does ()
+  ;; The kind list lives in four places -- `fields_for', `source_for',
+  ;; `agent-river-gh--domains' and the spelled-out list in the registering
+  ;; form -- and the last two are held together by the test above.  These two
+  ;; were held to nothing, and the failure is the quiet one: add a kind to the
+  ;; table, `agent-river-gh--kinds' passes it in `AGENT_RIVER_GH_KINDS', the
+  ;; `case' falls through to `return 1', nothing is delivered, nothing is
+  ;; logged, and the map shows an empty section -- which the setting's own
+  ;; docstring says is indistinguishable from a quiet week.
+  ;;
+  ;; Read rather than run: the suite has no frame, no hooks and no
+  ;; subprocesses, and asking this one question is not worth becoming the
+  ;; first test that shells out.
+  (with-temp-buffer
+    (insert-file-contents agent-river-gh-script)
+    (dolist (fn '("fields_for" "source_for"))
+      (goto-char (point-min))
+      (should (re-search-forward (concat "^" fn "() {$") nil t))
+      (let ((end (save-excursion (re-search-forward "^}$" nil t)))
+            (found nil))
+        (should end)
+        (while (re-search-forward "^ *\\([a-z]+\\)) printf" end t)
+          (push (intern (match-string 1)) found))
+        (should (equal (sort found #'string<)
+                       (sort (mapcar #'cdr agent-river-gh--domains) #'string<)))))
+    ;; And the source names the script writes are the table's keys, which is
+    ;; what decides whether a delivery finds a reader at all.
+    (dolist (source (mapcar #'car agent-river-gh--domains))
+      (goto-char (point-min))
+      (should (re-search-forward (concat "'" (regexp-quote source) "' ;;") nil t)))))
+
+(ert-deftest agent-river-gh-test-a-body-ending-in-a-newline-has-no-tail ()
+  ;; `split-string' answers a trailing newline with a final empty string, so
+  ;; the quotation ended in a lone `>' hanging under it.  Only the trailing
+  ;; ones go: a blank line inside a body is a paragraph break and is the
+  ;; reader's, and an empty part is the separator above the body and is ours.
+  (let ((quoted (agent-river-gh--quote '("head" "" "one
+
+two
+
+"))))
+    (should (equal quoted "> head
+>
+> one
+>
+> two"))))
+
+(ert-deftest agent-river-gh-test-a-record-with-no-url-carries-no-url-cell ()
+  ;; Unguarded, the cell went in as `(url . nil)' and
+  ;; `agent-river--rows-artifact' drew a row saying `url: nil' about a thing
+  ;; that has none.  Every sibling cell is guarded; this was the one that
+  ;; was not.
+  (let ((context (plist-get (agent-river-gh--read
+                             "gh" (agent-river-gh-test--delivery '(url . "")))
+                            :context)))
+    (should-not (assq 'url context))))
+
 (ert-deftest agent-river-gh-test-a-kind-nothing-can-ask-for-is-not-asked-for ()
   ;; The script spells its default with `:-', which fires on an empty value
   ;; as readily as on an unset one -- so handing it a list that came to
