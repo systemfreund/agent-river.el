@@ -343,7 +343,20 @@ to prevent. Note what happened, never what you think about it.
 ;; (inc review file)
 
 (agent-river-children "<session-id>")   ; subagent states
+
+(agent-river-spend)                     ; what the sessions have cost
+;; (:totals (("USD" . 30.62))
+;;  :sessions ((:label "event log tweak" :cost 24.32 :currency "USD")
+;;             (:label "alpha" :cost 6.30 :currency "USD")))
 ```
+
+`agent-river-spend` is a query rather than a line in the HUD, because a total
+across sessions belongs to no session and would need a line or a header of its
+own. The figures are agent-shell's, sampled as the sessions worked, and they
+outlive the buffers they came from: a session whose shell buffer has been killed
+still answers for what it cost, which reading `agent-shell--state` cannot do.
+Totals are summed **per currency**, since this is the one place the figure
+itself is shown and two currencies added together are a number true of neither.
 
 `agent-river-touching` is the one that earns its keep: two agents editing the
 same file without knowing about each other is a real hazard in a worktree setup.
@@ -630,8 +643,8 @@ One buffer, two halves: a state block of one line per live session, rewritten on
 every fold, over a **newest-first** log.
 
 ```
-* supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches) · 1 subagent
-* supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
+* supersonic.el    · editing · |⣶⣶⣷⣴⣀⣀| · 4m12s · 23 steps · mpv.el (6 touches)
+* supersonic.el<2> · editing · |⠀⠀⣀⣤⣶⣿| · 2 steps · supersonic-mpv.el (2 touches)
 
 19:07:03 super<2> ▸ Edit  supersonic-mpv.el
 19:06:58 superson ▸ Read  Cask ✓  2ms
@@ -645,6 +658,20 @@ otherwise complete each other. The block is one line per live session, ordered
 by label. `◇` lines are the agent's own reasoning and `“` lines
 what it said at the end of a turn; neither is in any hook payload, so both come
 from the session's agent-shell buffer where there is one.
+
+The `|…|` column is what the session has been **spending**, one bar per
+`agent-river-spend-interval` (five minutes) across `agent-river-spend-width`
+characters of braille — two bars to a character, so the default six cover an
+hour. The figure behind it is agent-shell's running cost, which only ever goes
+up; the graph is the *difference* between successive readings, so it says when
+the money went rather than how much there has been. All the session lines share
+one scale so they can be read against each other, a bar the session was alive
+for and spent nothing in draws one dot where a bar from before it was first seen
+draws none, and the first reading of a session is never spending — a cumulative
+figure attributed to the moment Emacs first looked would draw the whole history
+as one spike. `agent-river-spend-width` nil turns it off. No hook payload carries
+a cost, so a session run from a terminal has no graph, the way it has no `◇`
+lines.
 
 The HUD is deliberately **not** Markdown: its log carries prompts, reasoning and
 tool arguments — text this package does not control — and Markdown would let
