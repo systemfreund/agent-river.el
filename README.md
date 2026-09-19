@@ -657,10 +657,12 @@ by any window you have not scrolled away from.
 `M-x agent-river-show` opens the block in a side window on the right, sized to
 what it holds; `l` there — or `M-x agent-river-show-log` — opens the log in the
 slot beneath it, which is the layout the two had when they shared one buffer.
-`agent-river-auto-display` opens **the block** when an event arrives and no
-window is showing it. Never the log: a view that reappears on the event after
-you closed it is a view overruling you, and the log is written whether or not
-anybody is looking at it. The keys are shared with the map and the approval queue, but each
+`agent-river-auto-display` opens **the block** on the first event of an Emacs
+session, if nothing is showing it — once, and then not again: closing that
+window is you saying what you want your screen to be, and a view that comes
+back on the next tool call overrules you several times a minute. Never the log,
+which is written whether or not anybody is looking at it. Either one comes back
+by asking. The keys are shared with the map and the approval queue, but each
 buffer takes only the grains its own content answers: `n`/`p` in both,
 `M-n`/`M-p` over session lines in the block, `>`/`<` over the landmarks
 (`agent-river-notable-kinds`) in the log.

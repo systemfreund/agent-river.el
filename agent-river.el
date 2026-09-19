@@ -93,17 +93,26 @@ is one line."
   :type 'integer)
 
 (defcustom agent-river-auto-display t
-  "Whether an event opens the state block when no window is showing it.
+  "Whether the first event opens the state block, when nothing is showing it.
 
-The block only.  It is bounded -- a line per live session -- and it is
-what an onlooker is for, so a window appearing for it when an agent
-starts working is the package doing its job.  The log is the opposite on
-both counts, and while the two shared a buffer that could not be said:
-one buffer, one window, one answer.  Apart, an event that opened the log
-opened it *again* every time, on the event after the one the reader had
-closed it on -- a view reopening itself is not a view being helpful, it
-is a view overruling a decision somebody just made.  So the log is
-opened by asking (`agent-river-show-log', or `l' in the block).
+The first event, and only the first (`agent-river--block-shown').  The
+block is bounded -- a line per live session -- and it is what an onlooker
+is for, so a window appearing for it when the first agent starts working
+is the package doing its job.  A window appearing for it *again* is the
+opposite: deleting that window is a reader saying what they want their
+screen to be, and a view that comes back on the next tool call overrules
+that decision several times a minute for as long as the task runs.  So
+the opening happens once, and after it the window is the reader's --
+`agent-river-show' is how it comes back, which is the same asking the log
+has always needed.
+
+The log is never opened by an event at all, being the opposite of the
+block on both counts, and while the two shared a buffer that could not be
+said: one buffer, one window, one answer.  Apart, an event that opened
+the log opened it every time, on the event after the one the reader had
+closed it on -- which is the same failure as above, met earlier and one
+buffer over.  So the log is opened by asking (`agent-river-show-log', or
+`l' in the block).
 
 What that gives up is that a line nobody is looking at is a line nobody
 sees.  The rule it appears to bend -- never go quiet -- is about writing
@@ -5871,6 +5880,26 @@ longer happens here because the two are no longer one buffer."
     (agent-river--follow buffer following)
     kind))
 
+(defvar agent-river--block-shown nil
+  "Non-nil once the block has been on screen in this Emacs.
+
+What `agent-river-auto-display' reads to open the block once and not
+again.  A plain flag rather than anything derived, because the fact it
+records is that the offer has been made -- a window deleted afterwards
+leaves nothing behind to ask, which is exactly why the old test (is one
+showing right now) reopened the block on the event after every time the
+reader closed it.
+
+Set three ways, all of them the block having been on screen: the event
+that opens it, `agent-river-show' being asked, and an event that finds a
+window already showing it.  The third is what keeps a reload honest --
+this file is reloaded into a live Emacs several times an hour, which
+clears the flag, and without it a block that has been up all morning
+would be reopened once more the next time the reader closed it.
+
+Never cleared, `agent-river-reset' included: forgetting what the sessions
+did is not a request for a window.")
+
 ;;;###autoload
 (defun agent-river-show ()
   "Display the state block in a side window on the right.
@@ -5881,6 +5910,7 @@ somebody put the block in themselves is theirs, and resizing it under
 them would be this package writing into a window it was never pointed
 at."
   (interactive)
+  (setq agent-river--block-shown t)
   (display-buffer (agent-river--buffer)
                   `((display-buffer-in-side-window)
                     (side . right)
@@ -6194,11 +6224,19 @@ which may."
   "Draw the block for something that has just been folded.
 
 The event\='s way in, where `agent-river--redraw-block' is the timer\='s: this
-creates the buffer when it has been killed and opens a window for it under
-`agent-river-auto-display', and a tick must do neither.  A buffer the user
-killed stays killed until something happens, and then it is the something
-that brings it back -- which is how it has always worked, from when every
-event went through `agent-river-log' and the block came with it.
+creates the buffer when it has been killed and may open a window for it
+under `agent-river-auto-display', and a tick must do neither.  A buffer
+the user killed stays killed until something happens, and then it is the
+something that brings it back -- which is how it has always worked, from
+when every event went through `agent-river-log' and the block came with
+it.
+
+A *window* the user closed is the other way round and stays closed: the
+opening is offered once per Emacs, and `agent-river--block-shown' is what
+remembers the offer was made.  Whether a window is showing it is still
+asked, and answers a different question -- has it ever been on screen
+versus is it on screen now -- which is why the branch where it is sets
+the flag rather than doing nothing.
 
 Called wherever a fold has moved what the block draws, which is now an
 explicit step rather than a side effect of logging.  That is the price of
@@ -6207,8 +6245,15 @@ on every line that is written about one."
   (let* ((buffer (agent-river--buffer))
          (shown (get-buffer-window buffer t)))
     (agent-river--redraw-block)
-    (when (and agent-river-auto-display (not shown))
-      (agent-river-show))))
+    (if shown
+        ;; Finding it on screen is the offer having been made as surely as
+        ;; making it is, and recording that is what stops a reload -- which
+        ;; is how this package is worked on, several times an hour, and
+        ;; which arms the flag again -- from reopening a window the reader
+        ;; closes an hour later.
+        (setq agent-river--block-shown t)
+      (when (and agent-river-auto-display (not agent-river--block-shown))
+        (agent-river-show)))))
 
 ;;;###autoload
 (defun agent-river-toggle-details ()

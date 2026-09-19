@@ -350,6 +350,7 @@
   ;; what an onlooker is there for.
   (let ((shown nil)
         (agent-river-registry (make-hash-table :test 'equal))
+        (agent-river--block-shown nil)
         (agent-river-auto-display t))
     (agent-river-clear)
     (cl-letf (((symbol-function 'display-buffer)
@@ -361,6 +362,47 @@
     ;; Written all the same: being there to be opened is the whole of what
     ;; the log owes when nobody is looking at it.
     (should (string-match-p "Edit a\\.el" (agent-river-test--log-text)))))
+
+(ert-deftest agent-river-test-the-block-is-offered-once-and-not-again ()
+  ;; The offer is made once per Emacs.  Closing the window is the reader
+  ;; saying what they want their screen to be, and an event that puts it
+  ;; back overrules that several times a minute for the length of a task.
+  (let ((shown nil)
+        (agent-river-registry (make-hash-table :test 'equal))
+        (agent-river--block-shown nil)
+        (agent-river-auto-display t))
+    (cl-letf (((symbol-function 'display-buffer)
+               (lambda (buffer &rest _) (push (buffer-name (get-buffer buffer)) shown) nil)))
+      (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                   :detail "Edit a.el"))
+      (should (equal shown (list agent-river-buffer-name)))
+      ;; No window is showing it now either -- the stub opened none -- so
+      ;; the only thing standing between the reader and a second window is
+      ;; the flag.
+      (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                   :detail "Edit b.el"))
+      (should (equal shown (list agent-river-buffer-name)))
+      ;; And asking for it counts as the offer having been made: a reader
+      ;; who opened it by hand has already said where the block goes.
+      (setq shown nil agent-river--block-shown nil)
+      (agent-river-show)
+      (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                   :detail "Edit c.el"))
+      (should (equal shown (list agent-river-buffer-name)))
+      ;; And so does finding it on screen, which is what keeps a reload --
+      ;; which clears the flag -- from offering a block that has been up all
+      ;; morning one more time.
+      (setq shown nil agent-river--block-shown nil)
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+        (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                     :detail "Edit d.el")))
+      (should-not shown)
+      (should agent-river--block-shown)
+      (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                   :detail "Edit e.el"))
+      (should-not shown))
+    ;; The block itself is drawn throughout, window or no window.
+    (should (string-match-p "repo" (agent-river-test--block-text)))))
 
 (ert-deftest agent-river-test-a-tick-does-not-resurrect-a-killed-block ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
