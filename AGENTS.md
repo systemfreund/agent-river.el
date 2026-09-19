@@ -31,7 +31,7 @@ is the bridge, and there is one example hook wiring per host —
 ## Commands
 
 ```sh
-# Full suite (451 tests). -L . is required: the tests require all three .el files.
+# Full suite (457 tests). -L . is required: the tests require all three .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -943,6 +943,63 @@ process or a no-op. What is load-bearing already:
   with the launcher, debounced — that hook fires on every tool call.
 - **A full queue defers, it does not drop** — intake stops and the files stay
   in the inbox, one log line per scan rather than one per file.
+- **Every callback a user supplies is guarded, and a broken one is a
+  decision.** `:match`, `:gate`, `:launch`, `:prompt` and a launcher's
+  `:available-p` — the list is closed and the reason is the same each time,
+  but `:prompt` earned the sharpest version of it. The drain assigns
+  `agent-river-launch--queue` only after its loop, so an unwind out of it
+  leaves the queue holding candidates it has already decided and filed, and
+  every tick from then on decides them again — once a minute, for as long as
+  Emacs runs, with one `scan failed` line an hour as the only trace. A
+  prompt that throws falls to the dry run, which is where a rule that cannot
+  produce a prompt belongs anyway.
+- **Unavailable is absent** (`agent-river-launch--launcher`,
+  `--available-p`). The field was documented, implemented and asked by
+  nobody, so "this cannot run here" was discovered at the last possible
+  moment: the candidate drew armed, RET passed its check, the user
+  confirmed — and `--launch` then failed on the path that *finishes* a
+  candidate, spending the occasion on a launch that never happened. Read at
+  selection, a launcher whose package is not loaded is shadow mode, and the
+  whole dry run falls out. It is read every time rather than remembered,
+  because a package loaded after Emacs started makes its launcher available
+  without telling anyone.
+- **Nothing is asked forever** (`agent-river-launch--resolve-pending`,
+  `--resolve-window`). A record's one job is to say what session its handle
+  became; having answered, it is dropped, which is also what stops the list
+  being a log of every launch this Emacs made. Having not answered inside
+  the window, it is given up on **out loud** — a launcher that starts
+  something that never becomes a session is the failure this layer is least
+  able to see, since the candidate was filed as `launched` and nothing
+  afterwards contradicts it. The window exists because `:resolve` returning
+  nil means "not yet" and "never" in one answer. A launcher with no
+  `:resolve` is settled at once rather than given up on: that is the
+  headless case, where identity is assigned before the process starts.
+- **The drain does not re-enter** (`agent-river-launch--draining`). The queue
+  is rewritten only after the loop and nothing marks a candidate in flight,
+  so a `:launch` that lets the event loop run lets the poll timer land on a
+  queue that still holds the candidate being launched — same rule, same
+  gate, launched twice. The ledger cannot help: that check is at intake and
+  this candidate is long past it. The guard sits on the drain rather than on
+  any launcher's good behaviour, because the launcher list is a public
+  extension point.
+- **The watermark moves only after a query that was answered and was not cut
+  short** (`agent-river-gh.sh`). A pipeline exits with the status of its
+  right-hand side and a `while` whose body never ran exits 0, so a failed
+  `gh` read exactly like a quiet hour and stamped the mark over every issue
+  the outage hid. It is the one step in that script that does not degrade to
+  a no-op — everything else loses nothing, this loses issues permanently,
+  because the next run asks about a window that has passed. A run that came
+  back at `--limit` keeps the old mark for the same reason.
+- **A source registered by an autoload needs an autoload of its own**
+  (`agent-river-gh--read`). The `with-eval-after-load` form puts the reader
+  into the alist at startup; without a cookie on the reader, the entry is a
+  symbol with an empty function cell, and since the reader runs inside
+  `agent-river-launch--candidate`'s guard every `gh` candidate is then read
+  as malformed and filed under `failed/`. The recovery path turns a
+  load-order slip into silent, permanent loss. The same silence is why the
+  poller is handed `AGENT_RIVER_SPOOL` — bound into `process-environment`,
+  since `make-process` has no `:environment` argument and ignores one
+  without complaining.
 - **`:max-concurrent` counts agents, and `agent-river--active-count` counts
   sessions** (`agent-river-launch--agents`). They were the same number when
   this gate was written and a subagent was a registry entry of its own; since

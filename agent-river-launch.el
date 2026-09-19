@@ -988,11 +988,41 @@ buffer at three in the morning waiting on a permission prompt is an agent
 spending the night waiting for a human.  A headless launcher is the one
 rung 4 wants, and it goes here beside this one.")
 
+(defun agent-river-launch--available-p (launcher)
+  "Return non-nil when LAUNCHER can run here.
+
+Absent means yes: a launcher that drives nothing it has to check for has
+no answer to give, and demanding one would make the protocol's optional
+field mandatory by the back door.  Guarded like the rule callbacks, since
+this is a user-supplied function too, and a test that throws is not an
+availability."
+  (let ((test (plist-get launcher :available-p)))
+    (or (null test)
+        (condition-case nil (and (funcall test) t) (error nil)))))
+
 (defun agent-river-launch--launcher ()
-  "Return the configured launcher, or nil for shadow mode."
+  "Return the configured launcher, or nil for shadow mode.
+
+Unavailable is the same as absent, and this is the one place that decides
+it -- so `:available-p', which the protocol has documented from the
+start, is finally asked.  Read only at selection time, because it is a
+current-state fact: a package loaded after Emacs started makes its
+launcher available without anything here being told.
+
+Answering here rather than at the launch is what keeps the failure from
+happening at the worst possible moment.  `--refusal' asks only whether a
+launcher is *configured*, so with `agent-river-launch-launcher' set to a
+package that is not loaded, candidates drew armed, RET passed the check,
+the user was asked to confirm -- and only then did `--launch' fail, on a
+path that *finishes* the candidate.  The occasion was spent on a launch
+that never happened, with a confirmation collected for it.  Unavailable
+reading as shadow mode puts the whole dry run back in its place."
   (when agent-river-launch-launcher
-    (seq-find (lambda (l) (equal (plist-get l :name) agent-river-launch-launcher))
-              agent-river-launch-launchers)))
+    (let ((launcher (seq-find (lambda (l)
+                                (equal (plist-get l :name)
+                                       agent-river-launch-launcher))
+                              agent-river-launch-launchers)))
+      (and launcher (agent-river-launch--available-p launcher) launcher))))
 
 (defun agent-river-launch-context (candidate)
   "Return what is measured about CANDIDATE's session, as Markdown.
@@ -1060,27 +1090,69 @@ prose aimed at the reader."
 
 Nil means this rule cannot launch and never will -- there is nothing to
 say to an agent -- which is what makes `:prompt' the per-rule arming
-switch rather than a setting of its own."
+switch rather than a setting of its own.
+
+A prompt that throws is no prompt, which is the same answer `:match',
+`:gate' and `:launch' each get and for the sharper version of their
+reason.  Unguarded, one rule whose `:prompt' hits a field the source
+happened to omit takes the whole of `--drain' with it -- and the drain
+assigns `agent-river-launch--queue' only after its loop, so the unwind
+leaves the queue holding candidates it has already decided and filed.
+Every tick from then on re-decides them, once a minute, for as long as
+Emacs runs, and the only trace is one `scan failed' line an hour.
+Falling to the dry run instead is the truthful landing place: a rule that
+cannot produce a prompt cannot launch, which is exactly what the dry run
+is."
   (let ((prompt (plist-get rule :prompt)))
     (cond
-     ((functionp prompt) (funcall prompt candidate))
+     ((functionp prompt)
+      (condition-case err
+          (funcall prompt candidate)
+        (error
+         (agent-river-log "fail" (format "rule %s: :prompt errored (%s)"
+                                         (plist-get rule :name)
+                                         (error-message-string err)))
+         nil)))
      ((agent-river-launch--string prompt) prompt))))
 
 (defvar agent-river-launch--launched nil
-  "Launch records, newest first.
-Each is (:key :at :rule :launcher :handle :session :generation).  Kept
-only so a session we started can be recognised as the parent of whatever
-it hands off -- see `agent-river-launch--generations'.")
+  "Launch records still waiting for a session, newest first.
+Each is (:key :at :rule :launcher :handle :generation).  A record exists
+only to ask its handle what session it became, so that what that session
+hands off can be recognised as a generation on -- see
+`agent-river-launch--generations', which is where the answer goes and
+which is read from.  A record that has answered has nothing left to do
+and is dropped, which is also what keeps this list from being a log of
+every launch this Emacs ever made.")
+
+(defconst agent-river-launch--resolve-window 300
+  "Seconds a launch is asked what session it became before it is given up on.
+
+There has to be a number, and it cannot be inferred: `:resolve' returning
+nil means \"not yet\" and \"never\" in the same breath, so nothing in the
+answer distinguishes a handshake still running from a process that died
+before it announced anything.  Five minutes is far longer than any
+handshake and far shorter than an Emacs session, which is the only
+property it needs.")
 
 (defun agent-river-launch--resolve-pending ()
-  "Ask each unresolved launch record for its session key.
+  "Ask each pending launch record for its session key, and drop the settled.
 
-Late binding, and it has to stay able to give up: a launcher that started
-something which never announced a session would otherwise be asked about
-it on every drain for as long as Emacs runs.  A handle that is gone is
-dropped."
-  (dolist (record agent-river-launch--launched)
-    (unless (plist-get record :session)
+Late binding, and it has to be able to give up -- which it now does, in
+both directions.  A record that resolves has done its one job and goes;
+a record that has not resolved inside
+`agent-river-launch--resolve-window' is a launch whose session never
+appeared, and asking it again every minute for the life of the Emacs is
+what this docstring used to describe while the body kept every record
+forever.
+
+Giving up is said out loud.  A launcher that starts something which never
+becomes a session is the failure this layer is least able to see -- the
+candidate was filed as `launched' and nothing afterwards contradicts it
+-- so the one place that notices had better not also be the one place
+that stays quiet about it."
+  (let (keep)
+    (dolist (record agent-river-launch--launched)
       (let* ((launcher (seq-find (lambda (l)
                                    (equal (plist-get l :name)
                                           (plist-get record :launcher)))
@@ -1090,10 +1162,24 @@ dropped."
                            (condition-case nil
                                (funcall resolve (plist-get record :handle))
                              (error nil)))))
-        (when session
-          (plist-put record :session session)
+        (cond
+         (session
           (puthash session (plist-get record :generation)
-                   agent-river-launch--generations))))))
+                   agent-river-launch--generations))
+         ;; Nothing to ask.  A launcher with no `:resolve' is one that
+         ;; assigns the session id before the process starts, which is the
+         ;; headless case the split exists for -- and a launcher that has
+         ;; since been unconfigured cannot answer either.  Settled, not
+         ;; failed.
+         ((null resolve) nil)
+         ((> (float-time (time-subtract (current-time)
+                                        (plist-get record :at)))
+             agent-river-launch--resolve-window)
+          (agent-river-log
+           "fail" (format "launch: %s never became a session"
+                          (plist-get record :key))))
+         (t (push record keep)))))
+    (setq agent-river-launch--launched (nreverse keep))))
 
 (defun agent-river-launch--launch (rule candidate)
   "Start something for CANDIDATE under RULE, and return its decision.
@@ -1186,8 +1272,34 @@ Return non-nil if it should stay in the queue."
   (push (cons (current-time) (plist-get rule :name))
         agent-river-launch--accepted))
 
+(defvar agent-river-launch--draining nil
+  "Non-nil while a drain is running, so a second one cannot start.
+
+The queue is rewritten only after the loop below has classified all of
+it, and nothing marks a candidate in flight in between.  So a `:launch'
+that lets the event loop run -- `accept-process-output', `sit-for', a
+prompt, anything a launcher might reasonably do -- lets the poll timer
+re-enter on a queue that still holds the candidate being launched, where
+it still matches its rule and still passes its gate, and it is launched a
+second time.  The ledger cannot help: deduplication happens at intake and
+this candidate is long past it.
+
+Whether the launcher that ships pumps the loop today is not the question.
+`agent-river-launch-launchers' is a public extension point and the
+headless launcher this is waiting for plausibly will, so the guard sits
+on the drain rather than on any launcher's good behaviour.")
+
 (defun agent-river-launch--drain ()
   "Ask each queued candidate's gate, and act on the ones that may go."
+  (if agent-river-launch--draining
+      ;; Skipped rather than queued: the drain already running is walking the
+      ;; same queue and will reach whatever this call would have.
+      nil
+    (let ((agent-river-launch--draining t))
+      (agent-river-launch--drain-1))))
+
+(defun agent-river-launch--drain-1 ()
+  "Drain the queue once.  See `agent-river-launch--drain', which guards this."
   (agent-river-launch--resolve-pending)
   (let (keep)
     (dolist (candidate agent-river-launch--queue)
@@ -1230,7 +1342,13 @@ would be the one that went stale."
   (let ((rule (agent-river-launch--rule-for candidate)))
     (cond
      ((null (agent-river-launch--launcher))
-      "No launcher: set `agent-river-launch-launcher' first")
+      ;; Configured and unavailable is a different thing to say than nothing
+      ;; configured, and it is the one a reader can act on: the setting is
+      ;; right and the package behind it is not loaded.
+      (if agent-river-launch-launcher
+          (format "Launcher `%s' is not available here"
+                  agent-river-launch-launcher)
+        "No launcher: set `agent-river-launch-launcher' first"))
      ((null rule)
       "No rule matches this candidate any more")
      ((null (agent-river-launch--prompt rule candidate))
@@ -1532,7 +1650,10 @@ itself rather than sending them to the top."
              (format "  %s\n\n"
                      (cond
                       ((null (agent-river-launch--launcher))
-                       "shadow -- no launcher, nothing starts")
+                       (if agent-river-launch-launcher
+                           (format "shadow -- %s is not available here"
+                                   agent-river-launch-launcher)
+                         "shadow -- no launcher, nothing starts"))
                       (agent-river-launch-auto
                        (format "%s, automatic"
                                agent-river-launch-launcher))

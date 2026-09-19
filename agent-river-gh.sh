@@ -56,17 +56,40 @@ now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 if [ -r "$mark" ]; then
   since=$(cat "$mark")
 else
-  since=${AGENT_RIVER_GH_SINCE:-$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")}
+  # GNU spells it `-d', BSD spells it `-v', and which one is here decides
+  # what the *documented* default means.  Falling straight through to the
+  # epoch is not a graceful degradation of "one day": it asks for every open
+  # issue the repository has ever had, gets `limit' of them in whatever order
+  # the search felt like, and delivers those.
+  yesterday=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+              || date -u -v-1d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+              || echo "1970-01-01T00:00:00Z")
+  since=${AGENT_RIVER_GH_SINCE:-$yesterday}
 fi
 
 # `>=' rather than `>', and the watermark is the time of the run rather than
 # the newest issue seen.  Both over-fetch a little, and over-fetching is free:
 # the spool deduplicates on the occasion key, so a repeat costs one deleted
 # file.  Missing an issue costs an issue.
-gh issue list --state open --limit "$limit" \
-   --search "updated:>=$since" \
-   --json number,title,updatedAt,author,labels,state,url,body \
-   --jq '.[]' 2>/dev/null | while IFS= read -r issue; do
+#
+# The answer goes to a file first, rather than straight down a pipe, because
+# the watermark may only move once the query is known to have *worked*.  A
+# pipeline exits with the status of its right-hand side, and a `while' whose
+# body never runs exits 0 -- so an expired token, a rate limit or a dropped
+# network read exactly like a quiet hour, and the mark would be stamped over
+# every issue the outage hid.  That is the one failure here that does not
+# degrade to a no-op: every other step loses nothing, this one loses issues
+# permanently, because the next run asks about a window that has passed.
+answer=$(mktemp 2>/dev/null) || exit 0
+if ! gh issue list --state open --limit "$limit" \
+     --search "updated:>=$since" \
+     --json number,title,updatedAt,author,labels,state,url,body \
+     --jq '.[]' > "$answer" 2>/dev/null; then
+  rm -f "$answer"
+  exit 0
+fi
+
+while IFS= read -r issue; do
   [ -n "$issue" ] || continue
   tmp=$(mktemp "$spool/gh.XXXXXXXX" 2>/dev/null) || continue
   # Built where the watcher does not look -- only `.json' is taken in -- and
@@ -77,8 +100,19 @@ gh issue list --state open --limit "$limit" \
   else
     rm -f "$tmp"
   fi
-done
+done < "$answer"
 
-# Only after a run that got this far: a failed query must not move the
-# watermark past issues it never looked at.
+count=$(wc -l < "$answer" | tr -d ' ')
+rm -f "$answer"
+
+# A truncated run has not seen the window either.  There is no way to tell a
+# full page from a truncated one apart from its size, so a run that came back
+# at the limit keeps the old mark and the next one asks again -- the same
+# over-fetch the header describes, and free for the same reason.  Advancing
+# the mark to the oldest issue seen would be tighter and would mean reading
+# gh's output, which is the one thing this script does not do.
+[ "$count" -lt "$limit" ] || exit 0
+
+# Only after a query that was answered and was not cut short: a failed or
+# truncated run must not move the watermark past issues it never looked at.
 printf '%s' "$now" > "$mark"

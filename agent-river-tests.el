@@ -7060,6 +7060,83 @@ headless launcher rung 4 wants could not be dropped in beside it."
         (should-error (agent-river-launch-now '(:key "river/2" :source "river"))
                       :type 'user-error)))))
 
+(ert-deftest agent-river-launch-test-a-prompt-that-throws-is-a-dry-run ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher (nil t)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule
+                    :prompt (lambda (_c) (error "no such field"))))))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-test--deliver '((source . "river") (id . "2")))
+        (agent-river-clear)
+        (agent-river-launch-scan)
+        ;; Unguarded this took the whole drain with it, and the drain
+        ;; assigns the queue only after its loop -- so the unwind left the
+        ;; queue holding candidates it had already decided and filed, and
+        ;; every tick from then on decided them again.
+        (should (null agent-river-launch--queue))
+        (should (null agent-river-launch-test--started))
+        ;; A rule that cannot produce a prompt cannot launch, which is
+        ;; exactly what the dry run is -- so that is where it lands, and the
+        ;; error is said rather than swallowed.
+        (should (eq 'ready (car (agent-river-launch-test--decisions))))
+        (should (string-match-p ":prompt errored" (agent-river-test--hud)))))))
+
+(ert-deftest agent-river-launch-test-an-unavailable-launcher-is-no-launcher ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-launchers
+           (list (list :name "fake"
+                       :available-p (lambda () nil)
+                       :launch (lambda (candidate prompt)
+                                 (push (cons (plist-get candidate :key) prompt)
+                                       agent-river-launch-test--started)
+                                 'handle))))
+          (agent-river-launch-launcher "fake")
+          (agent-river-launch-rules
+           (list (agent-river-launch-test--rule :prompt "go"))))
+      ;; `:available-p' is in the protocol so that "this cannot run here" is
+      ;; answered at the first opportunity rather than the last.  Asked only
+      ;; at the launch, a candidate drew armed, RET passed its check, the
+      ;; user confirmed -- and `--launch' then failed on a path that
+      ;; *finishes* the candidate, spending the occasion on a launch that
+      ;; never happened.
+      (should (null (agent-river-launch--launcher)))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      (should (null agent-river-launch-test--started))
+      (should (eq 'ready (car (agent-river-launch-test--decisions))))
+      ;; And the refusal says which of the two it is, since the setting is
+      ;; right and only the package behind it is missing.
+      (should (string-match-p
+               "not available"
+               (agent-river-launch--refusal '(:key "river/1")))))))
+
+(ert-deftest agent-river-launch-test-a-drain-cannot-re-enter ()
+  (agent-river-launch-test--with-spool
+    (let* ((agent-river-launch-rules
+            (list (agent-river-launch-test--rule :prompt "go")))
+           (agent-river-launch-launchers
+            (list (list :name "fake"
+                        :available-p (lambda () t)
+                        ;; A launcher that lets the event loop run -- a
+                        ;; prompt, `accept-process-output', `sit-for' -- lets
+                        ;; the poll timer land here.  Standing in for all of
+                        ;; them by re-entering directly.
+                        :launch (lambda (candidate prompt)
+                                  (push (cons (plist-get candidate :key) prompt)
+                                        agent-river-launch-test--started)
+                                  (agent-river-launch--drain)
+                                  'handle))))
+           (agent-river-launch-launcher "fake")
+           (agent-river-launch-auto t))
+      (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+      (agent-river-launch-scan)
+      ;; The queue is rewritten only after the loop, so the re-entrant drain
+      ;; walks a queue that still holds the candidate being launched -- same
+      ;; rule, same gate, launched twice.  The ledger cannot help: that check
+      ;; is at intake and this candidate is long past it.
+      (should (equal '(("river/1" . "go")) agent-river-launch-test--started)))))
+
 (ert-deftest agent-river-launch-test-a-launcher-that-throws-is-a-decision ()
   (agent-river-launch-test--with-spool
     (let ((agent-river-launch-launchers
@@ -7094,6 +7171,49 @@ headless launcher rung 4 wants could not be dropped in beside it."
                       '(:session "s-child"))))
         ;; And a session nobody here started is where counting begins.
         (should (= 1 (agent-river-launch--generation '(:session "s-other"))))))))
+
+(ert-deftest agent-river-launch-test-a-resolved-launch-is-not-asked-again ()
+  (agent-river-launch-test--with-spool
+    (agent-river-launch-test--with-launcher ("s-child" t)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule :prompt "go"))))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-scan)
+        (should (= 1 (length agent-river-launch--launched)))
+        (agent-river-launch-drain)
+        ;; The record's one job was to say what session the handle became.
+        ;; Done, the generation is in the table it is read from and the
+        ;; record is gone -- which is also what stops this list becoming a
+        ;; log of every launch the Emacs ever made.
+        (should (= 1 (gethash "s-child" agent-river-launch--generations)))
+        (should (null agent-river-launch--launched))))))
+
+(ert-deftest agent-river-launch-test-a-launch-that-never-resolves-is-given-up-on ()
+  (agent-river-launch-test--with-spool
+    ;; A handle the fake launcher cannot resolve: nil is "not yet" and
+    ;; "never" in one answer, so only time tells them apart.
+    (agent-river-launch-test--with-launcher (nil t)
+      (let ((agent-river-launch-rules
+             (list (agent-river-launch-test--rule :prompt "go"))))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-scan)
+        (should (= 1 (length agent-river-launch--launched)))
+        ;; Inside the window it is still worth asking.
+        (agent-river-launch-drain)
+        (should (= 1 (length agent-river-launch--launched)))
+        ;; Past it, the launch is one whose session never appeared.  Asking
+        ;; every minute for the life of the Emacs is what the docstring said
+        ;; would not happen while the body did it.
+        (agent-river-clear)
+        (let ((agent-river-launch--resolve-window 0))
+          (agent-river-launch-drain))
+        (should (null agent-river-launch--launched))
+        ;; And said out loud.  This is the failure the layer is least able
+        ;; to see -- the candidate was filed as `launched' and nothing
+        ;; afterwards contradicts it -- so the one place that notices must
+        ;; not also be the one place that keeps quiet.
+        (should (string-match-p "never became a session"
+                                (agent-river-test--hud)))))))
 
 (ert-deftest agent-river-launch-test-the-chain-has-a-cap ()
   (agent-river-launch-test--with-spool
@@ -7211,6 +7331,26 @@ headless launcher rung 4 wants could not be dropped in beside it."
   ;; GitHub existing.
   (should (eq #'agent-river-gh--read
               (alist-get "gh" agent-river-launch-sources nil nil #'equal))))
+
+(ert-deftest agent-river-gh-test-the-poller-is-told-the-spool ()
+  ;; Both halves default to the same XDG path, which is why leaving this out
+  ;; passes until somebody customises the spool -- and then the poller writes
+  ;; to the old one, or exits 0 at its own `[ -d "$spool" ]' without writing
+  ;; at all.  Silent either way: the process exits 0, the sentinel reports
+  ;; success, and the only symptom is that no candidate ever arrives.
+  (let ((agent-river-launch-spool "/tmp/agent-river-somewhere-else/")
+        (agent-river-gh--running nil)
+        (seen nil))
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest _)
+                 (setq seen (seq-find (lambda (v)
+                                        (string-prefix-p "AGENT_RIVER_SPOOL=" v))
+                                      process-environment))
+                 nil)))
+      (agent-river-gh--poll-1 "/tmp"))
+    ;; Bound, not passed: `make-process' has no `:environment' argument and
+    ;; ignores one without complaining, which is the same silence again.
+    (should (equal seen "AGENT_RIVER_SPOOL=/tmp/agent-river-somewhere-else/"))))
 
 (ert-deftest agent-river-gh-test-a-delivery-goes-through-the-spool ()
   (agent-river-launch-test--with-spool

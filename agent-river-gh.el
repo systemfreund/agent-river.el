@@ -88,6 +88,7 @@ know about anchoring."
                         (append (alist-get 'labels issue) nil))))
     (when names (format ",%s," (string-join (seq-remove #'null names) ",")))))
 
+;;;###autoload
 (defun agent-river-gh--read (source data)
   "Read DATA, one issue as `agent-river-gh.sh' delivered it, from SOURCE.
 
@@ -118,6 +119,15 @@ decision to act at all is made on the author and the labels."
           :cwd (agent-river-launch--dir-value (alist-get 'cwd data))
           :payload data)))
 
+;; Both cookies are load-bearing, and the second is the one that is easy to
+;; leave off.  The form registers the reader as soon as `agent-river-launch'
+;; loads, which in an installed package is at startup and long before anything
+;; requires this file -- so without an autoload on the reader itself the alist
+;; holds a symbol with an empty function cell.  That failure is not one anybody
+;; sees: the reader runs inside `agent-river-launch--candidate's guard, so every
+;; `gh' candidate is read as malformed, filed under `failed/', and never looked
+;; at again.  The recovery path turns a load-order slip into silent, permanent
+;; loss.
 ;;;###autoload
 (with-eval-after-load 'agent-river-launch
   (setf (alist-get "gh" agent-river-launch-sources nil nil #'equal)
@@ -187,21 +197,37 @@ must never be something Emacs waits on."
     (unless (member dir agent-river-gh--running)
       (push dir agent-river-gh--running)
       (condition-case err
-          (make-process
-           :name "agent-river-gh"
-           :command (list (or (executable-find "sh") "sh")
-                          agent-river-gh-script dir)
-           :noquery t
-           :connection-type 'pipe
-           :buffer nil
-           :sentinel (lambda (_process event)
-                       (setq agent-river-gh--running
-                             (delete dir agent-river-gh--running))
-                       (unless (string-prefix-p "finished" event)
-                         (agent-river-log
-                          "fail" (format "gh poll of %s: %s"
-                                         (abbreviate-file-name dir)
-                                         (string-trim event))))))
+          ;; The script takes the spool from the environment and defaults to
+          ;; the same XDG path `agent-river-launch-spool' defaults to, which
+          ;; is exactly why leaving this out passes today and would stop
+          ;; passing for the first person to customise it: the poller would
+          ;; write to the old path, or -- more often -- exit 0 at its own
+          ;; `[ -d "$spool" ]' without writing at all.  Both are silent in the
+          ;; same way, since the process exits 0 and the sentinel reports
+          ;; success; the only symptom is that no candidate ever arrives.
+          ;;
+          ;; Bound rather than passed: `make-process' has no `:environment'
+          ;; argument and ignores one without complaining, which fails in
+          ;; precisely the same silence.
+          (let ((process-environment
+                 (cons (concat "AGENT_RIVER_SPOOL="
+                               (expand-file-name agent-river-launch-spool))
+                       process-environment)))
+            (make-process
+             :name "agent-river-gh"
+             :command (list (or (executable-find "sh") "sh")
+                            agent-river-gh-script dir)
+             :noquery t
+             :connection-type 'pipe
+             :buffer nil
+             :sentinel (lambda (_process event)
+                         (setq agent-river-gh--running
+                               (delete dir agent-river-gh--running))
+                         (unless (string-prefix-p "finished" event)
+                           (agent-river-log
+                            "fail" (format "gh poll of %s: %s"
+                                           (abbreviate-file-name dir)
+                                           (string-trim event)))))))
         (error
          (setq agent-river-gh--running (delete dir agent-river-gh--running))
          (agent-river-log "fail" (format "gh poll failed: %s"
