@@ -433,6 +433,134 @@
     (should (string-match-p "a\\.el" (agent-river--hottest state)))))
 
 
+;;; What it costs
+
+(defmacro agent-river-test--with-spend (&rest body)
+  "Run BODY over a fresh cost table, at the default width and interval."
+  (declare (indent 0))
+  `(let ((agent-river--spend (make-hash-table :test 'equal))
+         (agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-spend-width 6)
+         (agent-river-spend-interval 300))
+     ,@body))
+
+(defconst agent-river-test--noon (encode-time 0 0 12 1 1 2026)
+  "A fixed moment, so a bar index is the same on every run.")
+
+(defun agent-river-test--at (minutes)
+  "Return MINUTES after `agent-river-test--noon'."
+  (time-add agent-river-test--noon (* 60 minutes)))
+
+(ert-deftest agent-river-test-a-first-cost-reading-is-not-spending ()
+  (agent-river-test--with-spend
+    (agent-river--spend-record "s1" 12.0 (agent-river-test--at 0))
+    ;; Adopting a session that has already cost twelve dollars must not draw
+    ;; twelve dollars of spike at the moment we first looked at it.  Only
+    ;; the difference between two readings is spending; the first reading
+    ;; establishes where the graph starts and nothing else.
+    (should (null (plist-get (gethash "s1" agent-river--spend) :bars)))
+    (should (equal (plist-get (gethash "s1" agent-river--spend) :since)
+                   (agent-river-test--at 0)))
+    (agent-river--spend-record "s1" 12.5 (agent-river-test--at 1))
+    (should (= 1 (length (plist-get (gethash "s1" agent-river--spend) :bars))))))
+
+(ert-deftest agent-river-test-spending-lands-in-the-bar-it-happened-in ()
+  (agent-river-test--with-spend
+    (agent-river--spend-record "s1" 1.0 (agent-river-test--at 0))
+    (agent-river--spend-record "s1" 1.25 (agent-river-test--at 1))
+    (agent-river--spend-record "s1" 1.5 (agent-river-test--at 2))
+    (agent-river--spend-record "s1" 3.5 (agent-river-test--at 12))
+    ;; Two readings inside one five-minute bar are one bar's spending; a
+    ;; reading two bars later is its own.  What is kept is the difference,
+    ;; never the cumulative figure the difference came from.
+    (let ((bars (plist-get (gethash "s1" agent-river--spend) :bars)))
+      (should (= 2 (length bars)))
+      (should (= 0.5 (alist-get (agent-river--spend-bar (agent-river-test--at 0)) bars)))
+      (should (= 2.0 (alist-get (agent-river--spend-bar (agent-river-test--at 12)) bars))))))
+
+(ert-deftest agent-river-test-an-idle-bar-is-not-a-missing-bar ()
+  ;; The bottom level of four is spent on this distinction, which is the one
+  ;; that can mislead: a bar the session was alive for and spent nothing in
+  ;; draws a dot, a bar from before the session was ever read draws nothing.
+  ;; A bar in range is never blank, whether it holds a zero or holds
+  ;; nothing: blankness is the graph's decision about what it can see at
+  ;; all, made from the range and not from an amount.
+  (should (= 1 (agent-river--spend-height 0 1.0)))
+  (should (= 1 (agent-river--spend-height nil 1.0)))
+  (should (= 2 (agent-river--spend-height 0.01 1.0)))
+  (should (= 4 (agent-river--spend-height 1.0 1.0)))
+  (should (= 4 (agent-river--spend-height 9.0 1.0))))
+
+(ert-deftest agent-river-test-the-graph-is-blank-before-the-session-was-seen ()
+  (agent-river-test--with-spend
+    (agent-river--spend-record "s1" 1.0 (agent-river-test--at 0))
+    (agent-river--spend-record "s1" 2.0 (agent-river-test--at 1))
+    ;; Twelve bars ending in the one running at 25 minutes, so the six
+    ;; before the session was first read fall in the first three cells.
+    (let* ((graph (agent-river--spend-graph "s1" 1.0 (agent-river-test--at 25)))
+           (cells (substring graph 1 -1)))
+      (should (= 6 (length cells)))
+      (should (equal (substring cells 0 3) (make-string 3 #x2800)))
+      (should-not (string-match-p (string #x2800) (substring cells 3))))))
+
+(ert-deftest agent-river-test-the-graphs-share-one-scale ()
+  (agent-river-test--with-spend
+    (agent-river--spend-record "s1" 0 (agent-river-test--at 0))
+    (agent-river--spend-record "s1" 0.1 (agent-river-test--at 1))
+    (agent-river--spend-record "s2" 0 (agent-river-test--at 0))
+    (agent-river--spend-record "s2" 10.0 (agent-river-test--at 1))
+    ;; One scale for the block, so the two lines can be read against each
+    ;; other: the quiet session draws a low bar beside the busy one, where
+    ;; scaled against its own maximum it would draw a full one and say the
+    ;; same thing as a session spending a hundred times as much.
+    (let ((max (agent-river--spend-max (agent-river-test--at 1))))
+      (should (= max 10.0))
+      (should (< (agent-river--spend-height 0.1 max)
+                 (agent-river--spend-height 0.1 0.1))))))
+
+(ert-deftest agent-river-test-the-cost-column-is-reserved-on-every-line ()
+  (agent-river-test--with-spend
+    ;; Nothing measured anywhere: no column at all, rather than an empty one
+    ;; on every line for ever in an Emacs that hosts no sessions.
+    (should-not (agent-river--spend-column "s1"))
+    (agent-river--spend-record "s1" 1.0)
+    (agent-river--spend-record "s1" 2.0)
+    ;; One session measured: the column is on both lines and is the same
+    ;; width, or everything after it would sit somewhere different on each.
+    (should (agent-river--spend-column "s2"))
+    (should (= (length (agent-river--spend-column "s1"))
+               (length (agent-river--spend-column "s2"))))
+    (let ((agent-river-spend-width nil))
+      (should-not (agent-river--spend-column "s1")))))
+
+(ert-deftest agent-river-test-a-cost-total-outlives-the-buffer-it-came-from ()
+  (agent-river-test--with-spend
+    (agent-river--spend-record "s1" 6.30)
+    (agent-river--spend-record "s2" 24.32)
+    ;; The totals are agent-shell's figures, kept here as they were sampled
+    ;; -- so a session whose shell buffer has been killed still answers for
+    ;; what it cost, which reading `agent-shell--state' cannot do.
+    (let ((report (agent-river-spend)))
+      (should (< (abs (- (plist-get report :total) 30.62)) 0.001))
+      (should (= 2 (length (plist-get report :sessions))))
+      ;; Dearest first: the line worth reading is at the top.
+      (should (equal (caar (plist-get report :sessions)) "s2")))))
+
+(ert-deftest agent-river-test-the-session-line-carries-the-cost-graph ()
+  (agent-river-test--with-block
+    (let ((agent-river--spend (make-hash-table :test 'equal)))
+      (agent-river-observe '(:kind "act" :session "s1" :label "repo"
+                                   :cwd "/repo" :detail "Edit"))
+      (agent-river--spend-record "s1" 1.0)
+      (agent-river--spend-record "s1" 2.0)
+      (let ((line (substring-no-properties
+                   (agent-river--panel (gethash "s1" agent-river-registry)))))
+        (should (string-match "|[⠀-⣿]+|" line))
+        ;; Between what the agent is doing and how long it has been at it,
+        ;; which is the reading it belongs with.
+        (should (< (string-match "|" line) (string-match "step" line)))))))
+
+
 ;;; Phase
 
 (defun agent-river-test--acts (state n tool &optional detail)

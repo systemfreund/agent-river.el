@@ -871,6 +871,86 @@ rides the text rather than the offset.
 its point to the head until someone navigates, so a permanent highlight there
 would mark nothing anyone chose.
 
+### What it costs — a meter read from outside, drawn as a shape
+
+`agent-river-spend-width` puts a braille graph of a session's spending on its
+block line (`|⣶⣶⣷⣴⣀⣀|`), one bar per `agent-river-spend-interval`, and
+`agent-river-spend` reports the totals. The figure is agent-shell's: the ACP
+`usage_update` notification carries a running cost and `agent-shell--state`
+holds the latest one. It only ever goes up, so read on its own it says what a
+session has cost and nothing about whether it is costing anything *now* — the
+difference between two readings says that, and the graph is those differences.
+
+- **The first reading of a session is not spending** (`agent-river--spend-record`).
+  A cumulative figure attributed to the moment we first looked draws the whole
+  history as one spike, and the session Emacs has just adopted — reloaded into,
+  or started watching mid-task — is exactly the one that would draw the biggest
+  one. The first reading establishes `:since` and nothing else.
+- **A bar holds what was reported in it, not what was spent in it.** Measured
+  on 2026-09-19: agent-shell's figure moves once a *turn* rather than steadily
+  through one, so a twenty-minute turn lands in the bar it ended in instead of
+  across the four it ran through. Spreading it back over them would read better
+  and would be an invention — nothing says the money went evenly — so the
+  reading stays where the measurement is. The practical consequence is that the
+  graph's real resolution is a turn, and a session taking two long turns an
+  hour draws two spikes rather than a curve.
+- **Sampled per event, never on a timer.** A timer would have to run through
+  the quiet, which is most of the time and is precisely when there is nothing
+  to measure: a session that is not working is not spending. Events arrive
+  thickly while an agent works, so the resolution lands where the movement is
+  and there is no timer to keep alive, retire or explain. It also means the
+  sample is taken outside the fold's guard and wrapped in its own, because a
+  meter that cannot be read must not be able to report itself as `fold failed`
+  and send somebody to `agent-river-reset`.
+- **A side table holding a history, which is the exception to the rule rather
+  than an instance of it** (`agent-river--spend`). `agent-river--offers` is a
+  side table because a pending question stops being true; this is a history of
+  point-in-time facts, which is what the fold is for. Two things buy it. The
+  fold's promise is that a state can be rebuilt by replaying its events, and
+  **no event carries a cost** — no hook payload has one — so a slot would hold
+  transitions the event stream could never account for. And a slot cannot be
+  added without `agent-river-reset`, which throws away every session's folded
+  state; paying that for a decoration, in a package reloaded into a live Emacs
+  several times an hour, is the wrong way round. What a reload costs is the
+  shape of the last hour, never the totals: those are agent-shell's figures and
+  come back with the next event.
+- **One scale for the whole block** (`agent-river--spend-max`). Scaled against
+  its own maximum, a dozing session's small change and a busy one's burst both
+  draw a full bar, and two lines one above the other say the same thing about
+  spending an order of magnitude apart — which is the whole of what a stack of
+  graphs is read for. The scale is recomputed per line rather than memoised for
+  the draw: a handful of sessions with a few dozen bars between them, where the
+  memos of `agent-river--map-draw` were 700 walks of a table, so a dynamic
+  binding to get right would cost more than it saved.
+- **The bottom level of four is spent on blank versus zero**
+  (`agent-river--spend-height`, `agent-river--spend-graph`). A bar the session
+  was alive for and spent nothing in draws one dot; a bar from before it was
+  first read draws nothing at all. "Here and idle" and "not here" are different
+  statements and the graph must not merge them — so blankness is decided by the
+  *range*, from `:since` and the table's horizon, and never from an amount.
+  That leaves three levels for the value, which is coarse on purpose: the graph
+  answers when the money went and the figures beside it answer how much.
+- **A fixed column, reserved as soon as any session has one**
+  (`agent-river--spend-column`). A width decided per line is a column in name
+  only, and everything after it would sit somewhere different on every line —
+  the same rule the map's diffstat follows. Nil only where nothing anywhere has
+  been measured, since an Emacs that hosts no sessions would otherwise carry an
+  empty column for ever. Padded with blank braille rather than spaces, so the
+  empty column is exactly as wide as a full one in whatever font draws them.
+- **It is in neither frame, and sits between the two readings it belongs
+  with.** Every other number on the line is the task's and resets on a prompt;
+  this covers a fixed window that runs straight through one. It goes between
+  what the agent is doing and how long it has been at it, because those two are
+  the same question over the same stretch of time.
+- **The total is a query, not a line** (`agent-river-spend`). A total across
+  sessions belongs to no session, so it would need a line or a header of its
+  own, and this view has spent one of those before and taken it back. The
+  totals outlive the buffers they were read from, which is the one thing
+  reading `agent-shell--state` directly cannot do.
+- **The hooks carry none of this**, so a session run from a terminal has no
+  graph — the same price the `◇` and `“` lines pay, and paid the same way
+  rather than routed around by reading `transcript_path` per event.
+
 ### Markdown belongs where the state leaves, not where it is watched
 
 `agent-river-markdown` / `agent-river-copy-report` render the state for an
