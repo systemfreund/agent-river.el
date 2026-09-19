@@ -1690,11 +1690,42 @@ save is the one `agent-river--map-live-domains\=' was already doing."
              agent-river-artifacts)
     (nreverse domains)))
 
+(defun agent-river--artifact-plist (artifact)
+  "Return ARTIFACT as the plist a reader outside this file is handed.
+
+One renderer, because there are two ways in: the whole table and a single
+key.  Two would be two accounts of what an artifact looks like from
+outside, right only for as long as somebody kept them in step."
+  (list :key (agent-river-artifact-key artifact)
+        :domain (agent-river-artifact-domain artifact)
+        :name (agent-river-artifact-name artifact)
+        :context (copy-alist (agent-river-artifact-context artifact))
+        :gone (and (agent-river-artifact-gone artifact) t)
+        :appeared (agent-river--ago (agent-river-artifact-appeared artifact))
+        :ago (agent-river--ago (agent-river-artifact-last artifact))
+        :notes (length (agent-river-artifact-notes artifact))
+        :reached (length (agent-river-reaching
+                          (agent-river-artifact-key artifact) 'session))))
+
+;;;###autoload
+(defun agent-river-artifact-at (key)
+  "Return the artifact KEY names as a plist, or nil.
+
+The cheap way to ask about one: a `gethash' and one rendering, where
+`agent-river-artifacts-list' renders every record and asks
+`agent-river-reaching' -- a walk of the whole session registry -- for each
+of them.  Reading one key out of that is a walk of every session per
+artifact, for an answer all but one line of which is thrown away."
+  (when-let* ((artifact (and key (gethash key agent-river-artifacts))))
+    (agent-river--artifact-plist artifact)))
+
 (defun agent-river-artifacts-list (&optional domain)
   "Return every known artifact as a plist, newest first.
 DOMAIN narrows to one domain.  Ended artifacts are included and say so:
 dropping them here would make this disagree with what the views draw, and
 the ending is a thing that happened.
+
+`agent-river-artifact-at' is the one to use for a single key.
 
 The context comes back as a copy.  What is handed out here is a reading
 taken at a moment, and a reading that goes on tracking its subject is not
@@ -1715,19 +1746,7 @@ supposed to own alone."
                             (lambda (a b)
                               (time-less-p (agent-river-artifact-last b)
                                            (agent-river-artifact-last a)))))
-      (push (list :key (agent-river-artifact-key artifact)
-                     :domain (agent-river-artifact-domain artifact)
-                     :name (agent-river-artifact-name artifact)
-                     :context (copy-alist (agent-river-artifact-context artifact))
-                     :gone (and (agent-river-artifact-gone artifact) t)
-                     :appeared (agent-river--ago
-                                (agent-river-artifact-appeared artifact))
-                     :ago (agent-river--ago (agent-river-artifact-last artifact))
-                     :notes (length (agent-river-artifact-notes artifact))
-                     :reached (length (agent-river-reaching
-                                       (agent-river-artifact-key artifact)
-                                       'session)))
-            out))
+      (push (agent-river--artifact-plist artifact) out))
     (setq out (nreverse out))
     out))
 

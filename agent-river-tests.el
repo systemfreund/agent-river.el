@@ -7031,5 +7031,103 @@ headless launcher issue #37 wants could not be dropped in beside it."
     (should (equal seen "AGENT_RIVER_SPOOL=/tmp/agent-river-somewhere-else/"))))
 
 
+(ert-deftest agent-river-spool-test-a-delivery-nobody-can-file-stops-nothing ()
+  ;; `--fail' is called from inside a `condition-case' *handler*, and an error
+  ;; raised in a handler is not caught by its own `condition-case'.  So a
+  ;; rename into `failed/' that signals used to escape the scan, leaving the
+  ;; file in the inbox -- which is read oldest-first, so every later scan died
+  ;; in the same place and everything behind it never arrived.
+  (agent-river-spool-test--with
+    (let ((bad (expand-file-name "c.json" agent-river-spool)))
+      (with-temp-file bad (insert "{not json"))
+      (set-file-times bad (time-subtract (current-time) 600)))
+    (let ((good (agent-river-spool-test--deliver
+                 '((source . "river") (key . "inc:2")) "d.json")))
+      (set-file-times good (time-subtract (current-time) 300)))
+    (agent-river-clear)
+    (cl-letf (((symbol-function 'rename-file)
+               (lambda (&rest _) (error "Permission denied"))))
+      (should (= 1 (agent-river-spool-scan))))
+    ;; The good delivery behind it arrived.
+    (should (equal '("inc:2") (agent-river-spool-test--keys)))
+    ;; And the one that could not be filed is gone rather than left to block
+    ;; the door: `failed/' exists so a source's author can see what their
+    ;; program wrote, and that is worth less than every later delivery.
+    (should (null (agent-river-spool-test--files)))
+    (should (string-match-p "cannot file" (agent-river-test--hud)))))
+
+(ert-deftest agent-river-spool-test-one-bad-delivery-costs-one-delivery ()
+  ;; The same bargain one level up, for whatever a delivery manages to throw
+  ;; that `--take-in' did not expect.
+  (agent-river-spool-test--with
+    (agent-river-spool-test--deliver '((source . "river") (key . "inc:1")) "a.json")
+    (agent-river-spool-test--deliver '((source . "river") (key . "inc:2")) "b.json")
+    (agent-river-clear)
+    ;; Thrown from `--take-in' itself rather than from something inside it:
+    ;; what the guard is for is the error nobody anticipated, and everything
+    ;; this function expects to go wrong is already handled within it.
+    (cl-letf* ((take-in (symbol-function 'agent-river-spool--take-in))
+               ((symbol-function 'agent-river-spool--take-in)
+                (lambda (file)
+                  (if (string-suffix-p "a.json" file)
+                      (error "boom")
+                    (funcall take-in file)))))
+      (agent-river-spool-scan))
+    (should (equal '("inc:2") (agent-river-spool-test--keys)))))
+
+(ert-deftest agent-river-launch-test-a-reach-that-throws-does-not-wedge-the-timer ()
+  ;; The one call in the file with no user in front of it, on a *repeating*
+  ;; timer.  Unguarded, a throw skipped the `setq' that drops the record, so
+  ;; the same error came round every second for the life of the Emacs.
+  (agent-river-spool-test--with
+    (agent-river-launch-test--arrive "inc:1")
+    (agent-river-launch-test--armed ("s-child" nil)
+      (agent-river-launch-artifact "inc:1")
+      (agent-river-state "s-child" "child")
+      (agent-river-clear)
+      (cl-letf (((symbol-function 'agent-river-reach)
+                 (lambda (&rest _) (error "no"))))
+        (agent-river-launch--resolve-pending))
+      ;; Dropped and reported: a launch that cannot be linked is still a
+      ;; launch that happened.
+      (should (null agent-river-launch--launched))
+      (should (string-match-p "could not be linked" (agent-river-test--hud))))))
+
+(ert-deftest agent-river-test-one-artifact-is-looked-up-not-walked-for ()
+  ;; The same rendering either way, because there is one renderer: two would
+  ;; be two accounts of what an artifact looks like from outside.
+  (let ((agent-river-artifacts (make-hash-table :test 'equal))
+        (agent-river-registry (make-hash-table :test 'equal))
+        (agent-river-auto-display nil))
+    (agent-river-appeared "inc:1" :domain 'inc :name "one")
+    (agent-river-appeared "inc:2" :domain 'inc :name "two")
+    (should (equal (agent-river-artifact-at "inc:2")
+                   (seq-find (lambda (a) (equal (plist-get a :key) "inc:2"))
+                             (agent-river-artifacts-list))))
+    (should-not (agent-river-artifact-at "inc:nothing"))
+    (should-not (agent-river-artifact-at nil))))
+
+(ert-deftest agent-river-gh-test-labels-without-a-name-are-no-labels ()
+  ;; The list was tested before the nils were dropped, so an array of labels
+  ;; carrying no `name' rendered as ",," in the context.
+  (let ((context (plist-get (agent-river-gh--read
+                             "gh" (agent-river-gh-test--delivery
+                                   '(labels . [((colour . "red"))])))
+                            :context)))
+    (should-not (alist-get 'labels context))))
+
+(ert-deftest agent-river-gh-test-a-crlf-body-quotes-cleanly ()
+  ;; GitHub bodies are commonly CRLF, and a stray carriage return ends up
+  ;; inside the blockquote that is handed to an agent.
+  (agent-river-spool-test--with
+    (agent-river-spool-test--deliver
+     (agent-river-gh-test--delivery '(body . "one\r\ntwo")))
+    (agent-river-spool-scan)
+    (let ((prompt (plist-get (agent-river-gh-brief
+                              (agent-river-artifact-at "issue:o/r#42"))
+                             :prompt)))
+      (should (string-match-p "^> one$" prompt))
+      (should (string-match-p "^> two$" prompt)))))
+
 (provide 'agent-river-tests)
 ;;; agent-river-tests.el ends here

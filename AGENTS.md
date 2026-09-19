@@ -35,7 +35,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (430 tests). -L . is required: the tests require all four .el files.
+# Full suite (436 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -871,6 +871,28 @@ before the deletion, so that deferring is not the same as forgetting.
 - **A declaration that throws is treated like a file that would not parse.**
   Left in the inbox it would be retried every minute for the life of the
   Emacs, which is the one outcome worse than losing it.
+- **Filing a failure must not be able to fail**
+  (`agent-river-spool--fail`), and the reason is where it is called from:
+  both call sites are inside a `condition-case` *handler*, and an error
+  raised in a handler is not caught by its own `condition-case`. So a
+  `rename-file` into `failed/` that signalled escaped the scan and left the
+  file in the inbox — which `--inbox` sorts oldest-first, so every later
+  scan read the same file and died in the same place. One delivery nobody
+  could file stopped every delivery behind it, permanently, while the safety
+  net logged one identical line a minute. Measured with `failed/` at mode
+  500. Two ordinary ways in: a `failed/` that is not writable, and the file
+  going away between the listing and the rename. Where it cannot be filed it
+  is **deleted** — `failed/` exists so a source's author can see what their
+  program wrote, and that is worth less than the door; the reason was in the
+  log a line earlier either way. The scan loop guards per file besides, for
+  whatever a delivery throws that nobody anticipated.
+- **The safety net does not go through the debounce**
+  (`agent-river-spool--scan-safely`). `agent-river-spool-poll-interval` is
+  the one guarantee the spool offers — a delivery is never silently unseen —
+  and pointing it at `--scan-soon` made it conditional on something it never
+  mentions, since that schedules an *idle* timer and an Emacs that never
+  idles for a third of a second would never scan. The debounce is for the
+  watch's bursts; the safety net has no burst to coalesce.
 - **`:session` is the one spec field that is not about the artifact**
   (`agent-river-spool--note-session`). A producer that knows which session
   caused the thing it is delivering says so, and that is noted on *that
@@ -935,6 +957,20 @@ before the deletion, so that deferring is not the same as forgetting.
 - **Every callback a user supplies is guarded** — `:available-p`, `:launch`,
   and the brief. A brief that throws is no brief: this is user code called
   from a command, and an error there would read as the command being broken.
+  **And so is the one call that is not a callback**: `agent-river-reach` in
+  `--resolve-pending` is the only thing in either file with no user in front
+  of it, and it runs on a *repeating* timer. A throw there skipped the
+  `setq` that drops the record, so the record stayed, the timer was never
+  retired, and a repeating timer is re-armed before its function runs — the
+  same error every second for the life of the Emacs. A reach that fails is
+  reported and its record dropped: a launch that cannot be linked is still a
+  launch that happened.
+- **Producer text goes through `agent-river--log-text`, on every path.**
+  `agent-river-log` sanitises nothing of its own, and a key, a buffer name
+  or an `error-message-string` can carry a newline — which makes one log
+  entry and a remainder carrying none of the properties `n` and `>` read.
+  Six sites drifted apart from this while the files were being split, two
+  definitions away from one that had it right.
 - **The watermark is still incremental, and one poll a session is not**
   (`AGENT_RIVER_GH_RESCAN`). `agent-river-gh.sh` stamps a watermark so an
   issue is delivered once, and what receives a delivery is now a table that

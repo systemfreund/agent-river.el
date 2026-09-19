@@ -14,8 +14,8 @@
 ;; a system other than this package.  That is the line this file is on the far
 ;; side of: `river' *is* the normalised shape and belongs with the mechanism;
 ;; GitHub is somewhere else, with its own vocabulary and its own command-line
-;; tool, so it lives beside the mechanism rather than inside it.  The next source -- a tracker,
-;; a mailbox, a build -- goes next to this one for the same reason.
+;; tool, so it lives beside the mechanism rather than inside it.  The next
+;; source -- a tracker, a mailbox, a build -- goes next to this one.
 ;;
 ;; Two halves, and the split is the same one the hook bridge makes.
 ;; `agent-river-gh.sh' asks `gh' for issues and writes what comes back,
@@ -24,6 +24,7 @@
 ;;
 ;;   (require 'agent-river-gh)
 ;;   (setq agent-river-gh-repos '("~/src/agent-river"))
+;;   (agent-river-spool-mode 1)   ; or the deliveries are written and unread
 ;;   (agent-river-gh-mode 1)
 ;;
 ;; The poll is a subprocess either way, so cron or a systemd timer running
@@ -85,9 +86,10 @@ would also match `debug' and `bugfix'.  Nothing in this package matches
 on it -- a context is carried, never read -- but a brief that decides
 whether to say anything about an issue will, and the loose reading is the
 one nobody means."
-  (let ((names (seq-map (lambda (label) (alist-get 'name label))
-                        (append (alist-get 'labels issue) nil))))
-    (when names (format ",%s," (string-join (seq-remove #'null names) ",")))))
+  (let ((names (seq-remove #'null
+                           (seq-map (lambda (label) (alist-get 'name label))
+                                    (append (alist-get 'labels issue) nil)))))
+    (when names (format ",%s," (string-join names ",")))))
 
 ;;;###autoload
 (defun agent-river-gh--read (_source data)
@@ -149,6 +151,7 @@ it back out of the context its own source put it in."
   (setf (alist-get "gh" agent-river-spool-sources nil nil #'equal)
         #'agent-river-gh--read))
 
+;;;###autoload
 (defun agent-river-gh-brief (record)
   "Return what to say to an agent about RECORD, and where to start it.
 
@@ -182,7 +185,7 @@ at rather than a thing to launch on."
                (if body
                    (concat ">\n"
                            (mapconcat (lambda (line) (concat "> " line))
-                                      (split-string body "\n") "\n")
+                                      (split-string body "\r?\n") "\n")
                            "\n")
                  "")
                "\nWork out whether it is well-founded before acting on it. "
@@ -249,13 +252,15 @@ when the mode is switched on, is the whole of the repair."
                                (delete dir agent-river-gh--running))
                          (unless (string-prefix-p "finished" event)
                            (agent-river-log
-                            "fail" (format "gh poll of %s: %s"
-                                           (abbreviate-file-name dir)
-                                           (string-trim event)))))))
+                            "fail" (agent-river--log-text
+                                    (format "gh poll of %s: %s"
+                                            (abbreviate-file-name dir)
+                                            (string-trim event))))))))
         (error
          (setq agent-river-gh--running (delete dir agent-river-gh--running))
-         (agent-river-log "fail" (format "gh poll failed: %s"
-                                         (error-message-string err))))))))
+         (agent-river-log "fail" (agent-river--log-text
+                                  (format "gh poll failed: %s"
+                                          (error-message-string err)))))))))
 
 ;;;###autoload
 (defun agent-river-gh-poll (&optional rescan)
@@ -284,6 +289,27 @@ agent on one is a separate gesture and needs two more things configured."
   :lighter " gh>"
   (if agent-river-gh-mode
       (progn
+        ;; The script writes into the spool and gives up at its own
+        ;; `[ -d "$spool" ]' if it is not there, so turning this on without
+        ;; ever having turned the spool on polls GitHub and drops the answer
+        ;; on the floor -- silently on both sides, which is the failure the
+        ;; `AGENT_RIVER_SPOOL' comment in `--poll-1' is about, one layer up.
+        (agent-river-spool--ensure-dirs)
+        ;; And say when nothing can come of it.  Deliveries would still pile
+        ;; up in the inbox with the spool mode off, but nothing would read
+        ;; them; with no repositories there is not even a poll.  Either way
+        ;; the symptom is an empty map, which is indistinguishable from a
+        ;; quiet week.
+        (dolist (missing
+                 (delq nil
+                       (list (unless agent-river-gh-repos
+                               "no repositories: set `agent-river-gh-repos'")
+                             (unless agent-river-spool-mode
+                               "nothing is watching the spool: turn on \
+`agent-river-spool-mode'"))))
+          (agent-river-log "fail" (agent-river--log-text
+                                   (format "gh: %s" missing)))
+          (message "agent-river: %s" missing))
         (setq agent-river-gh--timer
               (run-with-timer agent-river-gh-interval agent-river-gh-interval
                               #'agent-river-gh-poll))

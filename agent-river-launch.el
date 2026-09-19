@@ -68,6 +68,7 @@
 (declare-function agent-shell--start "agent-shell")
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
 (declare-function shell-maker-busy "shell-maker")
+(declare-function agent-shell-anthropic-make-claude-code-config "agent-shell-anthropic")
 (defvar agent-shell--state)
 
 (defcustom agent-river-launch-launcher nil
@@ -104,12 +105,12 @@ put it there in the first place."
 (defcustom agent-river-launch-shell-config
   (lambda ()
     (when (fboundp 'agent-shell-anthropic-make-claude-code-config)
-      (funcall (intern "agent-shell-anthropic-make-claude-code-config"))))
+      (agent-shell-anthropic-make-claude-code-config)))
   "Function returning the agent-shell config a launched session runs under."
   :type 'function)
 
 (defcustom agent-river-launch-shell-tries 60
-  "How many seconds a launched shell is given to accept its prompt.
+  "How many times a launched shell is offered its prompt, one a second.
 
 The session is not ready the moment the buffer exists -- the ACP handshake
 is still running -- and there is no readiness signal to subscribe to, so
@@ -147,8 +148,9 @@ behind."
       (if (> tries 0)
           (run-with-timer 1 nil #'agent-river-launch--shell-send
                           buffer text (1- tries))
-        (agent-river-log "fail" (format "launch: %s never took its prompt"
-                                        (buffer-name buffer)))))))
+        (agent-river-log "fail" (agent-river--log-text
+                                 (format "launch: %s never took its prompt"
+                                         (buffer-name buffer))))))))
 
 (defun agent-river-launch--shell-launch (brief)
   "Start an agent-shell session for BRIEF and hand it its prompt."
@@ -262,7 +264,23 @@ nothing afterwards contradicts it."
          ;; a person named the wrong session.  Waiting is the whole answer
          ;; and the window below is what stops it waiting forever.
          ((and session (gethash session agent-river-registry))
-          (agent-river-reach (plist-get record :key) session))
+          ;; Guarded like every other call out of this file, and this one
+          ;; has the sharpest reason: it is the only one with no user in
+          ;; front of it.  A reach folds, redraws the panel and writes the
+          ;; HUD, and if it throws here the `setq' below never runs -- so
+          ;; the record is not dropped, the timer is not retired, and a
+          ;; repeating timer is re-armed before its function runs, which
+          ;; means the same error every second for the life of the Emacs.
+          ;; A reach that fails is reported and the record goes: a launch
+          ;; that cannot be linked is still a launch that happened.
+          (condition-case err
+              (agent-river-reach (plist-get record :key) session)
+            (error
+             (agent-river-log
+              "fail" (agent-river--log-text
+                      (format "launch: %s could not be linked to %s (%s)"
+                              (plist-get record :key) session
+                              (error-message-string err)))))))
          ;; Nothing to ask: a launcher with no `:resolve' assigned the id
          ;; before the process started, and one that has since been
          ;; unconfigured cannot answer either.  Settled, not failed.
@@ -271,8 +289,9 @@ nothing afterwards contradicts it."
                                         (plist-get record :at)))
              agent-river-launch--resolve-window)
           (agent-river-log
-           "fail" (format "launch: %s never became a session"
-                          (plist-get record :key))))
+           "fail" (agent-river--log-text
+                   (format "launch: %s never became a session"
+                           (plist-get record :key)))))
          (t (push record keep)))))
     (setq agent-river-launch--launched (nreverse keep))
     (unless agent-river-launch--launched
@@ -288,11 +307,6 @@ and the session appearing, which is a handful of seconds a day."
     (setq agent-river-launch--resolve-timer
           (run-with-timer 1 1 #'agent-river-launch--resolve-pending))))
 
-(defun agent-river-launch--record (key)
-  "Return the artifact plist for KEY, or nil."
-  (seq-find (lambda (a) (equal (plist-get a :key) key))
-            (agent-river-artifacts-list)))
-
 (defun agent-river-launch--brief (record)
   "Return what to say to an agent about RECORD, or nil.
 
@@ -303,8 +317,9 @@ would read as the command being broken rather than the brief."
     (condition-case err
         (funcall agent-river-launch-brief record)
       (error
-       (agent-river-log "fail" (format "brief errored (%s)"
-                                       (error-message-string err)))
+       (agent-river-log "fail" (agent-river--log-text
+                                (format "brief errored (%s)"
+                                        (error-message-string err))))
        nil))))
 
 (defun agent-river-launch--refusal (record brief)
@@ -344,7 +359,7 @@ package does and the one gesture with nothing on the far side that can
 take it back, so the second keystroke is earned every time.  What the
 question names is what will run, which is the half a line cannot show."
   (interactive (list (agent-river--read-artifact-key)))
-  (let* ((record (agent-river-launch--record key))
+  (let* ((record (agent-river-artifact-at key))
          (brief (and record (agent-river-launch--brief record)))
          (refusal (agent-river-launch--refusal record brief)))
     (when refusal (user-error "%s" refusal))
@@ -374,8 +389,9 @@ question names is what will run, which is the half a line cannot show."
                                         key (plist-get launcher :name))))
               (message "agent-river: started"))
           (error
-           (agent-river-log "fail" (format "launch failed: %s"
-                                           (error-message-string err)))
+           (agent-river-log "fail" (agent-river--log-text
+                                    (format "launch failed: %s"
+                                            (error-message-string err))))
            (message "agent-river: launch failed, see the log")))))))
 
 (provide 'agent-river-launch)

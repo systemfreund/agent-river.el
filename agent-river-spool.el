@@ -25,7 +25,7 @@
 ;; Delivering by hand, which is also how a poller does it -- built elsewhere,
 ;; renamed in:
 ;;
-;;   d=~/.local/state/agent-river/spool
+;;   d=${XDG_STATE_HOME:-$HOME/.local/state}/agent-river/spool
 ;;   printf '%s' '{"source":"river","key":"inc:INC-444","domain":"inc",
 ;;                 "name":"Checkout 500s","context":{"url":"https://..."}}' \
 ;;     > $d/x.tmp
@@ -44,7 +44,6 @@
 
 ;;; Code:
 
-(require 'seq)
 (require 'filenotify)
 (require 'agent-river)
 
@@ -240,12 +239,39 @@ retire it from.  Unlike an observer, it cannot fail repeatedly.")
                   agent-river-spool-settle))))
 
 (defun agent-river-spool--fail (file err)
-  "File FILE under `failed/' because of ERR, and say so."
-  (rename-file file (agent-river-spool--dir "failed") t)
+  "File FILE under `failed/' because of ERR, and say so.
+
+This cannot be allowed to signal, and the reason is where it is called
+from: both call sites are inside a `condition-case' *handler*, and an
+error raised in a handler is not caught by its own `condition-case'.  So a
+`rename-file' that fails here escapes the scan, leaving the file in the
+inbox -- which `--inbox' sorts oldest-first, so every later scan reads the
+same file and dies in the same place.  One delivery nobody can file stops
+every delivery behind it, for good, while the safety net logs one
+identical line a minute.  Measured: `failed/' at mode 500, and the good
+delivery behind the broken one was never declared.
+
+Two ways to get there and neither is exotic -- `failed/' not writable (a
+spool on a mount, a root-owned directory a cron-run poller left behind),
+and the file going away between the listing and the rename, which is the
+in-place rewriting `agent-river-spool-settle' exists to tolerate.
+
+Where it cannot be filed it is deleted, which is the lesser of the two
+losses on offer: `failed/' is there so a source's author can look at what
+their program wrote, and that is worth less than the door.  What is *not*
+lost is the reason, which was already in the log a line earlier."
   (agent-river-log "fail" (agent-river--log-text
                            (format "spool: %s (%s)"
                                    (file-name-nondirectory file)
-                                   (error-message-string err)))))
+                                   (error-message-string err))))
+  (condition-case filing
+      (rename-file file (agent-river-spool--dir "failed") t)
+    (error
+     (agent-river-log "fail" (agent-river--log-text
+                              (format "spool: cannot file %s (%s)"
+                                      (file-name-nondirectory file)
+                                      (error-message-string filing))))
+     (ignore-errors (delete-file file)))))
 
 (defun agent-river-spool--note-session (spec)
   "Note in the river that SPEC came out of a session, if it names one.
@@ -270,12 +296,11 @@ the artifact's context, where they are shown and read by nobody."
 
 (defun agent-river-spool--declare (spec)
   "Declare what SPEC names, and return the artifact when that is news."
-  (prog1 (apply #'agent-river-appeared
-                (plist-get spec :key)
-                (list :domain (plist-get spec :domain)
-                      :name (plist-get spec :name)
-                      :context (plist-get spec :context)
-                      :text (plist-get spec :text)))
+  (prog1 (agent-river-appeared (plist-get spec :key)
+                               :domain (plist-get spec :domain)
+                               :name (plist-get spec :name)
+                               :context (plist-get spec :context)
+                               :text (plist-get spec :text))
     ;; An ending is folded whether or not the appearing was news: a source
     ;; that reports a closed thing it has reported before is telling us
     ;; something that moved, and not-news is not the same as nothing
@@ -312,11 +337,20 @@ arrived."
         (error (agent-river-spool--fail file err) nil)))))
 
 (defun agent-river-spool--inbox ()
-  "Return the delivered files, oldest first."
-  (sort (directory-files (agent-river-spool--dir nil) t "\\.json\\'" t)
-        (lambda (a b)
-          (time-less-p (file-attribute-modification-time (file-attributes a))
-                       (file-attribute-modification-time (file-attributes b))))))
+  "Return the delivered files, oldest first.
+
+Each file is stat-ed once rather than once per comparison: the inbox is
+empty most of the time and this is invisible, and the time it is not empty
+is a backlog after a restart, which is exactly when a sort that stats
+2·n·log n times is worst."
+  (mapcar #'cdr
+          (sort (mapcar (lambda (file)
+                          (cons (file-attribute-modification-time
+                                 (file-attributes file))
+                                file))
+                        (directory-files (agent-river-spool--dir nil) t
+                                         "\\.json\\'" t))
+                (lambda (a b) (time-less-p (car a) (car b))))))
 
 ;;;###autoload
 (defun agent-river-spool-scan ()
@@ -328,7 +362,19 @@ many deliveries were taken in."
   (agent-river-spool--ensure-dirs)
   (let ((taken 0))
     (dolist (file (agent-river-spool--inbox))
-      (when (agent-river-spool--take-in file)
+      ;; Per file, so that whatever one delivery manages to throw costs that
+      ;; delivery and not the scan.  `--take-in' guards the two errors it
+      ;; expects; this is for the third kind, and the point is that the
+      ;; queue behind a bad file keeps moving.
+      (when (condition-case err
+                (agent-river-spool--take-in file)
+              (error
+               (agent-river-log "fail"
+                                (agent-river--log-text
+                                 (format "spool: %s could not be taken in (%s)"
+                                         (file-name-nondirectory file)
+                                         (error-message-string err))))
+               nil))
         (setq taken (1+ taken))))
     (when (called-interactively-p 'interactive)
       (message "agent-river: %d taken in" taken))
@@ -346,19 +392,32 @@ many deliveries were taken in."
 (defvar agent-river-spool--soon nil
   "A pending debounced scan, or nil.")
 
+(defun agent-river-spool--scan-safely ()
+  "Scan, and report rather than signal.  What both timers call."
+  (condition-case err
+      (agent-river-spool-scan)
+    (error (agent-river-log
+            "fail" (agent-river--log-text
+                    (format "spool: scan failed (%s)"
+                            (error-message-string err)))))))
+
 (defun agent-river-spool--scan-soon ()
-  "Scan shortly, coalescing a burst of deliveries into one scan."
+  "Scan shortly, coalescing a burst of deliveries into one scan.
+
+For the watch only.  The safety net calls `agent-river-spool--scan-safely'
+directly: the debounce is an *idle* timer, and an Emacs that never goes
+idle for a third of a second -- a long synchronous process, a tight loop
+-- would never scan, which would make the one guarantee
+`agent-river-spool-poll-interval' offers conditional on something it never
+mentions.  A burst is what there is to coalesce, and the safety net has no
+burst."
   (unless agent-river-spool--soon
     (setq agent-river-spool--soon
           (run-with-idle-timer
            0.3 nil
            (lambda ()
              (setq agent-river-spool--soon nil)
-             (condition-case err
-                 (agent-river-spool-scan)
-               (error (agent-river-log
-                       "fail" (format "spool: scan failed (%s)"
-                                      (error-message-string err))))))))))
+             (agent-river-spool--scan-safely))))))
 
 (defun agent-river-spool--notify (_event)
   "Note that something arrived in the spool."
@@ -370,7 +429,7 @@ many deliveries were taken in."
 
 Nothing is started by this.  What arrives becomes an artifact, which is
 drawn in its own section of \\[agent-river-map]; pointing an agent at one
-is \\[agent-river-spool-artifact], and needs two more things configured.
+is \\[agent-river-launch-artifact], and needs two more things configured.
 
 Turning it on takes in whatever was delivered while it was off."
   :global t
@@ -391,7 +450,7 @@ Turning it on takes in whatever was delivered while it was off."
           (setq agent-river-spool--timer
                 (run-with-timer agent-river-spool-poll-interval
                                 agent-river-spool-poll-interval
-                                #'agent-river-spool--scan-soon)))
+                                #'agent-river-spool--scan-safely)))
         (agent-river-spool-scan))
     (when agent-river-spool--watch
       (ignore-errors (file-notify-rm-watch agent-river-spool--watch)))
