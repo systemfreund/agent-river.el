@@ -1972,6 +1972,26 @@ together:
   `agent-river-show-log`). What that gives up is that a line nobody is
   looking at is a line nobody sees; the never-go-quiet rule is about writing
   the line, not about seizing a window for it.
+- **The block opens itself once, and the second time was the same mistake
+  one buffer over** (`agent-river--block-shown`). The condition was "no
+  window is showing it", which is true again the moment a reader deletes
+  one — so the block came back on the next tool call, and on the one after
+  that, which in a running task is several times a minute. That is the
+  reopening the log was spared above, arrived at from the other side: there
+  the view appeared on every event because every event wrote a line, here
+  because every event redraws the block. So the flag records that the
+  *offer* was made rather than what is on screen, which is the fact the old
+  test could not hold — a deleted window leaves nothing behind to ask.
+  Whether one is showing is still asked, because it answers the other
+  question (is it on screen *now*), and the branch where it is sets the flag
+  rather than doing nothing: this file is reloaded into a live Emacs several
+  times an hour, which clears the flag, so without that a block that had
+  been up all morning would be offered once more the next time its window
+  was closed. `agent-river-show` sets it too — a reader who put the window
+  there has said where the block goes, so closing it is that decision
+  changing rather than an offer they have not had. Nothing clears it,
+  `agent-river-reset` least of all: forgetting what the sessions did is not
+  a request for a window.
 - **The log runs oldest to newest**, the way every other log does: the new
   line goes on at the bottom, the trim takes from the top, and a window
   nobody has moved tails it (`agent-river--tail-start`,
