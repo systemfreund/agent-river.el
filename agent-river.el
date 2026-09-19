@@ -4336,15 +4336,18 @@ Emacs whose agent-shell sessions all ended hours ago."
 (defun agent-river--usage-column (session &optional now)
   "Return SESSION\\='s graph padded to a fixed width, or nil.
 
-Every graph is the same length, which is what lets two of them be read
-against each other -- and it works at different columns, because the
-rightmost bar is `now' in each one wherever that one happens to start.
-The line around it is not a column and cannot be made one: the block is
-`· '-joined parts of whatever width they happen to be -- a label, a
-truncated but unpadded task -- so what follows the graph already sits
-somewhere different on every line.  What the padding does buy beyond the
-comparison is that a line\\='s own tail stops jumping when its session goes
-from unsampled to sampled.
+Every graph is the same length, and drawn first on the line -- ahead of
+the name -- that makes it a real column rather than a promise of one: only
+the outline marker comes before it, so the graphs stack into a strip that
+can be read straight down, which is what sharing one scale is for.
+Further right it sat behind a label and a task of whatever width the
+session had, and no two lines put it in the same place; the padding still
+bought the comparison there, since the rightmost bar is `now' in every
+graph wherever it starts, but nothing else.  Here it squares up the field
+after it as well, the name being the one that now starts at a fixed place.
+
+What the padding also buys is that a line\\='s own tail stops jumping when
+its session goes from unsampled to sampled.
 
 Padded with blank braille rather than spaces, so an empty column is
 exactly as wide as a full one in whatever font is drawing them.
@@ -5110,6 +5113,23 @@ question an onlooker actually has."
          (parts
           (delq nil
                 (list
+                 ;; First on the line, ahead of the name, and that is what
+                 ;; makes it a column at all: only the outline marker comes
+                 ;; before it, so every graph in the block starts in the
+                 ;; same place and they stack into a strip that can be read
+                 ;; straight down.  Comparing them is the whole reason they
+                 ;; share one scale, and anywhere further right they sat
+                 ;; behind a label and a task of whatever width the session
+                 ;; happened to have.  It squares up its neighbour too: the
+                 ;; name now starts at a fixed place, which is the one
+                 ;; field after it that does.
+                 ;;
+                 ;; It is in neither frame -- everything after it is this
+                 ;; task's and resets on a prompt, where this covers a
+                 ;; fixed window that runs straight through one.  Reading
+                 ;; the shape before the name is the honest order for that:
+                 ;; it is about the session, not about the turn.
+                 (agent-river--usage-column (agent-river-state-id state))
                  (propertize (or (agent-river-state-label state) "?")
                              'face 'agent-river-session)
                  ;; An open question outranks everything measured below it,
@@ -5146,13 +5166,6 @@ question an onlooker actually has."
                    (propertize (truncate-string-to-width
                                 task agent-river-panel-task-width nil nil "…")
                                'face 'agent-river-prompt)))
-                 ;; Between what the agent is doing and how long it has been
-                 ;; at it, because that is the reading it belongs with: the
-                 ;; two on either side of it are the same question over the
-                 ;; same stretch of time.  It is in neither frame -- the
-                 ;; numbers after it are this task's, and this covers a
-                 ;; fixed window that runs straight through a prompt.
-                 (agent-river--usage-column (agent-river-state-id state))
                  (when (agent-river-state-task-started state)
                    (agent-river--ago (agent-river-state-task-started state)))
                  (let ((n (agent-river-state-steps state)))

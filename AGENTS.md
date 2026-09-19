@@ -1164,29 +1164,34 @@ spreading now, and the invention that would have been is not needed either.
   *range*, from `:since` and the table's horizon, and never from an amount. That
   leaves three levels for the value, which is coarse on purpose: the graph
   answers when the work happened and `agent-river-spend` answers what it cost.
-- **Every graph is the same length; the line around it is not a column and
-  cannot be made one** (`agent-river--usage-column`). This is *not* the map's
-  diffstat rule and the analogy was wrong when it was first written here: the
-  listing there has aligned prefixes, where a block line is `· `-joined parts of
-  whatever width they happen to be — a label, a truncated but unpadded task — so
-  what follows the graph already sits somewhere different on every line. What
-  the padding buys instead is that two graphs can be read against each other,
-  which works at different columns because the rightmost bar is *now* in each
-  one wherever it starts, and that a line's own tail stops jumping when its
-  session is sampled for the first time. Padded with blank braille rather than
+- **It leads the line, ahead of the name, and that is what makes it a column**
+  (`agent-river--usage-column`). Only the outline marker comes before it, so
+  every graph in the block starts in the same place and they stack into a strip
+  that can be read straight down — which is what sharing one scale was for, and
+  what the field could not do anywhere else. It sat between the task and the
+  clock first, and there the block's `· `-joined parts, each of whatever width
+  the session happened to have, put it somewhere different on every line: the
+  padding still bought the comparison, since the rightmost bar is *now* in every
+  graph wherever it starts, but nothing else. Which is why the map's diffstat
+  analogy was wrong when it was first written here, and why it holds now that
+  the position has changed: the listing there has aligned prefixes too. Being
+  first also squares up its neighbour, the name being the one field after it
+  that now starts at a fixed place. Padded with blank braille rather than
   spaces, so an empty one is exactly as wide as a full one in whatever font
-  draws them.
+  draws them, and so a line's own tail does not jump when its session is
+  sampled for the first time.
 - **Reserved while a session the block is *drawing* has been sampled**
   (`agent-river--usage-measured-p`), and pointedly not while the table is
   non-empty. An entry outlives its session on purpose so that
   `agent-river-spend` can answer for one whose buffer is gone, so asking the
   table whether it holds anything would keep an empty column on every line of an
   Emacs whose agent-shell sessions all ended hours ago.
-- **It is in neither frame, and sits between the two readings it belongs
-  with.** Every other number on the line is the task's and resets on a prompt;
-  this covers a fixed window that runs straight through one. It goes between
-  what the agent is doing and how long it has been at it, because those two are
-  the same question over the same stretch of time.
+- **It is in neither frame, which is the second reason it comes before the
+  name.** Every other number on the line is the task's and resets on a prompt;
+  this covers a fixed window that runs straight through one. Read before the
+  name it is plainly about the session rather than about the turn, where in the
+  middle of the line it sat among numbers that reset without saying that it
+  does not.
 - **The money is named or not named, never guessed** (`agent-river--usage-money`,
   `:currency`). `agent-river-spend` is the one place the figure itself is shown,
   so it carries the currency agent-shell named and sums **per currency**: a table
