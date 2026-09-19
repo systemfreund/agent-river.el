@@ -6742,6 +6742,34 @@ file the moment it appears, and a half-written one reads as malformed."
     (should (null agent-river-launch--queue))
     (should (eq 'unmatched (car (agent-river-launch-test--decisions))))))
 
+(ert-deftest agent-river-launch-test-a-delegated-agent-counts-toward-the-limit ()
+  (agent-river-launch-test--with-spool
+    (let ((agent-river-launch-rules
+           '((:name "quiet" :match t :gate ((:max-concurrent . 2))))))
+      (let ((state (agent-river-launch-test--busy "s1" "alpha")))
+        ;; One session, one subagent working under it.  A subagent stopped
+        ;; being a registry entry, so the session count says 1 and the
+        ;; machine has two agents on it -- and the limit is about the
+        ;; machine.
+        (agent-river-fold state '(:kind "act" :agent "a1" :agent-type "Explore"
+                                        :tool "Read" :file "a.el"))
+        (should (= 1 (agent-river--active-count)))
+        (should (= 2 (agent-river-launch--agents)))
+        (agent-river-launch-test--deliver '((source . "river") (id . "1")))
+        (agent-river-launch-scan)
+        (should (eq 'held (car (agent-river-launch-test--decisions))))
+        (should (string-match-p "2 agents working, limit 2"
+                                (plist-get (car agent-river-launch--decisions)
+                                           :reason)))
+        ;; The subagent finishes and the room it was taking up is given back.
+        ;; `done' is a fact; a subagent gone quiet is `stale', which is a
+        ;; guess and deliberately still counted against the limit.
+        (agent-river-fold state '(:kind "done" :agent "a1"
+                                        :agent-type "Explore"))
+        (should (= 1 (agent-river-launch--agents)))
+        (agent-river-launch-drain)
+        (should (null agent-river-launch--queue))))))
+
 (ert-deftest agent-river-launch-test-gate-counts-running-sessions ()
   (agent-river-launch-test--with-spool
     (let ((agent-river-launch-rules

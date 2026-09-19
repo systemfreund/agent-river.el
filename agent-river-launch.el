@@ -476,7 +476,7 @@ which is a choice a rule author can anticipate where a sentence is not.
 
 In a `:gate' alist CHECK is one of:
 
-  :max-concurrent N       refuse while N or more sessions are running.
+  :max-concurrent N       refuse while N or more agents are working.
   :idle t                 refuse while any agent is mid-turn.
   :no-failures t          refuse while any session is on a failure streak.
   :budget (N . SECONDS)   refuse after N of this rule in that window.
@@ -560,6 +560,33 @@ happen, which is exactly what makes the budget legible before it matters.")
                       (time-less-p cutoff (car entry))))
                agent-river-launch--accepted)))
 
+(defun agent-river-launch--agents ()
+  "Return how many agents are at work, delegated ones included.
+
+Not `agent-river--active-count', which answers for *sessions* and is
+right to: a subagent is a tally on its parent rather than a registry
+entry of its own, so a session running three of them counts once there.
+It did not always -- a subagent used to be an entry, and this gate was
+calibrated when it was, so reading that number now would let a
+`:max-concurrent' of 2 stand over eight working agents and refuse
+nothing.
+
+This is the one place the distinction matters, because this is the one
+question that is about load rather than about sessions: the gate exists
+to stop another agent being started while the machine already has its
+hands full, and a delegated agent has its hands just as full.  Only
+`running' delegates count -- `done' is over and `stale' is a guess, and
+a guess must not be what holds a launch back."
+  (let ((n 0))
+    (maphash (lambda (key state)
+               (when (agent-river--active-p state)
+                 (setq n (+ n 1 (seq-count
+                                 (lambda (child)
+                                   (equal (plist-get child :status) "running"))
+                                 (agent-river-children key))))))
+             agent-river-registry)
+    n))
+
 (defun agent-river-launch--working ()
   "Return the label of a session that is mid-turn, or nil."
   (let (label)
@@ -595,8 +622,8 @@ this is meant to run -- so END below START reads as crossing it."
   "Return why CHECK with VALUE refuses RULE now, or nil to allow."
   (pcase check
     (:max-concurrent
-     (let ((n (agent-river--active-count)))
-       (and (>= n value) (format "%d session%s running, limit %d"
+     (let ((n (agent-river-launch--agents)))
+       (and (>= n value) (format "%d agent%s working, limit %d"
                                  n (if (= n 1) "" "s") value))))
     (:idle
      (and value (let ((label (agent-river-launch--working)))

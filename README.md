@@ -990,9 +990,13 @@ declarative value *or* a function.
                 (:budget . (4 . 3600))))))
 ```
 
+`:max-concurrent` counts **agents**, not sessions: a subagent is a tally on
+its parent rather than a registry entry, so a session running three of them
+is one session and four agents, and the cap is about the machine.
+
 The default is the declarative form, and the reason is rung 1: calibrating
 means reading. A declarative rule can be explained in the queue buffer —
-matched on source `gh`, held because two sessions are already running —
+matched on source `gh`, held because two agents are already working —
 where a function can only be named. What holds either way is that the ledger
 records the *outcome* of every gate, so a function rule is still answerable
 for afterwards; it just cannot explain itself in advance.

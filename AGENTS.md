@@ -943,6 +943,17 @@ process or a no-op. What is load-bearing already:
   with the launcher, debounced — that hook fires on every tool call.
 - **A full queue defers, it does not drop** — intake stops and the files stay
   in the inbox, one log line per scan rather than one per file.
+- **`:max-concurrent` counts agents, and `agent-river--active-count` counts
+  sessions** (`agent-river-launch--agents`). They were the same number when
+  this gate was written and a subagent was a registry entry of its own; since
+  it became a tally on its parent, the session count reads 1 where eight
+  agents are working, and a cap read off it would refuse nothing. This is the
+  one question here that is about load rather than about sessions, so it adds
+  each session's `running` delegates — `done` is over and `stale` is a guess,
+  and a guess must not be what holds a launch back. The core function's own
+  docstring said "subagents count" for as long as they had stopped: a number
+  whose meaning moves under a caller is worth a line saying what it now
+  means, which it has.
 
 ### One set of motions, every buffer
 
