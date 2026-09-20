@@ -409,9 +409,14 @@ mechanism over -- half a sentence said is worse than nothing said."
         (let ((line (string-trim (substring pending 0 (match-beginning 0)))))
           (setq pending (substring pending (match-end 0)))
           (unless (string-empty-p line)
+            ;; The repository in parentheses would be the other way round:
+            ;; the script names what `gh' was asked about and cannot know
+            ;; which entry of `agent-river-gh-repos' that came from, and
+            ;; both are worth having -- `... failed in o/r in /home/x/o/r'
+            ;; is the wording rather than the content.
             (agent-river-log
              "fail" (agent-river--log-text
-                     (format "%s in %s" line (abbreviate-file-name dir))))))))))
+                     (format "%s (%s)" line (abbreviate-file-name dir))))))))))
 
 (defun agent-river-gh--poll-1 (dir &optional rescan)
   "Start a poll of DIR, unless one is already out for it.

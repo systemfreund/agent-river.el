@@ -768,6 +768,15 @@ On the Emacs side, once: `(agent-river-spool-mode 1)`.
 | `text` | | the line for the event log |
 | `session` | | an agent-river session id, if one caused this — see below |
 
+A delivery that is `gone` the **first** time a key is seen declares nothing.
+The ending being worth folding and the record being worth creating are two
+different questions: a source that polls a world it did not watch re-sees
+everything that changed, so without this the first wide poll fills the domain
+section — the queue of what nobody has picked up — with records created purely
+to be struck through, and an artifact record does not fade the way a reached
+name does. A key already in the table gets its ending as usual; there the
+striking through is the news rather than the whole of the record.
+
 Two rules a writer keeps:
 
 - **Build elsewhere, `rename` in.** Only `.json` is taken in, which leaves

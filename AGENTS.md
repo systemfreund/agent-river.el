@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (462 tests). -L . is required: the tests require all four .el files.
+# Full suite (464 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -877,6 +877,27 @@ before the deletion, so that deferring is not the same as forgetting.
   writer about, and throw it away *quietly*. A file too young is left for
   the next scan. It covers "parses but has no key" too, because a truncated
   write can land as valid JSON with the key not in it yet.
+- **An ending is folded; a first sighting that is already over is not
+  declared** (`agent-river-spool--declare`). One call used to answer both
+  questions, and they are different ones: a source that polls a world it did
+  not watch re-sees everything that changed, so the first wide poll declared
+  a record for every thing that had ended since the window opened, purely in
+  order to strike it through. An artifact record does not fade the way a
+  reached name does — it stays until `agent-river-drop-artifact` — so the
+  domain section, the queue of what nobody has picked up, opened with more
+  dead lines than live ones. Measured on one repository: ten deliveries,
+  seven over before anything here had heard of the thing, and three records
+  after. Which of the two it is, is a question the **table** answers, the way
+  `agent-river-observe-artifact` answers it for a producer that would
+  otherwise keep a list of its own — through `agent-river-artifact-at`, not
+  `agent-river-artifact`, which creates the record it is asked about. It sits
+  here rather than in the reader, which is a pure translation and cannot know
+  what the table has, and rather than in `agent-river-appeared`, whose return
+  value already means first-sight-versus-repeat and would then mean two
+  things. **No log line**, which is the rule applied rather than a gap in it:
+  the spool logs failures and this is not one, and `artifact` is a notable
+  kind — `>` stops on it — where a thing that was over before anybody heard
+  of it is the definition of a line that does not want attention.
 - **A declaration that throws is treated like a file that would not parse.**
   Left in the inbox it would be retried every minute for the life of the
   Emacs, which is the one outcome worse than losing it.
@@ -1009,8 +1030,24 @@ before the deletion, so that deferring is not the same as forgetting.
   window is being missed, because nothing will ever ask about one) is sound
   and does not cover every kind at once, which is precisely what a typo in a
   crontab is.
-- **The one thing the script says out loud is a query that failed**, one
-  line on stdout, logged by `agent-river-gh--reporter`. It is the exception
+- **The one thing the script says out loud is a kind that did not come back
+  whole**, one line on stdout, logged by `agent-river-gh--reporter`. Three
+  ways to get one and they are the three that hold the mark, which is what
+  makes the set exactly right: the query **failed**; it came back at the
+  **limit**, so the window was not seen to its end; or the answer could not
+  be **written**. The last was the `asked` failure in a different branch —
+  neither the `mktemp` nor the write cleared `complete`, so a spool at mode
+  500, or a full filesystem, delivered nothing, exited 0, said nothing and
+  stamped the mark over every object in the window. AGENTS.md records the
+  same incident one directory over, with `failed/` at mode 500. The
+  truncation half was silent until `--state all` made it likely: the close
+  rate multiplies the objects in a window, and a held mark grows the window,
+  which returns more objects, which makes the next truncation likelier — a
+  short runway into a permanent stall, where the operator's levers are
+  `AGENT_RIVER_GH_LIMIT` and a narrower `agent-river-gh-kinds`. The write
+  report is **per kind, not per object**, because a spool that cannot be
+  written cannot be written fifty times and fifty lines would bury the one
+  that matters. It is the exception
   to the no-op rule and the reason is that two kinds hide what one could
   not: a kind failing *persistently* — an old `gh` rejecting a field, a
   token short a scope, pull requests disabled — holds the mark for ever

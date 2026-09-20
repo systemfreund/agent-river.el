@@ -26,15 +26,24 @@
 # program either way, which is the point: an Emacs that is not running must
 # not be a reason for an issue to go unseen.
 #
-# It writes one line to stdout per query that failed, and nothing else ever.
-# That is the exception to "every step degrades to a no-op", and the reason is
-# that a *persistent* failure here is invisible from the other side: the mark
-# is then never stamped again, the window grows without bound, and the whole
-# issue set is re-delivered every interval for as long as the Emacs runs.  One
-# kind failing while another answers is the case that hides it -- deliveries
-# keep arriving, so the poll looks healthy.  `agent-river-gh--poll-1' logs the
-# line into the HUD; under cron the same line is the mail, which for a failure
-# that is not transient is the point rather than the cost.
+# It writes one line to stdout per kind that did not come back whole, and
+# nothing else ever.  That is the exception to "every step degrades to a
+# no-op", and the reason is that holding the mark is invisible from the other
+# side: the window then grows without bound and the whole issue set is
+# re-delivered every interval for as long as the Emacs runs.  One kind failing
+# while another answers is the case that hides it -- deliveries keep arriving,
+# so the poll looks healthy.  `agent-river-gh--poll-1' logs the line into the
+# HUD; under cron the same line is the mail, which for a failure that is not
+# transient is the point rather than the cost.
+#
+# Three ways not to come back whole, and every one of them holds the mark, so
+# every one of them says so.  The query *failed*.  The query came back at the
+# `limit', so the window was not seen to its end -- which is a permanent stall
+# rather than a retry, since the next run asks the same window and is cut short
+# the same way, and the operator's levers are AGENT_RIVER_GH_LIMIT and a
+# narrower AGENT_RIVER_GH_KINDS.  Or the answer could not be *written*: a full
+# filesystem or a spool whose permissions changed, which as far as the mark is
+# concerned is a query that was not answered.
 #
 # Both queries go through GitHub's *search* endpoint, because of `--search'.
 # Its secondary limit is much tighter than the REST one -- roughly 30 requests
@@ -186,9 +195,25 @@ for kind in $kinds; do
     continue
   fi
 
+  # Per kind rather than per object, because a spool that cannot be written
+  # cannot be written fifty times and fifty lines would bury the one that
+  # matters.
+  wrote=1
+
   while IFS= read -r object; do
     [ -n "$object" ] || continue
-    tmp=$(mktemp "$spool/gh.XXXXXXXX" 2>/dev/null) || continue
+    # Every branch where a delivery does not land clears `complete'.  It used
+    # to clear none of them, so a spool at mode 500 -- or a full filesystem --
+    # delivered nothing, exited 0, said nothing, and stamped the mark over
+    # every object in the window.  That is the `asked' failure in a different
+    # branch: there nothing was queried, here nothing was written, and the
+    # mark means neither.  AGENTS.md records the same incident one directory
+    # over, with `failed/' at mode 500.
+    if ! tmp=$(mktemp "$spool/gh.XXXXXXXX" 2>/dev/null); then
+      wrote=0
+      complete=0
+      continue
+    fi
     # Built where the watcher does not look -- only `.json' is taken in -- and
     # renamed into place, so the file is never visible half written.
     #
@@ -197,15 +222,20 @@ for kind in $kinds; do
     # it in the nesting is one the two could disagree about.
     if printf '{"source":%s,"repo":%s,"cwd":%s,"object":%s}' \
          "$(quote "$src")" "$(quote "$repo")" "$(quote "$PWD")" "$object" \
-         > "$tmp"; then
-      mv "$tmp" "$tmp.json" || rm -f "$tmp"
+         > "$tmp" && mv "$tmp" "$tmp.json"; then
+      :
     else
       rm -f "$tmp"
+      wrote=0
+      complete=0
     fi
   done < "$answer"
 
   count=$(wc -l < "$answer" | tr -d ' ')
   rm -f "$answer"
+
+  [ "$wrote" -eq 1 ] || \
+    printf 'river-gh: %s deliveries could not be written in %s\n' "$kind" "$repo"
 
   # A truncated run has not seen the window either.  There is no way to tell a
   # full page from a truncated one apart from its size, so a run that came
@@ -213,7 +243,19 @@ for kind in $kinds; do
   # same over-fetch the header describes, and free for the same reason.
   # Advancing the mark to the oldest object seen would be tighter and would
   # mean reading gh's output, which is the one thing this script does not do.
-  [ "$count" -lt "$limit" ] || complete=0
+  #
+  # And it *says so*, which is the half the report channel was missing: a `gh'
+  # that fails announces itself, a `gh' that came back at the limit did not,
+  # and asking for every state rather than the open ones alone made the second
+  # far likelier -- the close rate multiplies the objects in a window, and for
+  # pull requests that rate is most of them.  A held mark grows the window,
+  # which returns more objects, which makes the next truncation likelier: the
+  # runway into the stall is short and it was silent.
+  if [ "$count" -ge "$limit" ]; then
+    printf 'river-gh: %s came back at the limit of %s in %s\n' \
+      "$kind" "$limit" "$repo"
+    complete=0
+  fi
 done
 
 set +f

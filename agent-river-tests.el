@@ -7305,14 +7305,17 @@ headless launcher issue #37 wants could not be dropped in beside it."
     (should (equal "/repo" (alist-get 'cwd context)))))
 
 (ert-deftest agent-river-gh-test-a-closed-issue-is-ended ()
-  (agent-river-spool-test--with
-    (agent-river-spool-test--deliver
-     (agent-river-gh-test--delivery '(state . "CLOSED")))
-    (agent-river-spool-scan)
-    ;; Kept and struck through rather than removed: the ending is itself a
-    ;; thing that happened.
-    (should (plist-get (agent-river-spool-test--record "issue:o/r#42")
-                       :gone))))
+  ;; The reader's own answer, and pointedly not taken through the spool any
+  ;; more: whether a *first* sighting that is already over earns a record at
+  ;; all is the spool's question, and asking it here made this test the place
+  ;; two decisions were pinned at once.  What the reader owes is that GitHub's
+  ;; word for over is recognised as one.
+  (should (plist-get (agent-river-gh--read
+                      "gh" (agent-river-gh-test--delivery '(state . "CLOSED")))
+                     :gone))
+  (should-not (plist-get (agent-river-gh--read
+                          "gh" (agent-river-gh-test--delivery))
+                         :gone)))
 
 (ert-deftest agent-river-gh-test-the-brief-quotes-rather-than-relays ()
   (agent-river-spool-test--with
@@ -7376,14 +7379,44 @@ headless launcher issue #37 wants could not be dropped in beside it."
     (should-error (agent-river-gh--read
                    "gh-discussion" `((repo . "o/r") (object . ,object))))))
 
-(ert-deftest agent-river-gh-test-a-merged-pull-request-is-ended ()
-  ;; `merged' was written into the reader before there was anything that
-  ;; could be merged.  Struck through rather than dropped, like a closed
-  ;; issue: the ending is itself a thing that happened.
+(ert-deftest agent-river-spool-test-a-first-sighting-that-is-over-is-not-declared ()
+  ;; The ending being worth folding and the record being worth creating are
+  ;; two different questions, and one call used to answer both.  A source that
+  ;; polls a world it did not watch re-sees everything that changed, so the
+  ;; first wide poll declared a record for every thing that had ended since
+  ;; the window opened -- purely in order to strike it through, permanently,
+  ;; in the section whose whole subject is what nobody has picked up.
   (agent-river-spool-test--with
-    (agent-river-spool-test--deliver (agent-river-gh-test--pr '(state . "MERGED")))
+    (agent-river-spool-test--deliver
+     (agent-river-gh-test--pr '(state . "MERGED")))
+    (should (= 1 (agent-river-spool-scan)))
+    ;; Taken in -- the file is gone, or the next scan reads it again -- and
+    ;; nothing was declared.
+    (should (null (agent-river-spool-test--files)))
+    (should (null (agent-river-artifact-at "pr:o/r#7")))))
+
+(ert-deftest agent-river-spool-test-an-ending-still-lands-on-a-record-we-have ()
+  ;; The other half, and the one the rule must not take with it: a thing this
+  ;; table already knows about has its ending folded, because there the
+  ;; striking through is the news rather than the whole of the record.
+  (agent-river-spool-test--with
+    (agent-river-spool-test--deliver (agent-river-gh-test--pr))
+    (agent-river-spool-scan)
+    (should-not (plist-get (agent-river-spool-test--record "pr:o/r#7") :gone))
+    (agent-river-spool-test--deliver
+     (agent-river-gh-test--pr '(state . "MERGED")))
     (agent-river-spool-scan)
     (should (plist-get (agent-river-spool-test--record "pr:o/r#7") :gone))))
+
+(ert-deftest agent-river-gh-test-a-merged-pull-request-is-ended ()
+  ;; `merged' was written into the reader before there was anything that
+  ;; could be merged.  A reader test for the same reason as the one above --
+  ;; what becomes of the record is decided one layer up, and
+  ;; `agent-river-spool-test-an-ending-still-lands-on-a-record-we-have' is
+  ;; where that is pinned.
+  (should (plist-get (agent-river-gh--read
+                      "gh-pr" (agent-river-gh-test--pr '(state . "MERGED")))
+                     :gone)))
 
 (ert-deftest agent-river-gh-test-a-branch-name-is-quoted-like-a-body ()
   ;; The one thing a pull request adds to the prompt that an issue does not,

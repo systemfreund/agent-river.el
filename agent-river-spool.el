@@ -295,18 +295,47 @@ the artifact's context, where they are shown and read by nobody."
                           session)))))
 
 (defun agent-river-spool--declare (spec)
-  "Declare what SPEC names, and return the artifact when that is news."
-  (prog1 (agent-river-appeared (plist-get spec :key)
-                               :domain (plist-get spec :domain)
-                               :name (plist-get spec :name)
-                               :context (plist-get spec :context)
-                               :text (plist-get spec :text))
-    ;; An ending is folded whether or not the appearing was news: a source
-    ;; that reports a closed thing it has reported before is telling us
-    ;; something that moved, and not-news is not the same as nothing
-    ;; happened.
-    (when (plist-get spec :gone)
-      (agent-river-ended (plist-get spec :key) (plist-get spec :text)))))
+  "Declare what SPEC names, and return the artifact when that is news.
+
+Nothing is declared for a **first sighting that is already over**.  The
+ending being worth folding and the record being worth creating are two
+different questions, and one call used to answer both: a source that
+polls a world it did not watch re-sees everything that changed, so the
+first wide poll declared a record for every thing that had ended since
+the window opened, purely in order to strike it through.  The domain
+section is the queue of what nobody has picked up, and an artifact
+record does not fade the way a reached name does -- it stays until
+`agent-river-drop-artifact\=' -- so those lines are permanent and there
+are more of them than there are live ones.  Measured on one repository:
+nine deliveries, seven of them over before anything here had heard of
+the thing.
+
+Which of the two it is, is a question the *table* answers, the way
+`agent-river-observe-artifact\=' answers it for a producer that would
+otherwise keep a list of its own.  `agent-river-artifact-at\=' rather
+than `agent-river-artifact\=', which creates the record it is asked
+about.
+
+No log line, and that is the rule applied rather than a gap in it: the
+spool logs failures, this is not one, and `artifact\=' is a notable kind
+-- `>' stops on it -- where a thing that was over before anybody here
+heard of it is the definition of a line that does not want attention.
+A first sighting that is already over is not-news in the strongest
+sense there is."
+  (if (and (plist-get spec :gone)
+           (not (agent-river-artifact-at (plist-get spec :key))))
+      nil
+    (prog1 (agent-river-appeared (plist-get spec :key)
+                                 :domain (plist-get spec :domain)
+                                 :name (plist-get spec :name)
+                                 :context (plist-get spec :context)
+                                 :text (plist-get spec :text))
+      ;; An ending is folded whether or not the appearing was news: a source
+      ;; that reports a closed thing it has reported before is telling us
+      ;; something that moved, and not-news is not the same as nothing
+      ;; happened.
+      (when (plist-get spec :gone)
+        (agent-river-ended (plist-get spec :key) (plist-get spec :text))))))
 
 (defun agent-river-spool--take-in (file)
   "Take FILE out of the inbox.  Return non-nil if something was declared.
