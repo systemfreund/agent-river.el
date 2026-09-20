@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (464 tests). -L . is required: the tests require all four .el files.
+# Full suite (443 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1451,48 +1451,6 @@ Four things about the map are load-bearing:
   number, so that pushing entries down a level for the root headings cannot
   push files into being headings too. Folds are keyed on absolute paths for
   the same reason: `src` under one root is not `src` under another.
-- **A repository's worktrees are one tree, and only the map ever thought
-  otherwise** (`agent-river-map-worktrees`, default on; `w` splits them for
-  one buffer). Artifact keys are relative to the session cwd, so `src/foo.el`
-  in a worktree and in the main checkout is the same key and
-  `agent-river-touching` has always answered for both at once; it is
-  *placement* that split them, in the two places placement is decided — a
-  root is a session's cwd, and `agent-river--map-reach` relativised against
-  one prefix. `agent-river--map-groups` sits above `agent-river--map-all-roots`,
-  which stays the state's own reading, and merges roots that git says share a
-  `--git-common-dir`; `agent-river--map-member-trees` is what the rest of the
-  draw reads, so the listing, the reached paths, the changed paths and the
-  diffstat cannot come to different conclusions about what a section is
-  showing. Six things it owes. **Merging only where there is something to
-  merge** — the general rule is in **Conventions**; this is the case that paid
-  for it. Two *trees* of one repository, both in the state: grouping
-  unconditionally would widen a session started in `repo/backend` to the whole
-  checkout, which is a different change wearing this one's clothes. **The
-  section is headed by the main worktree even when no agent is in it**, which
-  is not a tree becoming a section for being dirty but the repository the
-  worked trees belong to — naming it after the busiest sibling makes one
-  worktree look like the parent of the others. **The party carries its tree**
-  (`alpha@feature-x`): merging answers "is this the same file" and would
-  otherwise delete "where is this agent working", which is the more pressing
-  of the two once worktrees are in play. **The listing is the union** — a file
-  living only on one branch is on one member's disk, and listing the head
-  worktree alone drew it struck through, a deletion the map made up. **The
-  diffstat is per tree** and therefore a row apiece: two worktrees are two
-  working trees on two branches, and summing them states a number true of no
-  tree. The column then follows the work — one answer is the column as ever,
-  two answers go to the tree this line's agents are in, and it is given up only
-  where even that is ambiguous. Which is also why a landing is counted with
-  `agent-river--map-writes` *per tree*: asked of the whole line, every merged
-  file was "in the main branch" in the checkout on the strength of somebody
-  having rewritten it on a branch. And **what git says is cached without a
-  TTL** (`agent-river--worktree-cache`) — which worktree a directory is in
-  changes about as often as the directory does, a worktree added later is a
-  new root and asked on its first draw, and `g` is where a tree that has been
-  moved or pruned is noticed. The read is asynchronous like every other, so
-  the first draw shows the trees apart and the answer merges them a moment
-  later; `agent-river--git-run` is the process without the diffstat's
-  in-flight counting around it, because a `rev-parse` holding that counter
-  open would stop a tree being read for a question it was not asking.
 - **Depth only where there is activity.** A whole tree unfolded is unreadable
   in a monorepo, so RET descends (`agent-river-map-descend`) rather than
   widening, and a file five directories down is shown under the one entry the
@@ -1649,7 +1607,7 @@ Four things about the map are load-bearing:
   since with nothing holding the width open the row is the whole answer;
   and it is decided **per contributor, not per row** — a set with one row
   taken out of it reads as the line's number belonging to whichever rows
-  are left, which in a merged repository is the wrong worktree. The filter
+  are left, which is a claim about a tree nobody made. The filter
   runs before the fold marker is chosen, so a node whose only row the line
   carries shows no twisty rather than one that opens onto nothing.
 - **Order is declared, not positional** (`:rank`, low first, ties keeping
@@ -1794,10 +1752,10 @@ Four things about the map are load-bearing:
   (`agent-river--map-node-path`), never by an expanded path: expanded, the
   identity would depend on whatever `default-directory` happened to be, and
   two maps drawn from different buffers would disagree about which line was
-  which. And **domain roots are appended after the grouping**
-  (`agent-river--map-groups`), not folded into it -- a domain has no
-  worktrees to merge and no `--git-common-dir` to ask for, so putting one
-  through that loop would run a subprocess over a name that is not a path.
+  which. And **domain roots are appended to the tree roots, never derived
+  with them** (`agent-river--map-section-roots`) -- a domain has no
+  directory, so putting one through the walk that reads the state's roots
+  would ask the disk about a name that is not a path.
 - **`>`/`<` does not stop on a record nobody has reached, and that is a
   decision rather than an oversight.** The motion is read off
   `agent-river-map-active`, which is set from the parties, so an incident
@@ -2273,8 +2231,7 @@ together:
   one that was. The test is not how many callers there are: a count is a
   threshold, and a threshold decides by arithmetic what has to be decided by
   looking. Ask instead what each caller is *for*, and where they part, leave
-  them apart and say why. First paid for by the map's worktree grouping, where
-  the concrete case is written out.
+  them apart and say why.
 
   Deliberately not phrased as "the same subject", though that is the shorter
   word: **subject** is taken, and by the thing most likely to be confused with
