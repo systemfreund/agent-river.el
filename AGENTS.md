@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (443 tests). -L . is required: the tests require all four .el files.
+# Full suite (434 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -300,10 +300,11 @@ These are load-bearing; the tests enforce most of them.
   in, and a `cd` inside a Bash call is a different process. Only the
   agent-shell path can re-anchor a session, since it reads the buffer's
   `default-directory` per event. A view that needs a real path puts the cwd
-  and the key back together deliberately (`agent-river--heat-absolute`). Resolving is strictly
+  and the key back together deliberately (`agent-river--artifact-absolute`). Resolving is strictly
   worse than matching on the name for *identity* questions and strictly better
-  for *placement* ones, so both readings exist and each says which it is: file
-  shading still matches on the basename, directory aggregation resolves.
+  for *placement* ones, so both readings exist and each says which it is:
+  `agent-river-touching` still matches on the basename, directory
+  aggregation resolves.
   A file *outside* the cwd is degraded to a bare basename by the same
   normalisation, so the cwd cannot place it either — resolving one against the
   cwd drew a file edited under `~/.claude` inside the project tree. Those keys
@@ -315,7 +316,7 @@ These are load-bearing; the tests enforce most of them.
 - **An artifact is a subject, and a session reaching it is an edge.**
   What is true of the artifact lives in `agent-river-artifacts`; what is true
   of the *relationship* stays in the session's two tables and is still
-  aggregated at read time (`agent-river--heat-entries`,
+  aggregated at read time (`agent-river--artifact-entries`,
   `agent-river--map-reach`). That split is what keeps the frames out of the
   artifact record: `artifacts` versus `task-artifacts` is a property of the
   reaching, not of the thing reached. The artifact table is **not a mirror**
@@ -360,12 +361,12 @@ These are load-bearing; the tests enforce most of them.
   key** (`agent-river--key-domain`). `file` is what a key is when nobody said
   otherwise. A prefix rule would have to decide what `c:/tmp/x` means and
   would answer for keys nobody ever declared.
-  `agent-river--heat-absolute` therefore answers **nil** for a non-file key,
+  `agent-river--artifact-absolute` therefore answers **nil** for a non-file key,
   which is what every existing caller already does the right thing with:
   resolved against a cwd, `inc:INC-444` became `/repo/inc:INC-444`, a file in
   a tree it has nothing to do with, which every view would then draw, shade
   and eventually offer to delete. That is the mistake the anchors were folded
-  to stop, one domain over. `agent-river--heat-place` is the second reading
+  to stop, one domain over. `agent-river--artifact-place` is the second reading
   beside it -- "which artifact" where the other says "where on disk" -- and
   it is what the position marker, the party floor and the section listings
   actually want. **Which domains are in play is derived too**
@@ -506,10 +507,13 @@ These are load-bearing; the tests enforce most of them.
 
 ### Adding a side-effect consumer
 
-Anything that reaches outside this package — shading dired, pulsing a line,
-notifying, writing a file — is an *observer*, not a fold branch. `dired`
-heat/pulse (`agent-river-heat-mode`) is the worked example; read it before
-writing a second one.
+Anything that reaches outside this package — drawing a listing, shading a
+buffer, notifying, writing a file — is an *observer*, not a fold branch.
+`agent-river-map` (`agent-river--map-observe`) is the worked example; read it
+before writing a second one. There was a second, `agent-river-heat-mode`,
+which shaded the dired buffer you were already in by how recently an agent
+had been in each entry; it is gone, and the rules below that it paid for are
+kept where they still bite.
 
 Register on `agent-river-observers`, an abnormal hook of `(STATE EVENT)` run
 for effect after each fold. The runner (`agent-river--run-observers`) already
@@ -546,33 +550,30 @@ What a consumer must respect:
   extra event key the fold keeps out of the artifact keys (`:path`, the
   absolute name, carried beside `:file`); or resolve a key against
   `agent-river-state-cwd`, falling back to its `anchors` entry where the cwd
-  cannot place it (`agent-river--heat-absolute`) — the only one that can place
+  cannot place it (`agent-river--artifact-absolute`) — the only one that can place
   a key in a directory tree and the only one that re-splits a worktree from its
   main checkout. Reach for the third when the question is *where*, not *which*.
 - **Off by default, and the gesture that turns it on is what turns it off.**
   Writing into buffers the user did not point this at needs consent, which is
-  what the global minor mode is for (`agent-river-heat-mode`). A consumer that
-  draws only into a buffer of its own needs no mode: opening that buffer is the
-  consent and killing it is the retirement (`agent-river-map`, via a local
-  `kill-buffer-hook` that is also the `agent-river-retire` property). What does
-  not change either way is that there is exactly one gesture and it is
-  reversible.
-- **The timer stops when nothing is left to *change*, which is not the same
-  as nothing being shaded** (`agent-river--map-cooling-p`). Two thresholds
-  fade at different depths: the shading runs out at the bottom of
-  `agent-river-heat-levels`, `agent-river-map-party-floor` sits below it, and
-  asking only the first retired the map's timer while names were still on
-  screen waiting to cross the second — so the map froze mid-fade. A name held
-  by the `:current` exemption is not cooling and must not keep the timer
-  alive either; it never crosses anything. What no timer here can see is the
-  disk: a file that comes back while no agent is working redraws on the next
-  event or on `g`, the way a dired buffer does.
+  what a global minor mode is for. A consumer that draws only into a buffer of
+  its own needs no mode: opening that buffer is the consent and killing it is
+  the retirement (`agent-river-map`, via a local `kill-buffer-hook` that is
+  also the `agent-river-retire` property). What does not change either way is
+  that there is exactly one gesture and it is reversible.
+- **The timer stops when there is nothing left to draw, and nothing here
+  changes on its own.** Fading used to be the exception — a view that went on
+  changing while no event arrived, which meant the timer had to ask whether
+  anything was still moving as well as whether anything was dirty. With the
+  decay gone the only answer is dirt (`agent-river--map-tick`), and the price
+  is that the relative times in the rows stand still between turns. What no
+  timer here can see is the disk either way: a file that comes back while no
+  agent is working redraws on the next event or on `g`.
 - **Redraw on a timer, not per event, once the view is bigger than a line.**
   The runner fires on every tool call. Rebuilding a whole listing that often
   moves point under whoever is reading it, thousands of times a task. The
   observer marks dirty and ensures the timer (`agent-river--map-observe`); the
   timer decides how often dirt is worth acting on, and retires itself when
-  there is neither dirt nor anything left to cool. **Which is why anything
+  there is no dirt left. **Which is why anything
   that changes the view without folding an event has to draw**, not mark:
   between turns the timer is not running, so a flag is a redraw that never
   happens. `agent-river--forget-reported` is where that is decided for every
@@ -584,7 +585,7 @@ What a consumer must respect:
   observer at them.
 
 Two frames again: pick `task` or `session` scope *explicitly* (see
-`agent-river-heat-scope`) and say which one the view is showing.
+`agent-river-map-scope`) and say which one the view is showing.
 
 ### Producers — the other direction
 
@@ -596,7 +597,7 @@ Two ways in: `agent-river-note`, for something about a session, and
 `agent-river-appeared`, for something that belongs to no session at all.
 
 ```
-hooks -> fold -> observers -> outside world    consumer (agent-river-heat-mode)
+hooks -> fold -> observers -> outside world    consumer (agent-river-map)
 outside -> note/appeared -> fold -> observers  producer
 ```
 
@@ -1426,14 +1427,15 @@ child's state rather than take a file name back out of
   tool log, and the answer filed below the tallies reads as another
   measurement rather than as the end of the thing above it.
 
-### The two views of the artifact tables
+### The view of the artifact tables
 
-`agent-river-heat-mode` shades the dired buffer you are already in.
-`agent-river-map` (`*agent-river-map*`) is the lens over it: one directory
-listed in full, each entry annotated with what has happened *beneath* it, so
-several agents spread over a large repository are visible at once. Same
-weighting, same `agent-river--heat-entries` derivation, different grain — so
-the two cannot drift.
+`agent-river-map` (`*agent-river-map*`) is the lens dired cannot be: one
+directory listed in full, each entry annotated with what has happened
+*beneath* it, so several agents spread over a large repository are visible at
+once. It is the only view of those tables — `agent-river-heat-mode` shaded the
+dired buffer you were already in and is gone, and with it the decay that made
+a reading fade. Everything here reads `agent-river--artifact-entries`, so no
+two parts of the draw can disagree about what the tables say.
 
 Four things about the map are load-bearing:
 
@@ -1455,29 +1457,25 @@ Four things about the map are load-bearing:
   in a monorepo, so RET descends (`agent-river-map-descend`) rather than
   widening, and a file five directories down is shown under the one entry the
   listing has a line for, with the rest of its path inline.
-- **A name fades like the shading does** (`agent-river-map-party-floor`).
-  The shading has always had a floor — `agent-river-heat-levels` runs out at
-  1, below which there is no face and no overlay — and the name in the
-  brackets had none. The weights decay exponentially, so they approach zero
-  without reaching it, and after an hour in a small repository every file
-  carried a name and every line read alike. A view where everything is marked
-  marks nothing. Two things hold it together: **a party that still exists is
-  never dropped from the one file it reached most recently**, whatever that
-  weighs, because cold is not the same as gone and that file is the answer to
-  "where is this agent now" — so a quiet map settles at one line per agent
-  rather than at none; and the floor is applied at **both** reads of the
-  artifact tables (`agent-river--map-live-p`, asked by
-  `agent-river--map-all-roots` and `agent-river--map-reach`), since a root
-  kept alive by a touch too cold to name would head a section with nothing
-  under it.
-- **A party that is gone keeps no file, and no marker** (`agent-river--gone-p`,
-  applied in `agent-river--map-newest`). Both of the readings above are
-  present tense, so for a session that has ended they claim a position on
-  behalf of nobody — and the exemption made that permanent: an agent-shell
-  buffer killed, and its name and `⏿` stayed pinned to one file for as long as
-  the registry held the state, since nothing decays past a floor it is exempt
-  from. Left out of the `newest` hash, a gone party loses the marker at once
-  and the name fades at the floor like any other. Three things to keep:
+- **Nothing leaves this view by getting old.** A name stands for as long as
+  the tables say an agent reached it, and the only things that take it away
+  are `agent-river-forget-artifacts`, `agent-river-forget-gone-files` and a
+  new prompt clearing the task frame. There was a floor here once
+  (`agent-river-map-party-floor`, under an exponential decay): weights
+  approached zero without reaching it, so after an hour every file carried a
+  name and the floor was what kept a view where everything is marked from
+  marking nothing. It is gone with the decay, and the answer to a map that
+  has filled up is now a gesture rather than a half-life — which is the same
+  answer `agent-river-forget-artifacts` already gave for work that has
+  landed, and one fewer number to tune.
+- **A party that is gone keeps no marker** (`agent-river--gone-p`, applied
+  in `agent-river--map-newest`). `:current` is the map's one present-tense
+  reading, so for a session that has ended it claims a position on behalf of
+  nobody: an agent-shell buffer killed, and its `⏿` stayed pinned to one file
+  for as long as the registry held the state. Left out of the `newest` hash,
+  a gone party loses the marker at once; its name stays, because the file
+  was still touched and that does not stop being true. Three things to
+  keep:
   **gone is narrower than not-active** — `agent-river--active-p` falls back to
   the TTL, which is a guess, and a name is not withdrawn on a guess; the facts
   are a buffer we saw and that has since been killed (`agent-river--shell-hosted`,
@@ -1499,9 +1497,9 @@ Four things about the map are load-bearing:
   in the view. What stays is what *moves*: which tree is being shown, and how
   many agents are in it. That count is of agents that **still exist**
   (`agent-river--gone-parties`), not of names on the map — a name outlives
-  its session on purpose, fading through `agent-river-map-party-floor`
-  because the file was still touched, so counting names would report an
-  audience that has left as though it were still there.
+  its session on purpose, because the file was still touched, so counting
+  names would report an audience that has left as though it were still
+  there.
 - **A file that is gone is struck through, not dropped**
   (`agent-river-gone`, set on `:missing`). Removing them was tried first, in
   two shapes, and both lost something. Dropping a deletion outright throws
@@ -1513,16 +1511,15 @@ Four things about the map are load-bearing:
   behind both — that `:current` on a vanished file reads as "the agent is
   here" — was a rendering problem, and it is fixed where it was: struck
   through, the line says the agent's last move was into a file that has since
-  gone, which is true and worth knowing. Everything else about them is
-  ordinary: they fade at the floor like any other name. The strike is asked
+  gone, which is true and worth knowing. The strike is asked
   of a file line too, not only of a top-level entry — a deletion three
   directories down used to draw as an ordinary line, which stopped being a
   corner case once `agent-river-map-dirty` began reaching deletions through
   git, where one is a change like any other.
 - **A node's rows are contributed; the line is their summary**
   (`agent-river-map-contributors`, `agent-river--map-rows`). The line carries
-  what can be read *down* the listing — shading, the two markers, one
-  fixed-width column — and everything else lives in rows under the node. The
+  what can be read *down* the listing — the two markers, one fixed-width
+  column — and everything else lives in rows under the node. The
   party names used to be on the line and were the one ragged thing on it,
   which is why nothing scannable could ever follow them; moving them into
   rows is what freed the column that `:summary` now competes for. **The line
@@ -1657,7 +1654,7 @@ Four things about the map are load-bearing:
   stays struck through afterwards, which looks like the command missing one and
   is the command refusing one. And a key **nothing can place is unplaceable,
   not gone** (`agent-river--artifact-gone-p` goes through
-  `agent-river--heat-absolute`, so the anchor wins over the cwd), or a state
+  `agent-river--artifact-absolute`, so the anchor wins over the cwd), or a state
   folded without a cwd would have every artifact it ever recorded swept away by
   a command that found none of them. It narrows the same `forget` event with
   `:files` rather than adding a kind of its own: the transition is identical
@@ -1719,12 +1716,12 @@ Four things about the map are load-bearing:
   schedule on its own TTL and a second caller would race it; the first draw of
   a root therefore shows what was reached and the answer lands a moment later,
   which is what `agent-river--vc-store` marking the map dirty is for. And it
-  brings a **different tense** onto the map: a reached name fades out through
-  `agent-river-map-party-floor`, a changed one stays until it is committed or
-  thrown away, which is git's answer and not this package's — in a tree with a
+  brings a **different tense** onto the map: a reached name stays until
+  somebody forgets it, a changed one stays until it is committed or thrown
+  away, which is git's answer and not this package's — in a tree with a
   great deal of uncommitted work that is most of the listing, and the reason
   this is a setting at all. Roots stay state-derived (`agent-river--map-all-roots`
-  reads `agent-river--heat-entries` alone): a tree nobody has worked in does
+  reads `agent-river--artifact-entries` alone): a tree nobody has worked in does
   not become a section for being dirty, or the map would be a second
   `magit-status` rather than a view of where the agents are.
 
@@ -1836,25 +1833,22 @@ Four things about the map are load-bearing:
   seconds behind the disk and corrects itself: write the file again and it is
   pending again, rebase again and it comes back. The only thing remembered is
   the write count in the artifact tables, which lives exactly as long as the
-  line it annotates — cleared by a new prompt in the task frame, by
-  `agent-river-forget-artifacts` when work lands and the user says so, and
-  faded out of view by `agent-river-map-party-floor` like everything else.
+  line it annotates — cleared by a new prompt in the task frame and by
+  `agent-river-forget-artifacts` when work lands and the user says so.
 
-Encoding discipline, since there are five facts on a line: weight is shading
-(the same `agent-river-heat-levels` faces), party is text, contention is a
-marker, existence is a strike-through, and the diffstat is a fixed column of
-its own — placed before the brackets, because the brackets are a
-variable-length list of names and anything meant to be read *down* the listing
-has to come before them, and reserved on every line as soon as any root is a
-repository, since a width chosen per line is a column in name only. The
-strike-through is deliberately not
-a colour: `:missing` used to be drawn in the grey `agent-river-stale`, which
-put "this file is gone" on the same channel as the heat, where grey already
-meant stale and cold and elided besides. A fifth colour would leave a reader
-unable to say which fact any given colour meant, and one fact must not take two encodings either — the
-brackets used to read `[alpha:4]`, which gave the weight a second rendering
-nobody could reconcile against the first and pushed the names, which is what
-the brackets are for, into the margin. The position marker is repeated in a
+Encoding discipline, since there are three facts on a line: contention and
+position are markers, existence is a strike-through, and the diffstat is a
+fixed column of its own — placed before the rows, and reserved on every line
+as soon as any root is a repository, since a width chosen per line is a
+column in name only. There was a fourth, how heavily a name had been reached,
+drawn as shading, and it went with the decay that made it worth watching.
+The strike-through is deliberately not a colour: `:missing` used to be drawn
+in the grey `agent-river-stale`, where grey already meant stale and elided
+besides. A second colour there would leave a reader unable to say which fact
+any given colour meant, and one fact must not take two encodings either — the
+brackets used to read `[alpha:4]`, which gave the touch count a second
+rendering nobody could reconcile against the first and pushed the names,
+which is what the brackets were for, into the margin. The position marker is repeated in a
 party's own row against the party it belongs to — in the gutter it is
 scannable but anonymous, and "where is this agent now" is a question about a
 party — but **only where there is something to attribute**
@@ -1879,9 +1873,10 @@ is which, so the colour is reinforcement inside a column, not a channel a
 reader has to decode. (They are also `success` and `error` inherited rather
 than chosen, so they are whatever the user's theme already means by good and
 bad. That is the rule for colour here generally: inherit a face the theme
-knows unless the value needs a shade no built-in face has — the three
-`agent-river-heat-*` and `agent-river-pulse` are the only four that do, and
-they are spelled out per light and dark background for exactly that reason.)
+knows unless the value needs a shade no built-in face has. Nothing here
+does any more: the four that did — the three `agent-river-heat-*` and
+`agent-river-pulse`, spelled out per light and dark background — went with
+the shading they were for.)
 
 The buffer is Markdown, rendered by `markdown-ts-view-mode` — the read-only
 variant, which already has `special-mode` among its parents, and a view of a
@@ -1895,10 +1890,10 @@ step. Four things the Markdown base forces:
 
 - **Faces go on `agent-river-map-face`, never on `face`.** tree-sitter owns
   `face` here: it refontifies on redisplay and appends or removes faces as
-  the structure changes, so a shading written as a text property is drawn
-  once and then quietly gone. `agent-river--map-shade` turns the marks into
-  overlays after the text is in, which is how the dired heat survives dired's
-  fontification too.
+  the structure changes, so a face written as a text property is drawn once
+  and then quietly gone. `agent-river--map-shade` turns the marks into
+  overlays after the text is in, because an overlay sits above the
+  fontification rather than competing with it.
 - **Markup stays visible** (`markdown-ts-hide-markup` nil). Hiding it is the
   view mode's default and reads better on prose, but here the marker *is* the
   indentation — hidden, a directory and the files under it start in the same
@@ -1966,7 +1961,7 @@ together:
   that optional. The reasoning lines below are the one exception: they have no
   fallback.
 - **A draw derives once and reads everything else off that**
-  (`agent-river--heat-memo`, `agent-river--section-memo`,
+  (`agent-river--artifact-memo`, `agent-river--section-memo`,
   `agent-river--newest-memo`). Three boxes, one shape, all bound by
   `agent-river--map-draw` and thrown away with it -- a draw is synchronous
   Lisp, nothing on that path folds or declares, so the binding cannot

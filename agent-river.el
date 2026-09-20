@@ -372,10 +372,10 @@ to say whether a line was about an agent or about the work.")
   "Face for a name the state knows and the disk does not.
 
 Struck through rather than merely greyed, because grey is the map's word
-for several things at once -- stale, cold, elided -- and \"this file is
-not there\" is worth saying exactly.  A face and not Markdown `~~\': the
-names are code spans and inline markup does not apply inside one, and the
-map's shading already travels as an overlay because tree-sitter owns
+for several things at once -- stale, elided -- and \"this file is not
+there\" is worth saying exactly.  A face and not Markdown `~~\': the names
+are code spans and inline markup does not apply inside one, and every
+face the map wants already travels as an overlay because tree-sitter owns
 `face' in that buffer.  So this works in the plain fallback too.")
 
 (defconst agent-river-kinds
@@ -1156,7 +1156,7 @@ replaying a session's events from the start."
 ;; the artifact tables inside it record which files it reached.  Which means an
 ;; artifact has no existence of its own: it is a key in somebody's table, and
 ;; "who is in this file" is reconstructed at every read --
-;; `agent-river--heat-entries' flattens the registry, `agent-river--map-reach'
+;; `agent-river--artifact-entries' flattens the registry, `agent-river--map-reach'
 ;; inverts it, `agent-river-touching' asks it outright.  The identity is
 ;; already there; what it has never had is a home.
 ;;
@@ -1186,7 +1186,7 @@ replaying a session's events from the start."
 ;; composite ("SESSION" or "SESSION/AGENT"), so one more kind of key looks
 ;; free -- but every walker of that table would then have to begin by asking
 ;; which kind it had, and there are more of them than it seems:
-;; `agent-river--heat-entries', `agent-river--gone-parties',
+;; `agent-river--artifact-entries', `agent-river--gone-parties',
 ;; `agent-river--spinning-p', the block draw, every report.  A struct serving two meanings is a union type whichever way
 ;; it is spelled, and the walker that forgets to test is wrong only for the
 ;; records it sees least often -- which here is the ones that arrived with no
@@ -1493,7 +1493,7 @@ A measurement rather than a claim: whoever calls this performed the
 dispatch and is reporting it -- a measurement made outside the hook
 stream, the way `agent-river-note' is.  It is folded as an event like any
 other and counted in both frames, so everything downstream -- the map's
-parties, the shading, `agent-river-touching' -- sees it without being
+parties and listing, `agent-river-touching' -- sees it without being
 taught anything.
 
 What it deliberately does not do is count a step or move the phase.  No
@@ -1722,7 +1722,7 @@ which is `agent-river-reach's rule and this only passes it on."
 
 A domain is who knows what a key means.  `file\=' is this package\='s own and
 is what an unnamespaced key is: a name relative to a session\='s cwd, which
-`agent-river--rel\=' produced and `agent-river--heat-absolute\=' can resolve.
+`agent-river--rel\=' produced and `agent-river--artifact-absolute\=' can resolve.
 Anything else was declared by whoever put it here, and only that producer
 knows how to read it back.
 
@@ -2271,7 +2271,7 @@ for a read and `file_path' for a write, and several tools say plain
 `path'.  An agent-shell session adds `filePath' and `filepath' -- the ACP
 `rawInput' for a Claude edit carries the target under the camel-case
 `filePath', which the snake-case ladder missed, so every edit went
-uncounted and the dired heat stayed cold.  `fileName' is what a
+uncounted and the map never drew it.  `fileName' is what a
 Copilot-style diff names.  The artifact tables are keyed on this, so a
 name we did not know would not fail -- it would quietly stop counting
 files, which is the failure mode this whole file is written against."
@@ -4783,8 +4783,8 @@ is carried on the event exactly as `:path' is on a hook event -- beside
 the fold, never in it: the `note' branch stores the text and the time and
 nothing else, and the artifact tables are left alone, so a note can never
 warm a file the agent did not touch.  It is there for observers that need
-to reach the file on disk, which is how a foreign save can pulse its dired
-entry without the note claiming the agent acted on it.
+to reach the file on disk, without the note claiming the agent acted on
+it.
 
 It is a measurement, not a claim: unlike `agent-river-set-intent' this is
 something that was observed, so it may feed a signal.  Which means an
@@ -5987,9 +5987,9 @@ from."
   "Forget which files the sessions have been in, keeping the sessions.
 
 For the moment work lands -- a merge, a release -- after which the files
-it was in are history rather than context.  `agent-river-map-party-floor'
-handles the everyday case on its own by letting a name fade, but cold is
-not the same as done, and only you know which has just happened.
+it was in are history rather than context.  Nothing drops out of the map
+on its own, so this is the gesture that says the work is over: only you
+know when that moment came.
 
 Not the same as `agent-river-reset', which forgets the sessions
 themselves.  Here the steps, the failures and the task survive; only the
@@ -6039,14 +6039,14 @@ listens on never hears about them."
   "Return non-nil when STATE's artifact KEY names a file that is not there.
 
 Placed the way every other view places a key -- through
-`agent-river--heat-absolute', so the anchor wins over the cwd for a file
+`agent-river--artifact-absolute', so the anchor wins over the cwd for a file
 that was reached from outside it, and so this cannot decide a file is
 gone by looking for it in a directory no agent ever opened.
 
 A key that cannot be placed at all is not gone but unplaceable, and is
 kept: a state folded without a cwd would otherwise have every artifact it
 ever recorded swept away by a command that never found any of them."
-  (let ((abs (agent-river--heat-absolute
+  (let ((abs (agent-river--artifact-absolute
               (list :cwd (agent-river-state-cwd state)
                     :anchor (let ((anchors (agent-river-state-anchors state)))
                               (and anchors (gethash key anchors)))
@@ -6482,172 +6482,22 @@ is drawn before this is called, so the marks are already the answer."
                        agent-river-spinner-interval
                        #'agent-river--spin))))
 
-;;; Heat and pulse, rendered into dired
+;;; Reading the artifact tables
 ;;
-;; A second view of the same state.  The panel names the hottest file; this
-;; puts that reading where the files actually are, so a dired buffer shows at
-;; a glance which entries the current task is living in.
+;; One derivation, and every view of those tables is built on it rather than
+;; walking the registry for itself: the map's roots, its listing, its parties
+;; and its domain sections all have to answer from the same walk, and a
+;; second walk is a second place for them to fall out of step.
 ;;
-;; Nothing here folds.  The shading is derived from the artifact tables on
-;; every redraw, exactly as the panel is, so the two cannot drift -- and the
-;; fold stays pure, which is what lets the tests run with no frame and no
-;; dired buffer in sight.
+;; Nothing here folds.  The readings are taken from the tables on every draw,
+;; exactly as the panel's are, so the two cannot drift -- and the fold stays
+;; pure, which is what lets the tests run with no frame in sight.
 ;;
-;; The lookup runs from the *buffer* to the state rather than the other way
-;; round, and that is the whole trick.  State paths are normalised by
-;; `agent-river--rel' -- relative to the session cwd, a bare basename outside
-;; it -- so they deliberately cannot address a file on disk.  A dired buffer
-;; already holds the absolute side; asking it "how hot is this entry" needs
-;; only the basename, which is the key `agent-river-touching' already matches
-;; on and what keeps a worktree and its main checkout reading as one file.
-;;
-;; Kept as one contiguous block, faces included, rather than filed into the
-;; sections above: it is the only part of this package that writes into
-;; buffers the user did not point at it, and that should stay easy to remove.
-
-(declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
-(declare-function dired-goto-file "dired" (file))
-(declare-function dired-move-to-filename "dired" (&optional raise-error eol))
-(declare-function dired-move-to-end-of-filename "dired" (&optional no-error))
-(declare-function pulse-momentary-highlight-region "pulse" (start end &optional face))
-;; Special variables, bound around a pulse to set its length.  Declared so
-;; the byte-compiler treats them as the dynamic bindings pulse.el reads
-;; rather than as unused lexicals the `let' would silently drop.
-(defvar pulse-iterations)
-(defvar pulse-delay)
-
-(defface agent-river-heat-1
-  '((((background light)) :background "#edf2fa")
-    (((background dark))  :background "#1c232e"))
-  "Face for a dired entry the agent has touched once.")
-
-(defface agent-river-heat-2
-  '((((background light)) :background "#dbe4f3")
-    (((background dark))  :background "#26334a"))
-  "Face for a dired entry the agent keeps coming back to.")
-
-(defface agent-river-heat-3
-  '((((background light)) :background "#f7e2c9" :weight bold)
-    (((background dark))  :background "#4a3724" :weight bold))
-  "Face for the dired entry the agent is living in.")
-
-(defface agent-river-pulse
-  '((((background light)) :background "#ffd34d" :foreground "#3a2a00" :weight bold)
-    (((background dark))  :background "#ffcf5c" :foreground "#241a00" :weight bold))
-  "Face a just-touched entry flashes in, briefly, when an event names it.
-
-Separate from `agent-river-heat-3' on purpose, and brighter.  The heat is a
-steady reading -- \"the agent works here\" -- and is meant to be lived with,
-so its shades stay muted.  The pulse is a one-off \"look here\" that has a
-second to do its job, so it has to stand out against every heat level,
-including the hottest; reusing heat-3's shade made a flash on the hottest
-file indistinguishable from the file just sitting there.")
-
-(defcustom agent-river-pulse-iterations 20
-  "How many times a pulse fades in and out.
-`pulse-momentary-highlight-region' runs `pulse-iterations' cycles with
-`pulse-delay' seconds between them, so the two together set how long the
-highlight lasts.  The defaults (10, 0.03) make about a third of a second,
-which is easy to miss when the file being pulsed is not where the eye
-already is -- which is the whole point of pulsing it."
-  :type 'integer)
-
-(defcustom agent-river-pulse-delay 0.06
-  "Seconds between a pulse's fade cycles, with `agent-river-pulse-iterations'.
-Raised from the `pulse' default of 0.03 so a touched file stays lit long
-enough to catch: the pulse points the eye at the file an event just named,
-and an animation that is over before the glance arrives points at nothing."
-  :type 'number)
-
-(defcustom agent-river-heat-levels
-  '((6 . agent-river-heat-3)
-    (3 . agent-river-heat-2)
-    (1 . agent-river-heat-1))
-  "Touch counts and the face each earns, highest threshold first.
-Read top down and the first match wins, so the order is load-bearing;
-a count below every threshold gets no face and no overlay at all."
-  :type '(alist :key-type integer :value-type face))
-
-(defcustom agent-river-heat-scope 'task
-  "Which artifact frame the shading is read from.
-
-`task' answers \"what is this turn about\" and is cleared by every new
-prompt, which is what the panel shows.  `session' answers \"what has this
-agent been in all afternoon\".  They are different questions and the
-package refuses to blur them anywhere else, so the choice is explicit
-here too rather than being whichever frame was convenient."
-  :type '(choice (const task) (const session)))
-
-(defcustom agent-river-heat-half-life 120
-  "Seconds after which a touch counts half as much as a fresh one.
-
-The raw touch count is cumulative and never forgets, so after a long task
-the file with the most historical touches keeps the top shading even when
-the agent moved on ten minutes ago -- exactly the shift in attention the
-view is for, drawn backwards.  Weighting each touch by its age turns the
-reading into \"where is the work now\": a touch `agent-river-heat-half-life'
-seconds old weighs 1/2, two half-lives old 1/4, and so on.
-
-Nothing is mutated as it cools.  `:last' already holds the time of every
-touch, so the weighting is recomputed from it on each redraw and the view
-is correct whenever the next refresh happens to look.  `agent-river-heat-
-refresh-interval' is what makes the cooling visible while the agent sits
-idle; the overlay itself carries no decaying state.  Nil disables the
-weighting and shades by raw count."
-  :type '(choice (const :tag "Off, shade by raw count" nil) (number :tag "Half-life in seconds")))
-
-(defcustom agent-river-heat-refresh-interval 5
-  "Seconds between redraws of the heat while something is still cooling.
-
-The state block's timer (`agent-river-refresh-interval') stops the moment
-no agent is mid-task, which is exactly when the shading has the most to
-show: the work has moved on and the old file should be fading.  Rather
-than leave that to the next event, this timer keeps the dired shading
-honest on its own -- slowly, since a fade is not a clock.
-
-It runs only while `agent-river-heat-mode' is on and stops itself on the
-first tick that finds nothing left above the lowest threshold, so an idle
-Emacs pays for no redraws."
-  :type 'number)
-
-;; Defined before the functions that read it, so the byte-compiler sees the
-;; variable rather than taking it for a free one.
-;;;###autoload
-(define-minor-mode agent-river-heat-mode
-  "Shade dired entries by how often the agent has touched them.
-
-Off by default, and a mode rather than a variable, because this is the one
-thing in the package that writes into buffers the user did not point it
-at: turning it on is the consent, and turning it off has to take the
-overlays with it."
-  :global t
-  (if agent-river-heat-mode
-      (progn
-        (add-hook 'agent-river-observers #'agent-river--dired-observe)
-        (add-hook 'dired-after-readin-hook #'agent-river--heat-after-readin)
-        (agent-river-heat-refresh)
-        (agent-river--ensure-heat-timer))
-    (remove-hook 'agent-river-observers #'agent-river--dired-observe)
-    (remove-hook 'dired-after-readin-hook #'agent-river--heat-after-readin)
-    (agent-river--stop-heat-timer)
-    (dolist (buffer (agent-river--dired-buffers t))
-      (agent-river--heat-clear buffer))))
-
-(defun agent-river--heat-weight (entry)
-  "Return ENTRY's age-weighted touch count.
-
-Fresh touches count fully and older ones fade by `agent-river-heat-half-life',
-so a file the agent left alone sinks through the thresholds and the shading
-follows the work rather than the history.  With the half-life off, or an
-entry carrying no `:last' time, this is the plain count."
-  (let ((touches (or (plist-get entry :touches) 0))
-        (last (plist-get entry :last)))
-    (if (or (null agent-river-heat-half-life)
-            (null last)
-            (<= agent-river-heat-half-life 0))
-        touches
-      (let ((age (float-time (time-subtract (current-time) last))))
-        (* touches (expt 0.5 (/ age agent-river-heat-half-life)))))))
+;; The keys deliberately cannot address a file on disk: `agent-river--rel'
+;; normalises them relative to the session cwd, a bare basename outside it,
+;; which is what makes one file reached from two checkouts one key.
+;; `agent-river--artifact-absolute' is the one place a key and its anchor are
+;; put back together, and it answers nil for a key nothing can place.
 
 (defun agent-river--party-label (state)
   "Return the name STATE goes by in a view that shows several of them.
@@ -6675,7 +6525,7 @@ and not about subagents, and `agent-river--unique-label' is a convention
 rather than a guarantee: it is what stops two sessions sharing a label,
 and a lookup here would make this depend on that holding.
 
-Kept apart from `agent-river--heat-entries': who still exists is a fact
+Kept apart from `agent-river--artifact-entries': who still exists is a fact
 about the registry and not about the artifact tables, and pushing a copy
 of it onto every entry would be a second account of the same thing."
   (let ((gone (make-hash-table :test 'equal)))
@@ -6688,8 +6538,8 @@ of it onto every entry would be a second account of the same thing."
              agent-river-registry)
     gone))
 
-(defvar agent-river--heat-memo nil
-  "A one-draw cache of `agent-river--heat-entries', or nil when not caching.
+(defvar agent-river--artifact-memo nil
+  "A one-draw cache of `agent-river--artifact-entries', or nil when not caching.
 
 Bound to a fresh box by `agent-river--map-draw' and thrown away with it,
 which is why there is no invalidation here to get wrong: a draw is
@@ -6698,43 +6548,43 @@ outlive the walk it was made for.  A contributor's `:refresh' may start a
 subprocess, but its sentinel runs later and under no binding of this.
 
 Outside a draw this stays nil and every call walks the registry, which is
-what every other reader wants -- a dired shading asked a second later is
+what every other reader wants -- a question asked a second later is
 asking about a second later.")
 
-(defun agent-river--heat-entries (&optional scope)
+(defun agent-river--artifact-entries (&optional scope)
   "Return one plist per artifact of every folded session.
 
 Each carries `:party' (`agent-river--party-label'), `:cwd' (the anchor its
-`:file' is relative to), `:file', the age-weighted `:weight' and `:last'.
-`:anchor' is the real directory for a `:file' the cwd cannot place, and
-nil for everything under it -- see `agent-river--anchor'.
+`:file' is relative to), `:file', the cumulative `:touches', `:writes'
+and `:last', and the two placings `:abs' and `:place'.  `:anchor' is the
+real directory for a `:file' the cwd cannot place, and nil for everything
+under it -- see `agent-river--anchor'.
 SCOPE is `session' for the whole session, `task' or nil for the current
 task.
 
-The one derivation every *weighted* view of the artifact tables is built
-from, rather than each walking the registry for itself: the basename table
-below, the directory aggregate beside it and the project map all have to
-answer with the same weighting, and a second walk is a second place for
-them to drift.
+The one derivation every view of the artifact tables is built from,
+rather than each walking the registry for itself: the map's roots, its
+listing and its parties all have to answer from the same walk, and a
+second walk is a second place for them to fall out of step.
 
-Not every reading of those tables is a weighted one, and the panel's is
-not: `agent-river--hottest' and `agent-river--artifact-list' take the raw
-cumulative `:touches' straight off the tables.  That is deliberate and not
-a view that got missed -- they answer \"how often\", and say so in the
-words they render (\"6 touches\"), where this answers \"how hot\".  A tally
-that aged would leave the panel's number disagreeing with itself between
-two redraws with nothing having happened in between."
+`:touches' is the raw cumulative count, straight off the tables, which is
+also what `agent-river--hottest' and `agent-river--artifact-list' render
+as \"6 touches\".  It was an age-weighted reading once, decaying by a
+half-life so that the shading followed the work rather than the history;
+with the shading gone there is nothing left for a weighting to say, and a
+number that aged would have left the panel's disagreeing with itself
+between two redraws with nothing having happened in between."
   (let ((key (or scope 'task)))
-    (if (and agent-river--heat-memo (eq (car agent-river--heat-memo) key))
-        (cdr agent-river--heat-memo)
-      (let ((entries (agent-river--heat-walk scope)))
-        (when agent-river--heat-memo
-          (setcar agent-river--heat-memo key)
-          (setcdr agent-river--heat-memo entries))
+    (if (and agent-river--artifact-memo (eq (car agent-river--artifact-memo) key))
+        (cdr agent-river--artifact-memo)
+      (let ((entries (agent-river--artifact-walk scope)))
+        (when agent-river--artifact-memo
+          (setcar agent-river--artifact-memo key)
+          (setcdr agent-river--artifact-memo entries))
         entries))))
 
-(defun agent-river--heat-walk (&optional scope)
-  "Walk the registry for `agent-river--heat-entries'.
+(defun agent-river--artifact-walk (&optional scope)
+  "Walk the registry for `agent-river--artifact-entries'.
 Split out so the cache above and the walk cannot come apart.  The list is
 shared between every reader within one draw, so nothing may mutate it --
 each caller sorts a list of its own instead."
@@ -6758,13 +6608,13 @@ each caller sorts a list of its own instead."
                            ;; Resolved from a three-key plist rather than from
                            ;; the finished one, so the entry is consed once
                            ;; instead of built and then copied by `append'.
-                           (abs (agent-river--heat-resolve
+                           (abs (agent-river--artifact-resolve
                                  (list :anchor anchor :cwd cwd :file path))))
                       (push (list :party party
                                   :cwd cwd
                                   :anchor anchor
                                   :file path
-                                  :weight (agent-river--heat-weight entry)
+                                  :touches (or (plist-get entry :touches) 0)
                                   :writes (or (plist-get entry :writes) 0)
                                   :last (plist-get entry :last)
                                   :abs abs
@@ -6779,7 +6629,7 @@ each caller sorts a list of its own instead."
      agent-river-registry)
     entries))
 
-(defun agent-river--heat-absolute (entry)
+(defun agent-river--artifact-absolute (entry)
   "Return ENTRY's file as an absolute name, or nil when nothing anchors it.
 
 Nil for a state folded with no cwd -- one restored from before the slot
@@ -6794,16 +6644,16 @@ cwd used to draw them inside a tree they have nothing to do with; they
 carry an `:anchor' instead, the directory they were really folded from,
 and it wins over the cwd here."
   (if (plist-member entry :abs)
-      ;; Derived already, by `agent-river--heat-entries'.  Read with
+      ;; Derived already, by `agent-river--artifact-entries'.  Read with
       ;; `plist-member' rather than `plist-get': nil is a real answer here --
       ;; it is what every non-file key gets -- and treating it as a miss would
       ;; put the whole cost back for exactly the entries that cannot benefit.
       (plist-get entry :abs)
-    (agent-river--heat-resolve entry)))
+    (agent-river--artifact-resolve entry)))
 
-(defun agent-river--heat-resolve (entry)
+(defun agent-river--artifact-resolve (entry)
   "Resolve ENTRY's key against its anchor or cwd.
-The body of `agent-river--heat-absolute', split out so that the cached
+The body of `agent-river--artifact-absolute', split out so that the cached
 answer and the computed one cannot come apart."
   (let ((cwd (or (plist-get entry :anchor) (plist-get entry :cwd)))
         (file (plist-get entry :file)))
@@ -6817,298 +6667,31 @@ answer and the computed one cannot come apart."
          (eq (agent-river--key-domain file) 'file)
          (expand-file-name file (file-name-as-directory cwd)))))
 
-(defun agent-river--heat-place (entry)
+(defun agent-river--artifact-place (entry)
   "Return what identifies ENTRY's artifact to the map, whatever domain it is in.
 
 The absolute file name where there is one, and the key itself where the
 key is the whole of the name -- which is what a non-file artifact has
-instead.  Distinct from `agent-river--heat-absolute' on purpose: that one
+instead.  Distinct from `agent-river--artifact-absolute' on purpose: that one
 answers \"where on disk\", and a caller asking it must keep getting nil
 for something that is not on disk.  This one answers \"which artifact\",
 which is the question the position marker, the party floor and the section
 listings are all really asking."
   (if (plist-member entry :place)
       (plist-get entry :place)
-    (or (agent-river--heat-absolute entry)
+    (or (agent-river--artifact-absolute entry)
         (let ((file (plist-get entry :file)))
           (and file (not (string-empty-p file))
                (not (eq (agent-river--key-domain file) 'file))
                file)))))
 
-(defun agent-river--heat-table (&optional scope)
-  "Return a hash of basename to weighted touch count across every folded session.
-
-Aggregated rather than kept per session on purpose: one file that two
-agents are both in is the case worth seeing, and summing them is the same
-reading `agent-river-touching' gives.  SCOPE is `session' for the whole
-session, `task' or nil for the current task.
-
-The value is `agent-river--heat-weight', not the raw count: a file still
-being touched keeps its shading, one the agent has moved away from cools
-toward the thresholds and eventually loses its overlay entirely."
-  (let ((table (make-hash-table :test 'equal)))
-    (dolist (entry (agent-river--heat-entries scope))
-      (let ((name (file-name-nondirectory (plist-get entry :file))))
-        (puthash name
-                 (+ (or (gethash name table) 0) (plist-get entry :weight))
-                 table)))
-    table))
-
-(defun agent-river--heat-dirs (dir &optional scope)
-  "Return a hash of subdirectory name to weight, for the listing of DIR.
-
-Only the entries DIR itself has a line for: a key resolving to
-DIR/a/b/c.el warms `a' and nothing deeper, because `a' is all the listing
-shows of it.
-
-Summed from keys resolved against each session's own cwd, where the file
-shading is matched on the bare name.  The two rules differ because the
-questions do.  A name is enough to ask \"how hot is this file\" and is
-what keeps a worktree and its main checkout reading as one file; it is not
-enough to ask \"how hot is this directory\", because `src' says nothing
-about which `src', and a directory aggregate matched that way would warm
-every `src' in every project at once.  The price is that a session whose
-anchor does not reach this listing -- a worktree, against the main
-checkout -- contributes no directory shading, only file shading."
-  (let ((prefix (file-name-as-directory (expand-file-name dir)))
-        (table (make-hash-table :test 'equal)))
-    (dolist (entry (agent-river--heat-entries scope))
-      (let ((abs (agent-river--heat-absolute entry)))
-        (when (and abs (string-prefix-p prefix abs))
-          (let* ((rel (substring abs (length prefix)))
-                 (slash (string-search "/" rel)))
-            (when slash
-              (let ((top (substring rel 0 slash)))
-                (puthash top
-                         (+ (or (gethash top table) 0) (plist-get entry :weight))
-                         table)))))))
-    table))
-
-(defun agent-river--heat-listing-table (dir &optional scope)
-  "Return the table the listing of DIR is shaded with.
-The file names every session has touched, plus the aggregate weight of
-each of DIR's subdirectories.  One table because a dired line is one name:
-a directory and a file of the same name cannot both be in one listing, so
-the two halves cannot collide on a real entry."
-  (let ((table (agent-river--heat-table scope)))
-    (maphash (lambda (name weight)
-               (puthash name (+ (or (gethash name table) 0) weight) table))
-             (agent-river--heat-dirs dir scope))
-    table))
-
-(defun agent-river--heat-face (touches)
-  "Return the face a file weighing TOUCHES earns, or nil for none.
-TOUCHES is the age-weighted reading from `agent-river--heat-table', so it
-is a float while a half-life is set; the thresholds stay whole numbers."
-  (cdr (seq-find (lambda (cell) (>= touches (car cell)))
-                 agent-river-heat-levels)))
-
-(defun agent-river--heat-visible-p (&optional scope)
-  "Return non-nil while some artifact still weighs enough to be shaded.
-Read from the same weighted table the overlays are, so \"is there anything
-left to cool\" and \"is anything drawn\" cannot disagree.  Once this is nil
-the cooling timer has nothing to show and stops."
-  (let ((table (agent-river--heat-table scope))
-        found)
-    (maphash (lambda (_name weight)
-               (when (agent-river--heat-face weight)
-                 (setq found t)))
-             table)
-    found))
-
-(defun agent-river--heat-clear (buffer)
-  "Remove every heat overlay this package put into BUFFER."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (remove-overlays (point-min) (point-max) 'agent-river-heat t))))
-
-(defun agent-river--heat-bounds ()
-  "Return the (BEG . END) of the filename on this line, or nil.
-Only the name is shaded, not the whole line: the permissions and size
-columns are dired's, and colouring them would read as dired saying
-something rather than as this package annotating it."
-  (let ((beg (dired-move-to-filename))
-        (end (dired-move-to-end-of-filename t)))
-    (and beg end (cons beg end))))
-
-(defun agent-river--heat-dired (buffer)
-  "Shade the entries of dired BUFFER by what the agents have touched.
-
-The table is built per buffer rather than once for all of them, because
-half of it is: a directory's weight is the sum of what lies beneath it in
-*this* listing, and there is no such thing as the weight of `src' in the
-abstract."
-  (with-current-buffer buffer
-    (let ((table (agent-river--heat-listing-table
-                  (expand-file-name default-directory)
-                  agent-river-heat-scope)))
-      (agent-river--heat-clear buffer)
-      (save-excursion
-        (goto-char (point-min))
-        (while (not (eobp))
-          ;; Walking the listing, rather than looking each state path up with
-          ;; `dired-goto-file', is what makes the mismatch cases harmless: the
-          ;; header and total lines simply yield no filename, and a file the
-          ;; agent has just created is an entry that is not there yet.
-          (let* ((name (ignore-errors (dired-get-filename 'no-dir t)))
-                 (face (and name (agent-river--heat-face
-                                  (or (gethash name table) 0))))
-                 (bounds (and face (agent-river--heat-bounds))))
-            (when bounds
-              (let ((overlay (make-overlay (car bounds) (cdr bounds))))
-                (overlay-put overlay 'agent-river-heat t)
-                (overlay-put overlay 'face face)
-                (overlay-put overlay 'evaporate t))))
-          (forward-line 1))))))
-
-(defun agent-river--dired-buffers (&optional all)
-  "Return the dired buffers worth drawing into.
-
-Only those on screen unless ALL: overlays in a buffer nobody is looking
-at are work done for no one, and a long session accumulates dired buffers.
-`dired-after-readin-hook' catches the rest as they are listed or reverted.
-ALL is for tearing the shading down, which has to reach every buffer that
-might still be holding an overlay."
-  (seq-filter (lambda (buffer)
-                (with-current-buffer buffer
-                  (and (derived-mode-p 'dired-mode)
-                       (or all (get-buffer-window buffer t)))))
-              (buffer-list)))
-
-;;;###autoload
-(defun agent-river-heat-refresh ()
-  "Redraw the touch shading in every visible dired buffer.
-Unconditional, unlike the automatic path: asking for it is asking for it,
-whether or not `agent-river-heat-mode' is driving the redraws."
-  (interactive)
-  (dolist (buffer (agent-river--dired-buffers))
-    (agent-river--heat-dired buffer)))
-
-;; The cooling timer, kept deliberately separate from the state block's.
-;; `agent-river--ensure-timer' runs only while an agent is mid-task; the
-;; moment it goes idle the shading has the most to say -- the work moved and
-;; the old file should be fading -- so it needs a tick the block does not.
-;; Slower, too: an elapsed-time clock wants a second, a fade does not.
-
-(defvar agent-river--heat-timer nil
-  "Repeating timer fading the dired shading, or nil while none runs.")
-
-(defun agent-river--stop-heat-timer ()
-  "Stop the heat cooling timer."
-  (when (timerp agent-river--heat-timer)
-    (cancel-timer agent-river--heat-timer))
-  (setq agent-river--heat-timer nil))
-
-(defun agent-river--heat-tick ()
-  "Redraw the shading, or stop the timer once nothing is left to cool."
-  (condition-case err
-      (if (and agent-river-heat-mode
-               (agent-river--heat-visible-p agent-river-heat-scope))
-          (agent-river-heat-refresh)
-        (agent-river--stop-heat-timer))
-    ;; Same reasoning as the block's tick: a timer that throws every few
-    ;; seconds would bury Emacs in messages, so a broken redraw retires
-    ;; rather than repeats.
-    (error (agent-river--stop-heat-timer)
-           (message "agent-river: heat refresh stopped (%s)"
-                    (error-message-string err)))))
-
-(defun agent-river--ensure-heat-timer ()
-  "Start the cooling timer if anything is still cooling and none runs.
-Called on mode entry and from the event observer, so a session that keeps
-working never loses its faintest overlay between ticks."
-  (when (and agent-river-heat-mode
-             agent-river-heat-half-life
-             (null agent-river--heat-timer)
-             (agent-river--heat-visible-p agent-river-heat-scope))
-    (setq agent-river--heat-timer
-          (run-at-time agent-river-heat-refresh-interval
-                       agent-river-heat-refresh-interval
-                       #'agent-river--heat-tick))))
-
-(defun agent-river--heat-after-readin ()
-  "Reapply the shading to a dired buffer that was just listed or reverted.
-A revert replaces the buffer text and takes every overlay with it, so
-without this the shading vanishes at exactly the moment dired refreshes to
-show what the agent has written."
-  (when agent-river-heat-mode
-    (agent-river--heat-dired (current-buffer))))
-
-;; The pulse is event-level, where the heat is state-level.  Heat answers
-;; "what is this task about"; the pulse answers "what happened just now",
-;; which is a property of the event and of nothing else -- so it rides on
-;; `:path', the absolute name carried beside the normalised `:file' and never
-;; folded.
-;;
-;; pulse.el supports exactly one highlight at a time, and not by oversight:
-;; `pulse-momentary-highlight-overlay' opens by unhighlighting whatever is
-;; running, keeps one global overlay, and animates the background of one
-;; global face.  An agent editing four files in a turn would not pulse four
-;; times, it would restart a single animation four times and finish none of
-;; them.  So the pulse stays the small half of this deliberately: one file,
-;; the one this event names, and the heat carries everything that has to be
-;; readable at once.
-
-(defun agent-river--pulse-dired (path)
-  "Pulse PATH's entry in the first visible dired buffer that lists it.
-The pulse's length comes from `agent-river-pulse-iterations' and
-`agent-river-pulse-delay' rather than pulse.el's terse defaults, so a
-file an event just named stays lit long enough for the eye to find it."
-  (when (and path (require 'pulse nil t))
-    (catch 'pulsed
-      (dolist (buffer (agent-river--dired-buffers))
-        (with-current-buffer buffer
-          (save-excursion
-            ;; dired-goto-file takes the absolute name and answers nil when
-            ;; the file is not in this listing, which is also the answer for
-            ;; a file the agent created a moment ago.
-            (when (ignore-errors (dired-goto-file path))
-              (let ((bounds (agent-river--heat-bounds))
-                    (pulse-iterations agent-river-pulse-iterations)
-                    (pulse-delay agent-river-pulse-delay))
-                (when bounds
-                  (pulse-momentary-highlight-region
-                   (car bounds) (cdr bounds) 'agent-river-pulse)
-                  (throw 'pulsed buffer))))))))))
-
-(defun agent-river--dired-observe (_state event)
-  "Draw EVENT into the dired views: heat from the state, a pulse from EVENT.
-
-Takes no mode check of its own: being on `agent-river-observers' is what
-switched it on, and the runner is what takes it off again.  STATE is
-ignored because the heat is aggregated across every session rather than
-read from the one that just acted -- two agents in one file is the case
-worth seeing."
-  (agent-river-heat-refresh)
-  ;; A working agent keeps its heat fresh, but the timer it started on some
-  ;; earlier quiet moment may already have stopped itself -- once the last
-  ;; overlay fell below the threshold there was nothing to cool.  Restart it
-  ;; here, where an event has just proven there is something to draw.
-  (agent-river--ensure-heat-timer)
-  ;; An act names a file that was touched at that moment; a think or a fail
-  ;; reports on a call whose pulse has already been shown.  A note can name
-  ;; one too -- a foreign save points at its file through `:path' -- and it
-  ;; pulses for the same reason: something happened to this file just now,
-  ;; even though the agent is not the one that did it.  The note still does
-  ;; not warm the entry; the pulse says "look here", the heat says "the agent
-  ;; works here", and running them together would blur the two.
-  (when (and (member (plist-get event :kind) '("act" "note"))
-             (plist-get event :path))
-    (agent-river--pulse-dired (plist-get event :path))))
-
-;; Removal is not enough of a retirement here: the overlays would stay where
-;; they are, and `agent-river-heat-mode' would keep claiming to be on.
-(put 'agent-river--dired-observe 'agent-river-retire
-     (lambda () (agent-river-heat-mode -1)))
-
 ;;; The map -- the project as a whole, one level at a time
 ;;
-;; The heat shades the directory you are already in.  This answers the
-;; question that directory cannot: in a repository spread over thirty
-;; modules, with several agents running at once, *where is everyone*.  Same
-;; state, same weighting, a coarser grain -- derived on every redraw like
-;; everything else here, so the two views cannot drift and neither
-;; accumulates anything of its own.
+;; dired answers "what is in this directory".  This answers the question
+;; that directory cannot: in a repository spread over thirty modules, with
+;; several agents running at once, *where is everyone*.  Derived from the
+;; artifact tables on every redraw, like everything else here, so it
+;; accumulates nothing of its own and cannot drift from the panel.
 ;;
 ;; One level of full breadth, and depth only where there is activity.  A
 ;; whole tree unfolded is unreadable in a monorepo; a view of only the
@@ -7124,20 +6707,18 @@ worth seeing."
 ;; back together is a deliberate act, done here in the view and nowhere in
 ;; the fold.
 ;;
-;; Two readings, kept apart on purpose.  The weights say where an agent has
-;; *been*; only `:current' says where it *is*, and after a long task those
-;; are different places.  Folding the second into the first -- a big enough
-;; number must be where the work is -- is exactly the mistake the half-life
-;; was added to stop, one grain up.
+;; Two readings, kept apart on purpose.  The touch counts say where an
+;; agent has *been*; only `:current' says where it *is*, and after a long
+;; task those are different places.  Folding the second into the first --
+;; a big enough number must be where the work is -- is the mistake this
+;; view would be least able to admit to.
 
 (defcustom agent-river-map-scope 'session
   "Which artifact frame the map is read from.
 
-Defaults the other way round from `agent-river-heat-scope', because the
-questions are different.  A dired buffer is where you already are and the
-useful reading is this turn; the map is opened to find out where everyone
-has been working, and a frame cleared by every prompt would blank half of
-it each time an agent was given its next instruction."
+`session' rather than `task', because the map is opened to find out where
+everyone has been working: a frame cleared by every prompt would blank
+half of it each time an agent was given its next instruction."
   :type '(choice (const task) (const session)))
 
 (defcustom agent-river-map-ignore
@@ -7188,8 +6769,8 @@ lines are not activity -- \\[agent-river-map-next-active] passes over
 them, and they are what the ignore patterns are allowed to drop.
 
 They also keep a different tense from everything else here.  A reached
-name fades out of the listing through `agent-river-map-party-floor'; a
-changed one stays until it is committed or thrown away, which is git's
+name stays until somebody forgets it (\[agent-river-forget-artifacts]);
+a changed one stays until it is committed or thrown away, which is git's
 answer and not this package's.  In a tree with a large amount of
 uncommitted work that is most of the listing, which is the case for
 setting this nil."
@@ -7214,10 +6795,11 @@ truncated: a path is what the line is for."
 (defcustom agent-river-map-contended-marker "⇄"
   "Marker for an entry more than one agent is working in.
 
-A marker rather than a fourth colour.  Weight is already drawn as shading,
-and encoding a second, unrelated fact the same way leaves a reader unable
-to say which of the two any given colour means.  This is also the thing
-most worth being able to scan a whole listing for."
+A marker rather than a colour.  The listing already spends colour on
+what is gone and on what git says is different, and encoding a third,
+unrelated fact the same way leaves a reader unable to say which of them
+any given colour means.  This is also the thing most worth being able to
+scan a whole listing for."
   :type 'string)
 
 (defcustom agent-river-map-here-marker "👁️‍🗨️"
@@ -7314,15 +6896,15 @@ calls it something else; a name that does not resolve is the same as
 having no main branch, which costs the marker and nothing else."
   :type '(choice (const :tag "Work it out" nil) string))
 
-(defun agent-river--map-weight (parties)
-  "Return the total weight across PARTIES."
-  (apply #'+ (mapcar (lambda (party) (plist-get party :weight)) parties)))
+(defun agent-river--map-touches (parties)
+  "Return the total touch count across PARTIES."
+  (apply #'+ (mapcar (lambda (party) (plist-get party :touches)) parties)))
 
 (defun agent-river--map-writes (parties)
   "Return how many of PARTIES\=' touches changed the file rather than read it.
-Unweighted, where the heat is weighted: this is not a reading about how
-recent the work was but about whether there was any, and a write does not
-stop having happened because it was a while ago."
+Beside `agent-river--map-touches' and not a share of it: that one says how
+heavily a name was reached, this says whether any of it was writing, which
+is what `agent-river--vc-landed-p' rests on."
   (apply #'+ (mapcar (lambda (party) (or (plist-get party :writes) 0))
                      parties)))
 
@@ -7344,40 +6926,11 @@ never been touched is."
                       (time-less-p b-time a-time)
                     (and a-time (not b-time)))))))
 
-(defcustom agent-river-map-party-floor 0.25
-  "The weight below which an agent stops being named on a map line.
-
-The shading has had a floor all along -- `agent-river-heat-levels' runs
-out at 1, and below it a file gets no face and no overlay.  The name in
-the brackets had none, and the weights decay exponentially, so they
-approach zero without reaching it: after an hour in a small repository
-every file carried a name, every line read alike, and a view where
-everything is marked marks nothing.
-
-At the default half-life a single touch falls under this in about four
-minutes and a file touched ten times in about eleven, so what is left is
-where the work has been recently rather than everywhere it has ever been.
-
-A party that still exists is never dropped from the one file it reached
-most recently, whatever that weighs.  Cold is not the same as gone: that
-file is the answer to \"where is this agent now\", which is the map's most
-useful single fact, and an idle agent is exactly when it is asked.  So a
-quiet map settles at one line per agent rather than at none.
-
-A party that has *gone* -- an agent-shell buffer killed, a subagent
-finished -- keeps no such file, because there is no longer anyone for
-\"now\" to be about.  Its name fades through this floor like any other and
-its position marker is dropped at once; see `agent-river--map-newest'.
-
-Nil turns the floor off and restores the old behaviour, where a touch is
-named for as long as the session is folded."
-  :type '(choice (const :tag "Never drop a name" nil) number))
-
 (defvar agent-river--newest-memo nil
   "A one-draw cache of `agent-river--map-newest\=', or nil when not caching.
 
 Keyed on the entry list itself, with `eq\='.  Within a draw every reader is
-handed the same list object by `agent-river--heat-memo\=', so identity is
+handed the same list object by `agent-river--artifact-memo\=', so identity is
 the whole of the question -- and a list from a different frame is a
 different object, which busts this cache for free rather than needing a
 scope key of its own.
@@ -7415,11 +6968,11 @@ only the present tense that is withdrawn."
 (defun agent-river--map-newest-1 (entries)
   "Walk ENTRIES for `agent-river--map-newest\='.
 Split out so the cache above and the walk cannot come apart, the way
-`agent-river--heat-walk\=' is."
+`agent-river--artifact-walk\=' is."
   (let ((newest (make-hash-table :test 'equal))
         (gone (agent-river--gone-parties)))
     (dolist (entry entries)
-      (let ((abs (agent-river--heat-place entry))
+      (let ((abs (agent-river--artifact-place entry))
             (party (plist-get entry :party))
             (last (plist-get entry :last)))
         (when (and abs (not (gethash party gone)))
@@ -7429,36 +6982,11 @@ Split out so the cache above and the walk cannot come apart, the way
               (puthash party (list :abs abs :last last) newest))))))
     newest))
 
-(defun agent-river--map-live-p (entry newest)
-  "Return non-nil while ENTRY still earns its party a name on the map.
-
-Above `agent-river-map-party-floor', or the one file NEWEST says that
-party reached last -- which a party whose sessions have all ended does
-not have, so its names fade rather than being pinned for as long as the
-registry holds it.  Asked in both places that read the artifact tables
-for the map -- which trees to draw, and what to draw in them -- because a
-root kept alive by a touch too cold to name would head a section with
-nothing under it.
-
-The exemption is granted to a deleted file too, which it was not for a
-while.  The worry was that `:current' would then read as \"the agent is
-here\" over a file that is not there -- but that was a rendering problem,
-and `agent-river-gone' fixes it where it was: struck through, the line
-says the agent's last move was into a file that has since gone, which is
-both true and worth knowing.  Refusing the exemption instead left an
-agent whose last act was a deletion named nowhere at all, and losing a
-party off the map entirely is the worse of the two readings."
-  (let ((abs (agent-river--heat-place entry)))
-    (and abs
-         (or (null agent-river-map-party-floor)
-             (>= (plist-get entry :weight) agent-river-map-party-floor)
-             (equal abs (plist-get (gethash (plist-get entry :party) newest) :abs))))))
-
 ;;; Domains -- what a section of the map is a section of
 ;;
 ;; The map lists a directory and annotates it with what the agents did there,
 ;; which is dired's question asked over the whole state.  That works because a
-;; file key can be placed: `agent-river--heat-absolute' resolves it against the
+;; file key can be placed: `agent-river--artifact-absolute' resolves it against the
 ;; session's cwd, or against the anchor where the cwd cannot.
 ;;
 ;; An artifact declared from outside has no such answer.  `inc:INC-444' is a
@@ -7520,7 +7048,7 @@ path, and `agent-river--map-domain' is what tells the two apart."
   "A one-draw cache of `agent-river--domain-sections\=', or nil when not caching.
 
 Bound to a fresh box by `agent-river--map-draw\=' and thrown away with it,
-the way `agent-river--heat-memo\=' is and for the same reason: a draw is
+the way `agent-river--artifact-memo\=' is and for the same reason: a draw is
 synchronous Lisp, nothing on that path declares an artifact, and the
 binding cannot outlive the walk it was made for -- so there is no
 invalidation here to get wrong.
@@ -7591,7 +7119,7 @@ assigned to it is still a queue that just received something, and ordered
 by what agents did it would sink below every tree somebody is typing in --
 which is precisely backwards for the case this exists for."
   (let ((seen (make-hash-table :test 'equal))
-        (entries (agent-river--heat-entries scope))
+        (entries (agent-river--artifact-entries scope))
         result)
     ;; What the sessions have reached, so a domain somebody is working in
     ;; sorts by that rather than by when its records last changed.
@@ -7650,8 +7178,9 @@ the same rendering a deleted file gets, saying the same thing: this was
 worked on and is over, which is history and worth keeping on screen until
 somebody says otherwise.
 
-Ordered by weight and then by recency, so the ones being worked on rise
-and a queue with nothing happening in it is in the order things arrived."
+Ordered by touch count and then by recency, so the ones being worked on
+rise and a queue with nothing happening in it is in the order things
+arrived."
   (let* ((domain (agent-river--map-domain root))
          (parties (and domain (agent-river--domain-parties domain scope)))
          entries)
@@ -7676,8 +7205,8 @@ and a queue with nothing happening in it is in the order things arrived."
        agent-river-artifacts))
     (sort entries
           (lambda (a b)
-            (let ((wa (agent-river--map-weight (plist-get a :parties)))
-                  (wb (agent-river--map-weight (plist-get b :parties))))
+            (let ((wa (agent-river--map-touches (plist-get a :parties)))
+                  (wb (agent-river--map-touches (plist-get b :parties))))
               (if (= wa wb)
                   (time-less-p (plist-get b :last) (plist-get a :last))
                 (> wa wb)))))))
@@ -7747,13 +7276,10 @@ under whichever project happened to be current, which is the whole reason
 the anchor is folded: a session editing one file under ~/.claude has two
 roots, not one, and a view that shows a single root is hiding the second.
 Roots are sorted by the most recent touch within them."
-  (let* ((roots (make-hash-table :test 'equal))
-         (entries (agent-river--heat-entries scope))
-         (newest (agent-river--map-newest entries)))
-    (dolist (entry entries)
+  (let ((roots (make-hash-table :test 'equal)))
+    (dolist (entry (agent-river--artifact-entries scope))
       (let ((root (or (plist-get entry :anchor) (plist-get entry :cwd))))
-        (when (and root (not (string-empty-p root))
-                   (agent-river--map-live-p entry newest))
+        (when (and root (not (string-empty-p root)))
           (puthash root
                    (agent-river--map-later
                     (gethash root roots)
@@ -7769,7 +7295,7 @@ Roots are sorted by the most recent touch within them."
 (defun agent-river--parties-by (bucket &optional scope)
   "Return a hash of key to party plists, heaviest first.
 
-BUCKET is called with one entry of `agent-river--heat-entries\=' and answers
+BUCKET is called with one entry of `agent-river--artifact-entries\=' and answers
 the key it counts under, or nil -- \"not in this view\".
 
 What the two callers share, and it is more than the arithmetic.  The floor
@@ -7778,7 +7304,7 @@ whichever kind of key it reached.  `:current\=' is decided here, by comparing
 the place of the party\='s latest touch under this key against the one
 `agent-river--map-newest\=' says it touched last overall -- the two callers
 used to spell that comparison differently and agreed only because
-`agent-river--heat-place\=' happens to answer the key itself for a non-file
+`agent-river--artifact-place\=' happens to answer the key itself for a non-file
 artifact.  The place takes the later touch, which is a tie-break rather
 than a merge, where `agent-river--map-reach\=' used to overwrite it with
 whichever entry the walk reached last: a party that reached one key twice
@@ -7791,11 +7317,11 @@ is where the agent is when anything beneath it is.  Same arithmetic,
 different question; folded in here, every directory above the file an agent
 is in would quietly stop being marked."
   (let* ((by-key (make-hash-table :test 'equal))
-         (entries (agent-river--heat-entries scope))
+         (entries (agent-river--artifact-entries scope))
          (newest (agent-river--map-newest entries)))
     (dolist (entry entries)
       (let ((key (funcall bucket entry)))
-        (when (and key (agent-river--map-live-p entry newest))
+        (when key
           (let* ((last (plist-get entry :last))
                  (party (plist-get entry :party))
                  (parties (or (gethash key by-key)
@@ -7805,8 +7331,8 @@ is in would quietly stop being marked."
                             (eq last (agent-river--map-later
                                       (plist-get cell :last) last)))))
             (puthash party
-                     (list :weight (+ (or (plist-get cell :weight) 0)
-                                      (plist-get entry :weight))
+                     (list :touches (+ (or (plist-get cell :touches) 0)
+                                       (plist-get entry :touches))
                            :writes (+ (or (plist-get cell :writes) 0)
                                       (or (plist-get entry :writes) 0))
                            :last (agent-river--map-later (plist-get cell :last) last)
@@ -7814,7 +7340,7 @@ is in would quietly stop being marked."
                            ;; rather than by a path two roots could both
                            ;; produce.
                            :place (if later
-                                      (agent-river--heat-place entry)
+                                      (agent-river--artifact-place entry)
                                     (plist-get cell :place)))
                      parties)))))
     (let ((out (make-hash-table :test 'equal)))
@@ -7823,7 +7349,7 @@ is in would quietly stop being marked."
          (let (plists)
            (maphash (lambda (party cell)
                       (push (list :party party
-                                  :weight (plist-get cell :weight)
+                                  :touches (plist-get cell :touches)
                                   :writes (plist-get cell :writes)
                                   :last (plist-get cell :last)
                                   :current (equal (plist-get cell :place)
@@ -7832,8 +7358,8 @@ is in would quietly stop being marked."
                             plists))
                     parties)
            (puthash key (sort plists (lambda (a b)
-                                       (> (plist-get a :weight)
-                                          (plist-get b :weight))))
+                                       (> (plist-get a :touches)
+                                          (plist-get b :touches))))
                     out)))
        by-key)
       out)))
@@ -7843,7 +7369,7 @@ is in would quietly stop being marked."
 
 A list of plists, heaviest first, each carrying `:rel' -- the file's path
 relative to ROOT -- and `:parties', an alist-like list of plists with
-`:party', `:weight', `:last' and `:current'.
+`:party', `:touches', `:last' and `:current'.
 
 `:current' marks the one file a party touched most recently, which is the
 only thing here that says where an agent is now rather than where it has
@@ -7859,10 +7385,10 @@ and what the path is called once ROOT is taken off the front."
   (let* ((prefix (file-name-as-directory (expand-file-name root)))
          (by-rel (agent-river--parties-by
                   (lambda (entry)
-                    ;; `--heat-absolute' rather than the place, so a key in
+                    ;; `--artifact-absolute' rather than the place, so a key in
                     ;; another domain is out of this view by construction
                     ;; rather than by failing to match the prefix.
-                    (let ((abs (agent-river--heat-absolute entry)))
+                    (let ((abs (agent-river--artifact-absolute entry)))
                       (when (and abs (string-prefix-p prefix abs))
                         (substring abs (length prefix)))))
                   scope))
@@ -7870,8 +7396,8 @@ and what the path is called once ROOT is taken off the front."
     (maphash (lambda (rel parties) (push (list :rel rel :parties parties) nodes))
              by-rel)
     (sort nodes (lambda (a b)
-                  (> (agent-river--map-weight (plist-get a :parties))
-                     (agent-river--map-weight (plist-get b :parties)))))))
+                  (> (agent-river--map-touches (plist-get a :parties))
+                     (agent-river--map-touches (plist-get b :parties)))))))
 
 (defun agent-river--map-merge-parties (nodes)
   "Return the parties of NODES summed into one list, heaviest first.
@@ -7886,8 +7412,8 @@ it can never disagree about who has been where."
                                              (plist-get party :last))))
           (puthash (plist-get party :party)
                    (list :party (plist-get party :party)
-                         :weight (+ (or (plist-get cell :weight) 0)
-                                    (plist-get party :weight))
+                         :touches (+ (or (plist-get cell :touches) 0)
+                                     (plist-get party :touches))
                          :writes (+ (or (plist-get cell :writes) 0)
                                     (or (plist-get party :writes) 0))
                          :last last
@@ -7896,7 +7422,7 @@ it can never disagree about who has been where."
                    table))))
     (let (out)
       (maphash (lambda (_party cell) (push cell out)) table)
-      (sort out (lambda (a b) (> (plist-get a :weight) (plist-get b :weight)))))))
+      (sort out (lambda (a b) (> (plist-get a :touches) (plist-get b :touches)))))))
 
 (defun agent-river--map-listing (root)
   "Return ROOT's own directory entries, directories first, ignores dropped.
@@ -8076,8 +7602,8 @@ the entries that matter."
 
 (defcustom agent-river-map-detail-files 8
   "How many reached files an unfolded map entry lists.
-Ordered by weight, so the tail is the least interesting; an ellipsis
-marks what was left off."
+Ordered by touch count, so the tail is the least interesting; an
+ellipsis marks what was left off."
   :type 'integer)
 
 (defconst agent-river-map-buffer-name "*agent-river-map*"
@@ -8114,16 +7640,16 @@ unless one has just been drawn anyway.")
 
 ;; The buffer is Markdown, and tree-sitter owns the `face' property in it: it
 ;; refontifies on redisplay and appends or removes faces as the structure
-;; changes, so a shading written as a text property is drawn once and then
+;; changes, so a face written as a text property is drawn once and then
 ;; quietly gone.  Every face this view wants is therefore marked with a
 ;; property of its own and turned into an overlay after the text is in
-;; (`agent-river--map-shade') -- an overlay sits above the fontification, the
-;; same way the dired heat sits above dired's.
+;; (`agent-river--map-shade'), because an overlay sits above the
+;; fontification rather than competing with it.
 
 (defun agent-river--map-mark (text face)
-  "Return TEXT marked to be shaded with FACE once it is in the buffer.
-Unmarked when FACE is nil, which is what a weight below every threshold
-earns -- and what keeps the quiet entries quiet."
+  "Return TEXT marked to be drawn in FACE once it is in the buffer.
+Unmarked when FACE is nil, which is what most of a listing is: a mark is
+for a line that differs from the ones around it."
   (if face (propertize text 'agent-river-map-face face) text))
 
 (defun agent-river--map-name (name)
@@ -8287,8 +7813,7 @@ Asynchronous, and that is the whole point.  The map redraws every few
 seconds while an agent works, and a diff on a large repository takes long
 enough that reading it inline would stop Emacs on a timer.  Nothing ever
 waits: a draw shows whatever the last read left behind, so the column is
-at worst one redraw behind the disk -- the same bargain the weights above
-it already make.
+at worst one redraw behind the disk.
 
 A non-zero exit is not an error to report but an answer to record: a
 directory that is not a repository is an ordinary thing for the map to be
@@ -8559,8 +8084,8 @@ domain, `git' would be run over a name that is not a path."
 (defun agent-river--refresh-vc (root _nodes)
   "Ask git about ROOT, if the last answer is old enough.
 The throttle is `agent-river--vc-stats\=' own -- the map offers a refresh on
-the contributor\='s `:ttl\=', and this one keeps the TTL it always had, so a
-map redraw and a dired shading cannot start two reads of the same tree."
+the contributor\='s `:ttl\=', and this one keeps the TTL it always had, so
+two draws in quick succession cannot start two reads of the same tree."
   (unless (agent-river--domain-p root)
     (agent-river--vc-stats root)))
 
@@ -8669,10 +8194,10 @@ number where a contributor has more to say than a node can hold."
 
 ;; Rows under a node, and who may contribute them
 ;;
-;; A map line carries five facts already -- weight as shading, position and
-;; contention as markers, existence as a strike-through, the state of the
-;; work as a column -- and that is the ceiling.  The party names used to be
-;; a sixth, and they were the one ragged thing on the line, which is why
+;; A map line carries three facts already -- position and contention as
+;; markers, existence as a strike-through, the state of the work as a
+;; column -- and that is near the ceiling.  The party names used to be a
+;; fourth, and they were the one ragged thing on the line, which is why
 ;; nothing scannable could ever follow them.  They are rows now, and the
 ;; room they left is what anything new gets to compete for.
 ;;
@@ -8935,15 +8460,15 @@ reason it is a column."
 (defun agent-river--rows-parties (_root nodes)
   "Return one row per party on each of NODES: the names that left the line.
 
-What a bracket could never say.  The line still shades by weight and
-still marks contention and position, because those are scannable down the
-listing; the row adds what only makes sense once you are looking at this
-one node -- whose touches they were, how long ago, and how many of them
-changed the file rather than read it.
+What a bracket could never say.  The line still marks contention and
+position, because those are scannable down the listing; the row adds what
+only makes sense once you are looking at this one node -- whose touches
+they were, how long ago, and how many of them changed the file rather
+than read it.
 
 Ordered by the parties themselves, which `agent-river--map-reach\=' has
-already sorted heaviest first, so the row order is the same reading as the
-shading and cannot contradict it."
+already sorted heaviest first, so the row order is the same reading the
+line is ordered by and cannot contradict it."
   (let ((table (make-hash-table :test 'equal)))
     (dolist (node nodes)
       (let* ((parties (plist-get node :parties))
@@ -9007,7 +8532,7 @@ come back yet."
        (let ((step (agent-river-state-step state)))
          (when (and step (plist-get step :file)
                     (agent-river--state-working-p state))
-           (let ((abs (agent-river--heat-absolute
+           (let ((abs (agent-river--artifact-absolute
                        (list :cwd (agent-river-state-cwd state)
                              :file (plist-get step :file)))))
              (when (and abs (seq-find (lambda (node)
@@ -9051,12 +8576,11 @@ same column and the tree stops being one."
 
 (defun agent-river--map-line (level name parties &optional missing stat rows)
   "Return one map line: NAME at LEVEL, annotated with PARTIES.
-MISSING marks a name only the state knows about, which is struck through
-rather than shaded -- there is no file on disk for the shading to be
-about, and a line that reads as gone cannot be mistaken for a place an
-agent is still working in.
+MISSING marks a name only the state knows about, and is the one thing
+that faces this line: struck through, it cannot be mistaken for a place
+an agent is still working in.
 
-PARTIES are no longer named on the line, only shaded and marked: their
+PARTIES are no longer named on the line, only counted and marked: their
 names are rows beneath it now (`agent-river--rows-parties').  The brackets
 were the one ragged thing here, which is why nothing scannable could ever
 be put after them -- moving them down is what freed the tail of the line,
@@ -9072,9 +8596,10 @@ ROWS is `open' or `closed' when this node has contributed rows, nil when
 it has none.  A folded node used to look exactly like a node with nothing
 under it, which made the fold a way of losing things quietly."
   (let* ((marker (agent-river--map-marker level))
-         (face (if missing
-                   'agent-river-gone
-                 (agent-river--heat-face (agent-river--map-weight parties))))
+         ;; The one thing a name is still marked for.  Shading by how heavily
+         ;; a name was reached is gone, and the brackets, the two markers and
+         ;; the column are what say who is here and what is different.
+         (face (and missing 'agent-river-gone))
          (shown (agent-river--map-name name))
          ;; The gutter: everything that is about this line rather than about
          ;; the tree, in one fixed-width place before the name.  At the end
@@ -9230,10 +8755,10 @@ Both facts still hold and are documented where they are decided
 where a reader goes to look them up.
 
 The count is of agents that still exist, not of names on the map.  A name
-outlives its session on purpose -- it fades through
-`agent-river-map-party-floor' rather than vanishing, because the file was
-still touched -- so counting names would report an audience that has left
-as though it were still there, which is the one thing this number is for.
+outlives its session on purpose, because the file was still touched and
+that stays true -- so counting names would report an audience that has
+left as though it were still there, which is the one thing this number is
+for.
 
 ROOT is nil in the overview, which spans ROOTS trees and has no one path
 to be named after.  Titling it with any of them -- the most recent, say --
@@ -9329,7 +8854,7 @@ nothing."
                ;; three times over is three chances for them to disagree as
                ;; well as three times the work: measured on 2026-09-17 at
                ;; 5000 artifacts, a draw spent about 30 ms re-walking.
-               (agent-river--heat-memo (cons 'none nil))
+               (agent-river--artifact-memo (cons 'none nil))
                ;; And the two readings taken *of* that walk, on the same
                ;; terms: which roots are domain sections, and where each
                ;; party is now.  Both are pure functions of what the box
@@ -9682,11 +9207,12 @@ first thing anyone does with a new buffer is press one of them."
 (defun agent-river-map-refresh ()
   "Redraw the map now, and read the disk again while doing it.
 
-The weights are recomputed on every draw anyway; the diffstat is cached
-for `agent-river-map-vc-ttl' seconds, so dropping it here is what makes
-this the authoritative reading.  Someone who asks for a refresh by hand
-is asking about now.  The read is still asynchronous, so the numbers land
-on the draw its answer asks for, about sixty milliseconds later.
+Everything read from the state is recomputed on every draw anyway; the
+diffstat is cached for `agent-river-map-vc-ttl' seconds, so dropping
+it here is what makes this the authoritative reading.  Someone who asks
+for a refresh by hand is asking about now.  The read is still
+asynchronous, so the numbers land on the draw its answer asks for, about
+sixty milliseconds later.
 
 Dropping the answer is only half of it: `agent-river--map-refreshed'
 decides whether a contributor is even *offered* the root, and a throttle
@@ -9836,10 +9362,8 @@ then quietly stay in the fallback for the whole session."
   ;; here.
   (setq-local outline-minor-mode-cycle nil)
   ;; Navigating by keyboard with nothing marking where you are is navigating
-  ;; blind, and this view is read by eye far more than it is acted on.  The
-  ;; heat overlays keep their own background over the top of it, so the
-  ;; shading is still legible on the current line.  A mode hook is the way
-  ;; out for anyone who does not want it.
+  ;; blind, and this view is read by eye far more than it is acted on.  A
+  ;; mode hook is the way out for anyone who does not want it.
   (when (fboundp 'hl-line-mode) (hl-line-mode 1))
   (buffer-disable-undo))
 
@@ -9924,9 +9448,9 @@ hook or the other, and this is not the precedent for putting it on both.
 
 Subscribing to `agent-river-observers' alone is what this fixes.  An
 artifact declared from outside folds into `agent-river-artifacts' and
-then went nowhere: the timer retires once nothing is dirty and nothing is
-cooling, so an incident arriving while no agent was working sat in the
-table until somebody pressed `g'.  That is the case the artifact table
+then went nowhere: the timer retires once nothing is dirty, so an
+incident arriving while no agent was working sat in the table until
+somebody pressed `g'.  That is the case the artifact table
 exists for -- something matters most when no session is running -- so it
 was also the case the view was blindest to."
   (agent-river--map-invalidate))
@@ -9940,31 +9464,14 @@ was also the case the view was blindest to."
     (cancel-timer agent-river--map-timer))
   (setq agent-river--map-timer nil))
 
-(defun agent-river--map-cooling-p ()
-  "Return non-nil while cooling alone will still change the map.
-
-Two thresholds, because two things fade at different depths.  The
-shading runs out at the bottom of `agent-river-heat-levels', and asking
-only that retired the timer while names were still on screen waiting to
-cross `agent-river-map-party-floor' -- which sits below it, so the map
-froze mid-fade and the names sat there until the next event.
-
-A name held by the `:current' exemption is not cooling: it never crosses
-anything, so it is not something left to draw and must not keep the timer
-alive for as long as Emacs runs."
-  (and agent-river-heat-half-life
-       (or (agent-river--heat-visible-p agent-river-map-scope)
-           (and agent-river-map-party-floor
-                (seq-some (lambda (entry)
-                            (>= (plist-get entry :weight)
-                                agent-river-map-party-floor))
-                          (agent-river--heat-entries agent-river-map-scope))))))
-
 (defun agent-river--map-tick ()
   "Redraw the map, or stop the timer once there is nothing left to draw.
-Cooling counts as something to draw: with a half-life set, a listing whose
-agents have all stopped is still changing, and the weights would otherwise
-sit frozen at whatever they were when the last event landed.
+
+Nothing on this map changes on its own any more, so the only thing worth
+a redraw is dirt: an event marked it, a contributor answered, or a
+record arrived.  The timer retires on the first tick that finds none,
+which is also why the relative times in the rows stand still while
+nothing is happening -- they move again on the next event, or on `g'.
 
 What it cannot see is the disk.  A file that comes back while no agent is
 working -- a branch switch, a build -- redraws on the next event or on
@@ -9974,7 +9481,7 @@ lot of machinery for a view whose subject is the agents."
       (cond
        ((null (get-buffer agent-river-map-buffer-name))
         (agent-river--map-teardown))
-       ((or agent-river--map-dirty (agent-river--map-cooling-p))
+       (agent-river--map-dirty
         (agent-river--map-draw))
        (t (agent-river--stop-map-timer)))
     ;; Same bargain as the other two timers: a redraw that throws every few
@@ -10012,10 +9519,9 @@ a function that will throw again the moment an artifact arrives."
 (defun agent-river-map (&optional ask)
   "Show where the agents are working across the whole project.
 
-The lens over the dired heat: that shades the directory you are already
-in, this lists one directory in full and says what has happened beneath
-each entry, so several agents spread over a large repository are visible
-at once.
+The lens dired cannot be: one directory listed in full, each entry
+saying what has happened beneath it, so several agents spread over a
+large repository are visible at once.
 
 Opens on every tree the agents have touched.  There is no reference
 project to open on instead: the state spans whatever directories the
@@ -10046,9 +9552,9 @@ takes the map off the event stream."
     ;; A tree changes because an agent did something, so the session hook is
     ;; enough to keep a listing current; an incident arriving changes the map
     ;; with no event on that hook at all, and the redraw timer retires as soon
-    ;; as nothing is dirty and nothing is cooling -- so the record sat in the
-    ;; table, drawn by nobody, until somebody pressed `g'.  Quiet is exactly
-    ;; when this view has the most to say.
+    ;; as nothing is dirty -- so the record sat in the table, drawn by nobody,
+    ;; until somebody pressed `g'.  Quiet is exactly when this view has the
+    ;; most to say.
     (add-hook 'agent-river-artifact-observers #'agent-river--map-observe)
     (agent-river--map-draw)
     (agent-river--ensure-map-timer)

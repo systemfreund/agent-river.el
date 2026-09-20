@@ -127,7 +127,7 @@ Three calls put it there:
                       :text "INC-444 routed to you")
 
 ;; An agent was dispatched to it.  Folded onto the *session* as a touch, so
-;; the map's parties, the shading and `agent-river-touching' see it without
+;; the map's parties and listing and `agent-river-touching' see it without
 ;; being taught anything — and it counts no step, because no tool ran.
 (agent-river-reach "inc:INC-444" session-id)
 
@@ -504,8 +504,8 @@ deliberately drops — `:path`, the absolute file name, being the case in point.
 The state deliberately cannot address a file on disk; see
 [Placing a key](#placing-a-key).
 
-`agent-river-map` and `agent-river-heat-mode` are both observers. Read one
-before writing a third.
+`agent-river-map` is the one observer that ships. Read it before writing a
+second.
 
 ## Talking back to the agent
 
@@ -605,7 +605,7 @@ Three ways out, and each answers a different question:
 |---|---|
 | *which* file is this | match the basename, as `agent-river-touching` does |
 | *where* is the file the event was about | read `:path` off the raw event |
-| *where* does this key sit in a tree | `agent-river--heat-absolute`, anchor over cwd |
+| *where* does this key sit in a tree | `agent-river--artifact-absolute`, anchor over cwd |
 
 The third is the only one that can place a key in a directory tree and the only
 one that re-splits a worktree from its main checkout. It answers **nil** for a
@@ -698,18 +698,21 @@ Neither buffer is Markdown: the log carries prompts, reasoning and tool
 arguments — text this package does not control — and Markdown would let that
 text restructure the view watching it.
 
-## The map (`M-x agent-river-map`) and dired heat
+## The map (`M-x agent-river-map`)
 
-Two views of the same artifact tables. `agent-river-heat-mode` shades the dired
-buffer you are already in; the map lists one directory in full, each entry
+The view of the artifact tables: one directory listed in full, each entry
 annotated with what has happened *beneath* it, so several agents spread over a
-large repository are visible at once. Same weighting, same derivation, different
-grain.
+large repository are visible at once. Who has been in a name, and how long ago,
+are rows under it (TAB); the line carries what can be read straight down the
+listing.
 
-Five facts per line, each on its own channel: weight is shading, party is text,
-contention is a marker, existence is a strike-through, and the diffstat is a
-fixed column. `n`/`p`, `M-n`/`M-p` and `>`/`<` are three grains of motion, shared
-with the HUD and the approval queue.
+Three facts per line, each on its own channel: contention and position are
+markers, existence is a strike-through, and the diffstat is a fixed column.
+`n`/`p`, `M-n`/`M-p` and `>`/`<` are three grains of motion, shared with the HUD
+and the approval queue.
+
+Nothing drops out of this view by getting old. `M-x agent-river-forget-artifacts`
+is what says the work has landed, and `C` sweeps the files that are gone.
 
 ## The approval queue (`M-x agent-river-approval-queue`)
 
