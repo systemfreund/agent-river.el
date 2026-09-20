@@ -8995,13 +8995,15 @@ characters."
                                (and (> (nth 1 stat) 0) (format "-%d" (nth 1 stat)))))))
     (and parts (mapconcat #'identity parts " "))))
 
-(defcustom agent-river-map-detail-rows 6
+(defcustom agent-river-map-detail-rows nil
   "How many contributed rows a node shows before the rest are elided.
-The same wall `agent-river-map-detail-files' puts in front of a directory
-with a hundred reached files, and for the same reason: a listing that can
-be arbitrarily long is not a listing.  A contributor with more to say than
-this says the rest somewhere else."
-  :type 'integer)
+Nil, the default, elides nothing.  The wall came from
+`agent-river-map-detail-files', where a directory\='s files are drawn
+wherever its node is open; a node whose only children are rows draws
+closed, so rows are on screen only where somebody opened that one node --
+and a cap there hides the tail of the answer they opened it for.  Set a
+number where a contributor has more to say than a node can hold."
+  :type '(choice (const :tag "Elide nothing" nil) integer))
 
 ;; Rows under a node, and who may contribute them
 ;;
@@ -9057,12 +9059,12 @@ Two more say where it belongs rather than what it says.  `:rank\=' is a
 number, low first, and it orders the rows of *all* the contributors
 against each other -- ties keep this list's order, so a contributor that
 sets none goes on being placed by where it was registered.  It is also
-what `agent-river-map-detail-rows\=' cuts from: the tail is the least worth
-keeping rather than whoever came last.  `:summarised\=' is the row saying
-its whole content is in the reading `:summary\=' put on the line, so the map
-draws it only where the line is not carrying it -- see
-`agent-river--map-said-p\=', which is deliberately per contributor rather
-than per row.
+what `agent-river-map-detail-rows\=' cuts from where it is set at all: the
+tail is the least worth keeping rather than whoever came last.
+`:summarised\=' is the row saying its whole content is in the reading
+`:summary\=' put on the line, so the map draws it only where the line is
+not carrying it -- see `agent-river--map-said-p\=', which is deliberately
+per contributor rather than per row.
 
 NODES are the lines about to be drawn, each `:path\=', `:dir\=' and
 `:parties\=', so a contributor can answer for a directory as well as a file
@@ -9230,8 +9232,8 @@ column, which is why it is still asked for it here.
 Then `:rank', low first and stable, so a contributor's own order survives
 inside its rank and the order between two contributors does not rest on
 which of them somebody registered first.  It also decides what
-`agent-river-map-detail-rows' cuts: the tail is the least worth keeping
-now, rather than whoever was registered last."
+`agent-river-map-detail-rows' cuts where it is set at all: the tail is
+the least worth keeping now, rather than whoever was registered last."
   (let (rows)
     (dolist (pair contributed)
       (unless (agent-river--map-said-p pair column)
@@ -9463,7 +9465,7 @@ drawn once and then quietly gone."
             (if face (agent-river--map-mark text face) text))))
 
 (defun agent-river--map-rows-insert (rows path &optional nested)
-  "Insert ROWS under PATH, capped and marked for motion.
+  "Insert ROWS under PATH, marked for motion and capped where asked.
 
 ROWS is what `agent-river--map-shown-rows' left, not what the
 contributors said: the same list decides the fold marker on the line
@@ -9476,7 +9478,9 @@ its `:key\=' as well, which is what keeps point on the right row across a
 redraw -- `agent-river--map-goto\=' finds a line again by what it names, and
 a row that named only its parent would inherit its parent\='s identity and
 land point a line or two off after every draw."
-  (let ((shown (seq-take rows agent-river-map-detail-rows)))
+  (let ((shown (if agent-river-map-detail-rows
+                   (seq-take rows agent-river-map-detail-rows)
+                 rows)))
     (dolist (row shown)
       (insert (propertize
                (concat (agent-river--map-row-line row nested) "\n")

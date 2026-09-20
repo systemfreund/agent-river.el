@@ -5565,6 +5565,22 @@ its members behind for the next one."
         ;; wall nobody can see is worse than the length.
         (should (string-match-p "…" text))))))
 
+(ert-deftest agent-river-test-no-cap-elides-nothing ()
+  ;; A node whose only children are rows draws closed, so its rows are on
+  ;; screen only because somebody opened that one node -- and a wall across
+  ;; the answer they opened it for is the cap cutting where nothing asked
+  ;; it to.  Nil is the default for that reason, so it is the shape most of
+  ;; the rows this map draws are drawn in.
+  (let ((agent-river-map-detail-rows nil))
+    (with-temp-buffer
+      (agent-river--map-rows-insert
+       (list '(:key "1" :text "one") '(:key "2" :text "two")
+             '(:key "3" :text "three"))
+       "/repo/a.el")
+      (let ((text (buffer-string)))
+        (should (string-match-p "three" text))
+        (should-not (string-match-p "…" text))))))
+
 (ert-deftest agent-river-test-a-row-carries-its-own-identity ()
   ;; The redraw finds a line again by what it names.  A row that named only
   ;; its node would share that name with every other row there, and point

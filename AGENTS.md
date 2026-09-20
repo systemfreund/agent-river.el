@@ -1530,8 +1530,18 @@ Four things about the map are load-bearing:
   registered first is not a statement about which of their rows is worth
   reading: what is happening in the file *now* (`step`, rank 0) outranks
   who has been in it (`parties`, 1), which outranks the state of the tree
-  (`vc`, 2). It is also what `agent-river-map-detail-rows` cuts from — the
-  tail is the least worth keeping rather than whoever was registered last.
+  (`vc`, 2). It is also what `agent-river-map-detail-rows` cuts from, where
+  it is set at all — the tail is the least worth keeping rather than whoever
+  was registered last.
+- **Nothing is elided by default** (`agent-river-map-detail-rows` nil). The
+  cap was inherited from `agent-river-map-detail-files`, and the reason did
+  not come with it: a directory's files are drawn wherever its node is open,
+  where a node whose only children are rows draws *closed*. So rows are on
+  screen only because somebody opened that one node, and a wall across the
+  answer they opened it for is the cap cutting where nothing asked it to —
+  the clutter it was defending against is already held off by the fold. A
+  number still caps, for a contributor with more to say than a node can
+  hold.
 - **Rows ride the fine grain only.** `n`/`p` stop on them; `M-n`/`M-p` skip
   them (`agent-river--map-row-line-p`, since a row inherits its node's path
   and cannot be told apart by the path alone); `>`/`<` pass over them because
