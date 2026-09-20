@@ -768,6 +768,15 @@ On the Emacs side, once: `(agent-river-spool-mode 1)`.
 | `text` | | the line for the event log |
 | `session` | | an agent-river session id, if one caused this — see below |
 
+A delivery that is `gone` the **first** time a key is seen declares nothing.
+The ending being worth folding and the record being worth creating are two
+different questions: a source that polls a world it did not watch re-sees
+everything that changed, so without this the first wide poll fills the domain
+section — the queue of what nobody has picked up — with records created purely
+to be struck through, and an artifact record does not fade the way a reached
+name does. A key already in the table gets its ending as usual; there the
+striking through is the news rather than the whole of the record.
+
 Two rules a writer keeps:
 
 - **Build elsewhere, `rename` in.** Only `.json` is taken in, which leaves
@@ -790,8 +799,11 @@ the fields above. That is what keeps the knowledge of what a foreign system
 calls things in Elisp and under test, rather than in whatever wrote the file.
 
 `agent-river-gh.el` is the worked example: a shell script that asks `gh` for
-issues and interprets nothing, and a reader of about forty lines that knows
-what GitHub calls a title.
+issues and pull requests and interprets nothing, and one reader that knows
+what GitHub calls a title. It is registered under two source names, `gh` and
+`gh-pr`, and the delivery says which query it came out of — the reader is
+told the kind rather than working it out from the shape of what it was
+handed.
 
 ### If a session caused it
 
@@ -833,7 +845,12 @@ on a line of the map start an agent on it:
 ```elisp
 (setf (alist-get 'issue agent-river-map-domains)
       (list :label "Issues" :visit #'agent-river-launch-artifact))
+(setf (alist-get 'pr agent-river-map-domains)
+      (list :label "Pull requests" :visit #'agent-river-launch-artifact))
 ```
+
+Registering is optional — a domain nothing has been told about is still
+drawn — but a domain with no `:visit` is a section you can only look at.
 
 A **launcher** is a plist in `agent-river-launch-launchers`:
 
@@ -855,7 +872,7 @@ What it would take to decide without one is issue #37.
 
 ### GitHub as a source
 
-`agent-river-gh.el` and `agent-river-gh.sh` are one source, and the first
+`agent-river-gh.el` and `agent-river-gh.sh` are one dialect, and the first
 thing here that knows a system other than this package — which is why they
 live beside the mechanism rather than inside it.
 
@@ -864,15 +881,43 @@ live beside the mechanism rather than inside it.
 (agent-river-gh-mode 1)
 ```
 
-The script asks `gh` for recently updated issues and writes one file per
-issue, interpreting nothing. It is the same program cron would run: an Emacs
-that is not running must not be a reason for an issue to go unseen.
+The script asks `gh` for recently updated issues and pull requests and
+writes one file per object, interpreting nothing. It is the same program
+cron would run: an Emacs that is not running must not be a reason for an
+issue to go unseen.
 
-A watermark keeps an issue from being delivered twice; the first poll after
+Two kinds, under two domains. `agent-river-gh-kinds` says which to ask for
+and defaults to both; a pull request heads its own `pr` section on the map,
+with `pr:owner/repo#42` for a key. Set it to `'(issue)` for the old
+behaviour, and note that each kind is one API call per repository per poll.
+
+| variable | environment | |
+|---|---|---|
+| `agent-river-gh-repos` | *(the argument)* | checkouts to poll |
+| `agent-river-gh-kinds` | `AGENT_RIVER_GH_KINDS` | `issue`, `pr`, or both |
+| `agent-river-gh-interval` | | seconds between polls |
+| | `AGENT_RIVER_SPOOL` | where deliveries are written |
+| | `AGENT_RIVER_GH_STATE` | where the watermark is kept |
+| | `AGENT_RIVER_GH_LIMIT` | how many of each to ask for |
+| | `AGENT_RIVER_GH_SINCE` | first-run lookback |
+| | `AGENT_RIVER_GH_RESCAN` | ignore the watermark for one run |
+
+A watermark keeps an object from being delivered twice; the first poll after
 the mode is switched on ignores it and asks wide, because the artifact table
 does not survive a restart. `C-u M-x agent-river-gh-poll` does that by hand.
+It is one mark per repository, held whenever any kind could not be asked or
+came back at the limit, so the window is never advanced past something that
+was not looked at. A query that fails is reported into the log rather than
+passed over — a kind that fails persistently would otherwise be invisible
+behind the one that still works.
 
-`agent-river-gh-brief` is the worked example of a brief, and shows the one
-thing a brief for foreign text owes: the issue is quoted and introduced as a
-request from a third party, so nothing in it reads as an instruction that
-arrived with your standing.
+The poll asks for every state, not only the open ones: something that closes
+or merges is delivered once more on the tick it ended in, so its record is
+struck through rather than sitting in the section for ever.
+
+`agent-river-gh-brief` is the worked example of a brief, and handles both
+domains. It shows the one thing a brief for foreign text owes: everything
+GitHub said — title, url, branch names, body — is quoted and introduced as
+somebody else's words, so nothing in it reads as an instruction that arrived
+with your standing. An issue is framed as a request to weigh, a pull request
+as a change to read.
