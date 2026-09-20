@@ -31,9 +31,10 @@ one thing here that starts a process, pointing an agent at an artifact.
 Both are optional and require `agent-river`, and they require nothing of
 each other — see the third-direction section for why they were one file and
 are not any more. `agent-river-gh.el` and `agent-river-gh.sh` are one
-*source* for the spool, and the line they are on the far side of is that a
-source knowing about a foreign system lives beside the mechanism rather
-than inside it — `river` is the normalised shape and stays in the core, and
+*dialect* for the spool, registered under two source names (`gh`,
+`gh-pr`), and the line they are on the far side of is that a source
+knowing about a foreign system lives beside the mechanism rather than
+inside it — `river` is the normalised shape and stays in the core, and
 the next source (a tracker, a mailbox, a build) goes next to the GitHub
 one. `agent-river-tests.el` is the ERT suite for all of it,
 `agent-river-hook.sh` is the bridge, and there is one example hook wiring
@@ -43,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (450 tests). -L . is required: the tests require all four .el files.
+# Full suite (464 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -876,6 +877,27 @@ before the deletion, so that deferring is not the same as forgetting.
   writer about, and throw it away *quietly*. A file too young is left for
   the next scan. It covers "parses but has no key" too, because a truncated
   write can land as valid JSON with the key not in it yet.
+- **An ending is folded; a first sighting that is already over is not
+  declared** (`agent-river-spool--declare`). One call used to answer both
+  questions, and they are different ones: a source that polls a world it did
+  not watch re-sees everything that changed, so the first wide poll declared
+  a record for every thing that had ended since the window opened, purely in
+  order to strike it through. An artifact record does not fade the way a
+  reached name does — it stays until `agent-river-drop-artifact` — so the
+  domain section, the queue of what nobody has picked up, opened with more
+  dead lines than live ones. Measured on one repository: ten deliveries,
+  seven over before anything here had heard of the thing, and three records
+  after. Which of the two it is, is a question the **table** answers, the way
+  `agent-river-observe-artifact` answers it for a producer that would
+  otherwise keep a list of its own — through `agent-river-artifact-at`, not
+  `agent-river-artifact`, which creates the record it is asked about. It sits
+  here rather than in the reader, which is a pure translation and cannot know
+  what the table has, and rather than in `agent-river-appeared`, whose return
+  value already means first-sight-versus-repeat and would then mean two
+  things. **No log line**, which is the rule applied rather than a gap in it:
+  the spool logs failures and this is not one, and `artifact` is a notable
+  kind — `>` stops on it — where a thing that was over before anybody heard
+  of it is the definition of a line that does not want attention.
 - **A declaration that throws is treated like a file that would not parse.**
   Left in the inbox it would be retried every minute for the life of the
   Emacs, which is the one outcome worse than losing it.
@@ -993,7 +1015,80 @@ before the deletion, so that deferring is not the same as forgetting.
   quiet hour and stamped the mark over every issue the outage hid. It is the
   one step in that script that does not degrade to a no-op — everything else
   loses nothing, this loses issues permanently, because the next run asks
-  about a window that has passed.
+  about a window that has passed. **One mark per repository, not per kind**
+  now that there are two: what it records is the moment before which this
+  repository has been asked about *completely*, so every query shares the
+  one `since` and a kind that failed or came back at the limit holds the
+  mark for all of them. Loose in one direction only — the kinds that did
+  answer are asked again next run, which costs their deleted files.
+  **Asking nothing is not the same as asking and being answered**
+  (`asked`): `complete` starts at 1 and an unknown kind is skipped without
+  clearing it, so a run whose every kind was a typo asked GitHub nothing and
+  then stamped the mark at the moment of the run — after which the next
+  correctly configured run asks about a window that has passed, and
+  everything before it is missed permanently. The per-kind reasoning (no
+  window is being missed, because nothing will ever ask about one) is sound
+  and does not cover every kind at once, which is precisely what a typo in a
+  crontab is.
+- **The one thing the script says out loud is a kind that did not come back
+  whole**, one line on stdout, logged by `agent-river-gh--reporter`. Three
+  ways to get one and they are the three that hold the mark, which is what
+  makes the set exactly right: the query **failed**; it came back at the
+  **limit**, so the window was not seen to its end; or the answer could not
+  be **written**. The last was the `asked` failure in a different branch —
+  neither the `mktemp` nor the write cleared `complete`, so a spool at mode
+  500, or a full filesystem, delivered nothing, exited 0, said nothing and
+  stamped the mark over every object in the window. AGENTS.md records the
+  same incident one directory over, with `failed/` at mode 500. The
+  truncation half was silent until `--state all` made it likely: the close
+  rate multiplies the objects in a window, and a held mark grows the window,
+  which returns more objects, which makes the next truncation likelier — a
+  short runway into a permanent stall, where the operator's levers are
+  `AGENT_RIVER_GH_LIMIT` and a narrower `agent-river-gh-kinds`. The write
+  report is **per kind, not per object**, because a spool that cannot be
+  written cannot be written fifty times and fifty lines would bury the one
+  that matters. It is the exception
+  to the no-op rule and the reason is that two kinds hide what one could
+  not: a kind failing *persistently* — an old `gh` rejecting a field, a
+  token short a scope, pull requests disabled — holds the mark for ever
+  while the other kind goes on delivering, so the window grows without bound
+  and the poll looks healthy from Emacs. With one query a failure meant no
+  deliveries at all, which is at least visible. The filter is line-buffered
+  because a filter is handed whatever arrived rather than whatever was
+  written.
+- **The poll asks `--state all`, and that is what makes the queue a queue.**
+  Asked for the open ones alone, a thing that merges simply stops being
+  delivered: `:gone` is never set and the record sits in the domain section
+  — the queue of what nobody has picked up — until somebody runs
+  `agent-river-drop-artifact` by hand. Pull requests close far faster than
+  issues, which is what made it worth fixing rather than a second thing to
+  live with. It costs no extra request, where a second query for what has
+  closed would, and what arrives is bounded by the window either way: it is
+  what *ended* since the last poll, not every closed thing there is.
+- **An issue and a pull request are one dialect and two source names**
+  (`agent-river-gh--domains`, `AGENT_RIVER_GH_KINDS`). The script names
+  which query an answer came out of — `gh` or `gh-pr` — and nests it under
+  a uniform `object`; the reader is *told* the kind rather than working it
+  out from which key happened to be present, which would be inferring a
+  domain from a spelling, the thing `agent-river--key-domain` refuses one
+  subject over. One reader, because everything else is shared: both are a
+  number, a title, a body somebody else wrote and a state that can be over,
+  and the domain symbol is also the key's prefix, from one `format`, so the
+  two cannot come apart. `:gone` needed nothing — `merged` had been written
+  into it before there was anything that could be merged. Three things it
+  owes. **The PR-only context cells are asked for, never branched on**
+  (`branch`, `base`, `review`, `draft`, `fork`): the chain already asks that
+  way for a `body` an issue may not have, and a domain test there would be a
+  second place the kind is decided. **The registering form spells the two
+  names out** rather than reading the table, because it is extracted into
+  the autoloads file and runs before the table exists — a test is what holds
+  the two lists together, since adrift, a delivered kind reads as malformed
+  and goes to `failed/`, which nothing re-reads. And **Emacs rejects an
+  unknown kind before the poller sees it** (`agent-river-gh--kinds`): the
+  script spells its default with `:-`, which fires on an empty value as
+  readily as on an unset one, so handing it a list that came to nothing
+  would ask for both — the drift `agent-river-gh-kinds` exists to shut,
+  arrived at from the inside.
 - **A source registered by an autoload needs an autoload of its own**
   (`agent-river-gh--read`). The `with-eval-after-load` form puts the reader
   into the alist at startup; without a cookie on the reader, the entry is a
@@ -1002,12 +1097,44 @@ before the deletion, so that deferring is not the same as forgetting.
   malformed and filed under `failed/`, which nothing re-reads. The same
   silence is why the poller is handed `AGENT_RIVER_SPOOL` — bound into
   `process-environment`, since `make-process` has no `:environment` argument
-  and ignores one without complaining.
+  and ignores one without complaining. **Everything in `--poll-1` is inside
+  the guard, the bindings included** — they were above it, and this runs on
+  a repeating timer, so a non-string in `agent-river-gh-repos` threw out of
+  `agent-river-gh-poll` before the guard could catch it: the
+  `--resolve-pending` shape at a five-minute period. The handler drops what
+  it recorded pushing rather than what it was passed, because it must not
+  assume the binding that threw ever completed.
+- **Four places know the kinds, and all four are pinned.**
+  `agent-river-gh--domains` is the table; the registering form spells the
+  source names out because it runs before the table exists; and the
+  script's two `case` arms are read by a test rather than run, since asking
+  one question is not worth becoming the first test in this suite that
+  shells out. Unpinned, the script's arms fall through to `return 1` for a
+  kind Emacs happily asks for — nothing delivered, nothing logged, an empty
+  section that reads as a quiet week.
 - **The prompt is still quoted, and the reason has changed** (`agent-river-gh-brief`).
   An issue is text written by whoever can open one and it reaches an agent
   holding tools. With a person in the loop the person is the defence, so the
   quoting is a courtesy rather than the whole of it — and it is kept anyway,
   because it is what has to be right on the day #37 is built.
+- **The `>` goes on in one place** (`agent-river-gh--quote`), and the pull
+  request is what paid for it. The body was split on newlines from the
+  start; the branch name added beside it was `format`ed into a single line,
+  so a name carrying a newline closed the quotation and everything after it
+  read as the operator's own words — the injection the framing exists to
+  stop, walking out through the field that had just been added next to it.
+  A branch name is a stranger's text exactly as a body is: a fork spells one
+  however it likes. What stays outside is ours and interpolates nothing —
+  the framing, the export, and the note that a pull request is a draft,
+  which is a sentence read off a boolean.
+- **Two framings, dispatched on the domain** (`agent-river-gh--framing`),
+  which is the two lines inside one brief that `agent-river-launch-brief`
+  asks for rather than a function per domain. They are written side by side
+  because what has to stay parallel is the part that is not about the work:
+  both introduce the same quotation and both say it is not an instruction.
+  Only the ask differs — an issue is a request to weigh, a pull request is a
+  change to read — and anything else falls back to the issue's, the more
+  careful of the two.
 
 ### One set of motions, every buffer
 
