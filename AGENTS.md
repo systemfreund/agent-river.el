@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (390 tests). -L . is required: the tests require all four .el files.
+# Full suite (392 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1084,6 +1084,51 @@ before the deletion, so that deferring is not the same as forgetting.
   what a line offers. Only the one that is launched is built. Launcher-
   specific keys on a brief are that launcher's to read; `:prompt` and `:cwd`
   are everybody's.
+- **Options go onto the configured agent, and the base is read when the
+  wrapper is made** (`agent-river-launch-shell-config-with-options`). Naming
+  a model is the ordinary thing a brief does, and the bullet above leaves it
+  four lines of everybody's config — four lines that have to name some
+  agent's config maker by hand, at which point
+  `agent-river-launch-shell-config` has stopped deciding anything: point it
+  at another agent and every brief goes on building the old one, with
+  nothing anywhere saying so. That is the second account this file spends
+  its exceptions avoiding, arrived at through the one thing the protocol
+  left to the caller. What ships is a wrapper and not a vendor: the key it
+  sets (`:default-config-options`) is agent-shell's own rather than one
+  agent's, so this stays as launcher-specific as the section around it and
+  no more, and what an option *means* is still unknown here — the rule a
+  context lives by, one subject over. Two things it owes. **The base is
+  resolved when the wrapper is made**, because the obvious use is `(setopt
+  agent-river-launch-shell-config (agent-river-launch-shell-config-with-options
+  …))` and read at call time that config function is its own base. Measured:
+  the recursion never signalled — Emacs grows the depth to the C stack
+  rather than stopping at a number — so the suite *hung* instead of failing,
+  which is why the test binds `max-lisp-eval-depth` and a regression is
+  loud. And **nil in is nil out**: nil is how the default says agent-shell
+  cannot build a config here at all, and `--shell-available-p` reads it to
+  keep an unavailable launcher out of the menu — an alist holding one key
+  would have it claim it can run, and the first artifact somebody took would
+  be where they found out.
+- **The buffer's name is the brief's as well, and nothing renames unasked**
+  (`:buffer-name`, `agent-river-launch--shell-name`). Launcher-specific the
+  way `:config` is — a headless CLI has no buffer to name — and absent is
+  the ordinary answer, which leaves agent-shell the name it chose. The
+  brief rather than this layer, because two briefs on one artifact are two
+  sessions somebody has to tell apart: named from the record here, `Review`
+  and `Address the review` would be one name and a `<2>`, which is the
+  distinction being made exactly where it cannot be seen. The call is
+  `shell-maker-set-buffer-name`, not `agent-shell-rename-buffer` — that one
+  is buffer-locally aliased to a command taking no argument, which prompts,
+  so a name cannot be handed to it at all. The setter is what agent-shell
+  itself calls in `agent-shell-restart`, and it records the name as an
+  override; a bare `rename-buffer` is undone by the next thing that asks
+  shell-maker what the buffer is called. **Guarded, because everything it
+  does happens after the launch**: the process is up and the prompt is
+  already on its way, so a throw would leave `:launch`, be caught by
+  `agent-river-launch-artifact` as `launch failed`, and stop the record
+  `--resolve-pending` reads from ever being pushed — a session running,
+  unnamed, never linked to the artifact it was started for, and described
+  in the log as one that never started.
 - **Quoting producer text is a launch concern, not a GitHub one**
   (`agent-river-launch-quote`, moved here from `agent-river-gh.el`). A brief
   that embeds an artifact's own text — a body, a title, a branch a fork

@@ -5178,6 +5178,52 @@ it clears them."
           (should (eq (plist-get args :no-focus) t)))
       (kill-buffer buffer))))
 
+(ert-deftest agent-river-test-a-brief-may-name-the-buffer-its-session-runs-in ()
+  (let ((named nil)
+        (sent 0)
+        (buffer (generate-new-buffer " *agent-river-test-shell*"))
+        (agent-river-launch-shell-config (lambda () 'config)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell--start)
+                   (lambda (&rest _) buffer))
+                  ((symbol-function 'agent-river-launch--shell-send)
+                   (lambda (&rest _) (setq sent (1+ sent))))
+                  ((symbol-function 'shell-maker-set-buffer-name)
+                   (lambda (b name) (setq named (cons b name)))))
+          ;; Asked for, and trimmed -- the setter one layer down refuses an
+          ;; empty name with a `user-error'.
+          (agent-river-launch--shell-launch '(:prompt "go" :buffer-name " Review "))
+          (should (equal named (cons buffer "Review")))
+          ;; Not asked for is the ordinary case, and it leaves agent-shell the
+          ;; name it chose rather than this layer inventing one.
+          (setq named nil)
+          (agent-river-launch--shell-launch '(:prompt "go"))
+          (should-not named)
+          (agent-river-launch--shell-launch '(:prompt "go" :buffer-name ""))
+          (should-not named))
+      (kill-buffer buffer))
+    (should (= sent 3)))
+  ;; And a rename that throws does not take the launch down with it.  By the
+  ;; time anything can be renamed the process is up and the prompt is on its
+  ;; way, so a throw would leave `:launch', be caught by
+  ;; `agent-river-launch-artifact' as `launch failed', and stop the record
+  ;; `--resolve-pending' reads from ever being pushed: a session running,
+  ;; unnamed, never linked, and logged as one that never started.
+  (let ((sent 0)
+        (buffer (generate-new-buffer " *agent-river-test-shell*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell--start)
+                   (lambda (&rest _) buffer))
+                  ((symbol-function 'agent-river-launch--shell-send)
+                   (lambda (&rest _) (setq sent (1+ sent))))
+                  ((symbol-function 'shell-maker-set-buffer-name)
+                   (lambda (&rest _) (error "no"))))
+          (should (eq (agent-river-launch--shell-launch
+                       '(:prompt "go" :buffer-name "Review"))
+                      buffer))
+          (should (= sent 1)))
+      (kill-buffer buffer))))
+
 (ert-deftest agent-river-launch-test-quoting-a-part-ending-in-a-newline-has-no-tail ()
   ;; `split-string' answers a trailing newline with a final empty string, so
   ;; the quotation ended in a lone `>' hanging under it.  Only the trailing
@@ -5221,6 +5267,50 @@ line two" "safe tail"))))
                    (list :prompt "x" :config (lambda () 'reviewer)))
                   'reviewer))
       (should (= built 1)))))
+
+(ert-deftest agent-river-test-options-are-set-on-the-configured-agent ()
+  (let ((agent-river-launch-shell-config
+         (lambda () (list (cons :buffer-name "shell")))))
+    (let ((config (funcall (agent-river-launch-shell-config-with-options
+                            '(("model" . "opus") ("effort" . "high"))))))
+      ;; The configured agent plus the options, never an agent this brief
+      ;; named for itself -- which is what the same four lines written out by
+      ;; hand have to do, and what leaves `agent-river-launch-shell-config'
+      ;; deciding nothing.
+      (should (equal (alist-get :buffer-name config) "shell"))
+      ;; In the order they were given: they are applied one at a time and
+      ;; re-advertised after each, so a model comes before what is scoped to
+      ;; it.
+      (should (equal (funcall (alist-get :default-config-options config))
+                     '(("model" . "opus") ("effort" . "high")))))
+    ;; A base of the caller's own still wins.
+    (should (equal (alist-get :buffer-name
+                              (funcall (agent-river-launch-shell-config-with-options
+                                        nil (lambda ()
+                                              (list (cons :buffer-name "other"))))))
+                   "other"))
+    ;; Read now rather than at every call, which is what makes this -- the
+    ;; ordinary way to want every launched session under one option -- wrap
+    ;; what was configured.  Read later it would be its own base and call
+    ;; itself.  The depth is bound so that a regression fails this test
+    ;; rather than hanging the suite: measured, the recursion ran past two
+    ;; minutes without signalling, because Emacs grows the limit to the C
+    ;; stack rather than stopping at a number.
+    (setq agent-river-launch-shell-config
+          (agent-river-launch-shell-config-with-options '(("mode" . "auto"))))
+    (let* ((max-lisp-eval-depth 400)
+           (config (funcall agent-river-launch-shell-config)))
+      (should (equal (alist-get :buffer-name config) "shell"))
+      (should (equal (funcall (alist-get :default-config-options config))
+                     '(("mode" . "auto"))))))
+  ;; Nil in is nil out.  Nil is how the default says agent-shell cannot build
+  ;; a config here at all, and `agent-river-launch--shell-available-p' reads
+  ;; it to say the launcher cannot run; an alist holding one key would have
+  ;; it claim it can, and the first artifact somebody took would be where
+  ;; they found out.
+  (let ((agent-river-launch-shell-config #'ignore))
+    (should-not (funcall (agent-river-launch-shell-config-with-options
+                          '(("mode" . "auto")))))))
 
 (ert-deftest agent-river-test-nothing-is-offered-where-nothing-could-launch ()
   (agent-river-test--with-briefs
