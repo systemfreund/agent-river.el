@@ -3954,26 +3954,6 @@ first line from a survey."
                                   :path "/repo/MEMORY.md"))
     (should-not (gethash "MEMORY.md" (agent-river-state-anchors state)))))
 
-(ert-deftest agent-river-test-a-stray-file-is-a-root-of-its-own ()
-  (agent-river-test--with-session state
-    ;; One session, one cwd -- but two trees, because the file it edited
-    ;; under ~/.claude is not in the project.  Grouping by cwd alone found
-    ;; a single root and drew the stray inside the project.
-    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "src/a.el"
-                                  :path "/repo/src/a.el"))
-    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "MEMORY.md"
-                                  :path "/home/u/notes/MEMORY.md"))
-    (let ((roots (mapcar #'car (agent-river--map-all-roots 'session))))
-      (should (member "/repo" roots))
-      (should (member "/home/u/notes" roots)))
-    ;; And the stray is reached under its own root, not under the project's.
-    (should (equal (mapcar (lambda (n) (plist-get n :rel))
-                           (agent-river--map-reach "/home/u/notes" 'session))
-                   '("MEMORY.md")))
-    (should (equal (mapcar (lambda (n) (plist-get n :rel))
-                           (agent-river--map-reach "/repo" 'session))
-                   '("src/a.el")))))
-
 (ert-deftest agent-river-test-a-party-is-the-session-that-delegated ()
   (agent-river-test--with-session state
     (agent-river-fold state '(:kind "act" :cwd "/repo" :agent "a1"
@@ -3984,23 +3964,20 @@ first line from a survey."
     ;; touch lands on the session now, so the party is the session and the
     ;; map shows one name per agent rather than one per agent plus one per
     ;; thing it delegated to.
-    (should (equal (agent-river--party-label state) "alpha"))
-    (should (equal (mapcar (lambda (p) (plist-get p :party))
-                           (plist-get (car (agent-river--map-reach "/repo" 'session))
-                                      :parties))
-                   '("alpha")))))
+    (should (equal (agent-river--party-label state) "alpha"))))
 
-;;; The map -- the project, one level at a time
+;;; Files on disk, as the state records them
 ;;
-;; The derivation is tested, the rendering is not: which frame a number
-;; came from, how two agents on one directory add up, and where an agent is
-;; *now* as against where it has been are pure functions of the state.
-;; Where the lines land on screen is not.
+;; What is left that needs a real directory: the artifact keys are relative
+;; to a session's cwd, and the one command that asks the disk about them is
+;; `agent-river-forget-gone-files'.  The map used to list directories too
+;; and most of this section was about that; it lists artifact records now
+;; and reads no disk at all.
 
 (defmacro agent-river-test--with-tree (var &rest body)
   "Bind VAR to a throwaway project tree and run BODY, then remove it.
-The map's listing is the one thing here that genuinely needs a directory:
-half of what it shows is what is on disk and untouched."
+For the one reading here that genuinely needs a directory: whether the
+file an artifact key names is still there."
   (declare (indent 1))
   `(let ((,var (make-temp-file "agent-river-map" t)))
      (unwind-protect
@@ -4013,77 +3990,6 @@ half of what it shows is what is on disk and untouched."
            (write-region "" nil (expand-file-name "build.gradle.kts" ,var))
            ,@body)
        (delete-directory ,var t))))
-
-(ert-deftest agent-river-test-the-map-lists-only-what-was-reached ()
-  (let ((agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root
-                                      :file "dialog/src/main/foo.el"))
-        ;; Agents spread over several roots turn the full listing into mostly
-        ;; context, and the map is opened to find the work in it.
-        (should (equal (mapcar (lambda (e) (plist-get e :name))
-                               (agent-river--map-entries root))
-                       '("dialog")))))))
-
-(ert-deftest agent-river-test-the-map-can-list-the-quiet-entries-too ()
-  (let ((agent-river-map-untouched t))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root
-                                      :file "dialog/src/main/foo.el"))
-        (let ((entries (agent-river--map-entries root)))
-          ;; What the filter costs, and what asking for it back buys: a view
-          ;; of only the touched paths answers "where" without saying where
-          ;; that is relative to anything else.
-          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
-                         '("common" "dialog" "docs" "build.gradle.kts")))
-          ;; Directories first, the way dired lists them.
-          (should (plist-get (nth 0 entries) :dir))
-          (should-not (plist-get (nth 3 entries) :dir))
-          (should-not (plist-get (car entries) :parties)))))))
-
-(ert-deftest agent-river-test-a-directory-reached-by-name-is-not-a-file-under-itself ()
-  ;; `path' is what Grep and Glob call their argument and
-  ;; `agent-river--tool-file' reads it like any other, so an artifact key
-  ;; names a directory as soon as an agent searches one.  That key grouped
-  ;; under the entry with nothing below it -- a node with a nil `:rel' --
-  ;; and the entry was a directory, so the node was kept as one of its
-  ;; files.  Every reader resolves a file's `:rel' against its entry, so the
-  ;; next draw died with `stringp, nil' and so did every one after it.
-  (let ((agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :tool "Grep" :cwd root
-                                      :file "common"))
-        (let ((entries (agent-river--map-entries root)))
-          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
-                         '("common")))
-          ;; The touch is the entry's own, and it is counted there.
-          (should (plist-get (car entries) :parties))
-          ;; Which is what the draw and the contributors read.
-          (should (equal (mapcar (lambda (n) (plist-get n :path))
-                                 (agent-river--map-nodes root entries))
-                         (list (expand-file-name "common" root)))))))))
-
-(ert-deftest agent-river-test-a-missing-directory-reached-by-name-is-one-line ()
-  ;; A directory the disk does not have, reached both by name and through a
-  ;; file inside it, is one entry carrying both -- not a line for the name
-  ;; and another for what was under it.
-  (let ((agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root :file "gone"))
-        (agent-river-fold state (list :kind "act" :cwd root :file "gone/a.el"))
-        (let ((entries (agent-river--map-entries root)))
-          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
-                         '("gone")))
-          (should (plist-get (car entries) :missing))
-          ;; Reached below it, so the line is a directory's even though
-          ;; nothing on disk can say so.
-          (should (plist-get (car entries) :dir))
-          (should (= (agent-river--map-touches (plist-get (car entries) :parties))
-                     2)))))))
 
 (defun agent-river-test--cool (state path seconds)
   "Back-date STATE's touches of PATH by SECONDS, in both frames.
@@ -4102,20 +4008,6 @@ the view looks like once the work has moved on."
                        :last (time-subtract (plist-get entry :last) seconds))
                  table)))))
 
-(ert-deftest agent-river-test-a-file-that-comes-back-stops-being-struck ()
-  ;; `:missing' is derived from the listing on every draw and the shading is
-  ;; torn down and rebuilt with it, so the mark follows the disk in both
-  ;; directions rather than being remembered anywhere.
-  (let ((agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root :file "scratch.el"))
-        (should (plist-get (car (agent-river--map-entries root)) :missing))
-        (write-region "" nil (expand-file-name "scratch.el" root))
-        (should-not (plist-get (car (agent-river--map-entries root)) :missing))
-        (delete-file (expand-file-name "scratch.el" root))
-        (should (plist-get (car (agent-river--map-entries root)) :missing))))))
-
 (ert-deftest agent-river-test-a-gone-file-is-struck-through ()
   ;; Grey is the map's word for several things at once -- stale, cold,
   ;; elided.  "This file is not there" is worth saying exactly, and once the
@@ -4131,80 +4023,6 @@ the view looks like once the work has moved on."
                                        '((:party "alpha" :touches 9)))))
       (text-property-any 0 (length line) 'agent-river-map-face
                          'agent-river-gone line))))
-
-(ert-deftest agent-river-test-a-deletion-is-still-news ()
-  ;; A file deleted a moment ago is warm, and the deletion is something the
-  ;; agent did.  Dropping it the instant it happens would throw away the one
-  ;; thing worth seeing about it.
-  (let ((agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root :file "scratch.el"))
-        (let ((entries (agent-river--map-entries root)))
-          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
-                         '("scratch.el")))
-          (should (plist-get (car entries) :missing)))))))
-
-(ert-deftest agent-river-test-an-agent-is-named-even-on-a-file-that-is-gone ()
-  ;; The exemption holds for a deleted file too.  Refusing it left an agent
-  ;; whose last act was a deletion named nowhere at all, and losing a party
-  ;; off the map is the worse of the two readings -- the strike-through is
-  ;; what keeps this one honest.
-  (let ((agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root :file "scratch.el"))
-        (agent-river-test--cool state "scratch.el" 3600)
-        (let ((entries (agent-river--map-entries root)))
-          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
-                         '("scratch.el")))
-          (should (plist-get (car entries) :missing))
-          (should (plist-get (car (plist-get (car entries) :parties)) :party)))))))
-
-(ert-deftest agent-river-test-a-quiet-session-keeps-its-name ()
-  ;; The TTL is a guess at a process we cannot see, and a name is not thrown
-  ;; away on a guess.  A CLI session outside Emacs that has simply not been
-  ;; given a prompt for a while is still there.
-  (let ((agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
-        (agent-river-test--cool state "common/c.el" 3600)
-        (setf (agent-river-state-last-seen state) (time-subtract (current-time) 9999))
-        (should-not (agent-river--active-p state))
-        (let ((entries (agent-river--map-entries root)))
-          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
-                         '("common")))
-          (should (plist-get (car (plist-get (car entries) :parties)) :party)))))))
-
-(ert-deftest agent-river-test-a-root-goes-only-when-it-is-forgotten ()
-  ;; Nothing leaves this view by getting old.  A root stands for as long as
-  ;; the tables say an agent was in it, and the only thing that takes it
-  ;; away is somebody saying the work is over.
-  (agent-river-test--with-tree root
-    (agent-river-test--with-session state
-      (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
-      (should (equal (mapcar #'car (agent-river--map-all-roots)) (list root)))
-      (agent-river-test--cool state "common/c.el" 3600)
-      (should (equal (mapcar #'car (agent-river--map-all-roots)) (list root)))
-      (agent-river-fold state '(:kind "forget"))
-      (should-not (agent-river--map-all-roots)))))
-
-(ert-deftest agent-river-test-an-old-touch-is-named-like-a-fresh-one ()
-  ;; There was a floor here once, under which an agent stopped being named
-  ;; because its touches had decayed past it.  Age says nothing now: both
-  ;; names stand, and `agent-river-forget-artifacts' is what clears them.
-  (let ((agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
-        (agent-river-fold state (list :kind "act" :cwd root
-                                      :file "dialog/src/main/foo.el"))
-        (agent-river-test--cool state "common/c.el" 3600)
-        (should (equal (sort (mapcar (lambda (e) (plist-get e :name))
-                                     (agent-river--map-entries root))
-                             #'string<)
-                       '("common" "dialog")))))))
 
 (ert-deftest agent-river-test-forget-drops-the-files-and-keeps-the-session ()
   (agent-river-test--with-session state
@@ -4287,97 +4105,20 @@ the view looks like once the work has moved on."
       ;; Where the work actually is survives it.
       (should (gethash "common/c.el" (agent-river-state-artifacts state))))))
 
-(ert-deftest agent-river-test-cleaning-up-gone-files-is-on-the-map-s-keys ()
-  ;; The one forgetting command that belongs on a key there: its subject is
-  ;; already gone, so what is lost is the record of an absence.
-  (dolist (map (list agent-river-map-mode-map agent-river-map-plain-mode-map))
-    (should (eq (lookup-key map (kbd "C")) #'agent-river-forget-gone-files)))
-  ;; And the one that drops the record of the work itself stays off them.
-  (dolist (map (list agent-river-map-mode-map agent-river-map-plain-mode-map))
-    (should-not (eq (lookup-key map (kbd "C")) #'agent-river-forget-artifacts))))
-
-(ert-deftest agent-river-test-the-filter-never-hides-activity ()
-  ;; The one thing the map exists not to do.  The filter is written as "has
-  ;; no parties" rather than "is not on disk", so an entry the state knows
-  ;; about and the disk does not survives it -- which is exactly the entry a
-  ;; disk-shaped filter would have dropped.
-  (let ((agent-river-map-untouched nil))
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root
-                                      :file "deleted/gone.el"))
-        (let ((entries (agent-river--map-entries root)))
-          (should (equal (mapcar (lambda (e) (plist-get e :name)) entries)
-                         '("deleted")))
-          (should (plist-get (car entries) :missing)))))))
-
-(ert-deftest agent-river-test-a-map-entry-carries-what-is-beneath-it ()
-  (progn
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root
-                                      :file "dialog/src/main/foo.el"))
-        (agent-river-fold state (list :kind "act" :cwd root
-                                      :file "dialog/src/main/foo.el"))
-        (let ((dialog (seq-find (lambda (e) (equal (plist-get e :name) "dialog"))
-                                (agent-river--map-entries root))))
-          ;; The entry's reading is the aggregate of everything beneath it
-          ;; and never a tally of its own, so the two can never disagree --
-          ;; a file five directories down is still reported under the one
-          ;; name the listing has a line for.
-          (should (equal (plist-get (car (plist-get dialog :parties)) :touches)
-                         2)))))))
-
-(ert-deftest agent-river-test-the-map-shows-two-agents-on-one-directory ()
-  (progn
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (let ((other (agent-river-state "s2" "beta")))
-          (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
-          (agent-river-fold other (list :kind "act" :cwd root :file "common/c.el"))
-          (agent-river-fold other (list :kind "act" :cwd root :file "common/c.el"))
-          (let* ((common (seq-find (lambda (e) (equal (plist-get e :name) "common"))
-                                   (agent-river--map-entries root)))
-                 (parties (plist-get common :parties)))
-            ;; Two agents in one place is the case the map earns its keep
-            ;; on -- and the one thing a dired line has no room to say.
-            (should (equal (mapcar (lambda (p) (plist-get p :party)) parties)
-                           '("beta" "alpha")))
-            (should (equal (plist-get (car parties) :touches) 2))))))))
-
 (ert-deftest agent-river-test-the-map-reads-the-frame-it-is-asked-for ()
-  (progn
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
-        (agent-river-fold state '(:kind "prompt" :text "next"))
-        (agent-river-fold state (list :kind "act" :cwd root
-                                      :file "dialog/src/main/foo.el"))
-        (let ((session (agent-river--map-entries root 'session))
-              (task (agent-river--map-entries root 'task)))
-          ;; The two frames must be genuinely different readings, or the
-          ;; setting that picks between them is deciding nothing.
-          (should (plist-get (seq-find (lambda (e) (equal (plist-get e :name) "common"))
-                                       session)
-                             :parties))
-          (should-not (plist-get (seq-find (lambda (e) (equal (plist-get e :name) "common"))
-                                           task)
-                                 :parties)))))))
-
-(ert-deftest agent-river-test-the-map-still-shows-a-file-that-is-gone ()
-  (progn
-    (agent-river-test--with-tree root
-      (agent-river-test--with-session state
-        (agent-river-fold state (list :kind "act" :cwd root
-                                      :file "deleted/old.el"))
-        (let ((gone (seq-find (lambda (e) (equal (plist-get e :name) "deleted"))
-                              (agent-river--map-entries root))))
-          ;; Activity the map does not show is the one thing it exists not
-          ;; to do, so a path whose top component is gone is listed and
-          ;; marked rather than dropped.
-          (should gone)
-          (should (plist-get gone :missing))
-          (should (plist-get gone :parties)))))))
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (let ((state (agent-river-state "s1" "alpha")))
+      (agent-river-reach "inc:INC-444" "s1")
+      (agent-river-fold state '(:kind "prompt" :text "next"))
+      ;; The two frames must be genuinely different readings, or the setting
+      ;; that picks between them is deciding nothing: the record keeps its
+      ;; line either way and only the name on it goes.
+      (let ((session (agent-river--map-entries "inc:" 'session))
+            (task (agent-river--map-entries "inc:" 'task)))
+        (should (= (length session) (length task)))
+        (should (plist-get (car session) :parties))
+        (should-not (plist-get (car task) :parties))))))
 
 (ert-deftest agent-river-test-a-map-line-is-markdown ()
   (progn
@@ -4481,32 +4222,6 @@ the view looks like once the work has moved on."
     (should (= (plist-get (gethash "a.el" (agent-river-state-task-artifacts state))
                           :writes)
                1))))
-
-(ert-deftest agent-river-test-writes-reach-the-map-rows ()
-  ;; The count has to survive the derivation the rows are built from, or the
-  ;; party row cannot say how much of a name's traffic changed it: reach
-  ;; sums it per party, merging sums it across them, and a directory's
-  ;; answer is its subtree's.
-  (agent-river-test--with-tree root
-    (agent-river-test--with-session state
-      (agent-river-fold state (list :kind "act" :tool "Edit"
-                                    :cwd root :file "common/c.el"))
-      (agent-river-fold state (list :kind "act" :tool "Read"
-                                    :cwd root :file "common/c.el"))
-      (let* ((common (seq-find (lambda (e) (equal (plist-get e :name) "common"))
-                               (agent-river--map-entries root)))
-             (party (car (plist-get common :parties))))
-        (should (= (plist-get party :writes) 1))
-        (should (= (agent-river--map-touches (plist-get common :parties)) 2))
-        (should (string-match-p
-                 "1 write"
-                 (plist-get (car (gethash (expand-file-name "common" root)
-                                          (agent-river--rows-parties
-                                           root (list (list :path (expand-file-name
-                                                                   "common" root)
-                                                            :parties (plist-get
-                                                                      common :parties))))))
-                            :text)))))))
 
 (defun agent-river-test--contributor (name rows &rest extra)
   "Return a contributor called NAME answering ROWS for every node."
@@ -4677,57 +4392,20 @@ the view looks like once the work has moved on."
       ;; by it -- the overview shows several roots at once.
       (should-not (agent-river--map-folded-p "/other/a.el" nil)))))
 
-(ert-deftest agent-river-test-the-step-row-is-present-tense ()
-  ;; The parties say where an agent has been; this says what is happening
-  ;; in the file right now, which after a long task is a different file.
-  (agent-river-test--with-session state
-    (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el" :cwd "/repo"))
-    (let ((rows (gethash "/repo/a.el"
-                         (agent-river--rows-step "/repo" '((:path "/repo/a.el"))))))
-      (should (string-match-p "Edit" (plist-get (car rows) :text))))
-    ;; The turn ends and the row goes: a call that has come back is not in
-    ;; flight, and nothing should read as though it were.
-    (agent-river-fold state '(:kind "idle"))
-    (should-not (gethash "/repo/a.el"
-                         (agent-river--rows-step "/repo" '((:path "/repo/a.el")))))))
-
-(ert-deftest agent-river-test-a-step-lands-on-the-entry-that-contains-it ()
-  ;; The listing has a line per entry of one directory, so a call open on a
-  ;; file below one of them matched no node at all and the row was simply
-  ;; absent -- which is the case it exists for, since work three directories
-  ;; down is the work you cannot see.  It is also what is left of the
-  ;; position marker, and better than it was: an arrow could only point at a
-  ;; line, this names the file.
-  (agent-river-test--with-session state
-    (agent-river-fold state '(:kind "act" :tool "Edit" :file "src/deep/b.el"
-                                    :cwd "/repo"))
-    (let ((rows (gethash "/repo/src"
-                         (agent-river--rows-step "/repo" '((:path "/repo/src"))))))
-      (should (string-match-p "Edit deep/b\\.el" (plist-get (car rows) :text))))
-    ;; The deepest node wins, so a root listed beside a directory inside it
-    ;; does not take a file that belongs to the deeper line -- and where the
-    ;; node *is* the file there is no path left to name.
-    (let ((rows (agent-river--rows-step
-                 "/repo" '((:path "/repo") (:path "/repo/src")
-                           (:path "/repo/src/deep/b.el")))))
-      (should (= (hash-table-count rows) 1))
-      (should (gethash "/repo/src/deep/b.el" rows))
-      (should-not (string-match-p "b\\.el"
-                                  (plist-get (car (gethash "/repo/src/deep/b.el" rows))
-                                             :text))))
-    ;; And a file under none of them lands nowhere rather than on the first.
-    (should (= (hash-table-count
-                (agent-river--rows-step "/repo" '((:path "/repo/docs"))))
-               0))))
-
 (ert-deftest agent-river-test-the-map-header-is-a-name-and-a-count ()
   ;; It used to caption the view as well -- which frame the numbers came
   ;; from.  That is still true and is documented where it is decided; a
   ;; legend redrawn every few seconds on a line that is read once is not
   ;; where a reader looks it up.
-  (let ((header (agent-river--map-header "/repo" nil)))
-    (should (string-match-p "/repo" header))
-    (should-not (string-match-p "frame" header))))
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (let ((header (agent-river--map-header "inc:" nil)))
+      (should (string-match-p "inc" header))
+      (should-not (string-match-p "frame" header)))
+    ;; And the overview is named after how many sections it spans, since no
+    ;; one of them may stand for the rest.
+    (should (string-match-p "2 domains" (agent-river--map-header nil nil 2)))
+    (should (string-match-p "1 domain " (agent-river--map-header nil nil 1)))))
 
 (ert-deftest agent-river-test-the-map-header-counts-the-agents-that-are-left ()
   ;; A name outlives its session on purpose, because the file was still
@@ -4752,44 +4430,45 @@ the view looks like once the work has moved on."
 ;; motion is allowed to stop on and what it does when there is no such line;
 ;; where those lines happen to be drawn is not asserted anywhere.
 
-(defmacro agent-river-test--with-map (root &rest body)
-  "Draw a map of a throwaway tree into a buffer, bind ROOT, and run BODY.
-The plain mode rather than the Markdown one: the grammars are not part of
-the suite's world, and the text -- which is all the motion reads -- is the
-same either way."
-  (declare (indent 1))
-  `(progn
-     (agent-river-test--with-tree ,root
-       (agent-river-test--with-session state
-         (dotimes (_ 7)
-           (agent-river-fold state (list :kind "act" :cwd ,root :file "common/c.el")))
-         (dotimes (_ 2)
-           (agent-river-fold state (list :kind "act" :cwd ,root
-                                         :file "dialog/src/main/foo.el")))
-         (with-temp-buffer
-           (rename-buffer agent-river-map-buffer-name)
-           (agent-river-map-plain-mode)
-           (setq agent-river--map-root ,root)
-           (agent-river--map-draw)
-           ,@body)))))
+(defmacro agent-river-test--with-map (&rest body)
+  "Draw a map of a throwaway domain into a buffer and run BODY.
+
+Zoomed into the one section, so the order of the lines is the listing\'s own
+and not the order two domains happened to sort in.  The plain mode rather
+than the Markdown one: the grammars are not part of the suite\'s world, and
+the text -- which is all the motion reads -- is the same either way."
+  (declare (indent 0))
+  `(agent-river-test--with-domain
+     (agent-river-appeared "inc:INC-1" :domain 'inc :name "Disk full")
+     (agent-river-appeared "inc:INC-2" :domain 'inc :name "Nobody on it")
+     (agent-river-state "s1" "alpha")
+     (agent-river-reach "inc:INC-1" "s1")
+     (agent-river-reach "inc:INC-1" "s1")
+     (with-temp-buffer
+       (rename-buffer agent-river-map-buffer-name)
+       (agent-river-map-plain-mode)
+       (setq agent-river--map-root "inc:")
+       (agent-river--map-draw)
+       ,@body)))
 
 (ert-deftest agent-river-test-map-motion-stops-only-on-a-name ()
-  (agent-river-test--with-map root
+  (agent-river-test--with-map
     ;; A fresh map has point on the header, which names nothing -- RET and
     ;; TAB there would both complain, and pressing one of them is the first
     ;; thing anyone does with a new buffer.
     (should (agent-river--map-entry-line-p))
+    ;; The reached record first: the listing is heaviest first.
     (should (equal (get-text-property (line-beginning-position)
                                       'agent-river-map-name)
-                   "common"))
+                   "inc:INC-1"))
     ;; And point is on the name, not in column zero: column zero is the
     ;; Markdown marker, and a cursor on `#' reads as though the markup were
-    ;; the content.
+    ;; the content.  The name is what the record is called, not its key.
     (should (eq (char-before) ?`))
-    (should (looking-at-p "common/"))))
+    (should (looking-at-p "Disk full"))))
 
 (ert-deftest agent-river-test-map-motion-walks-every-entry ()
-  (agent-river-test--with-map root
+  (agent-river-test--with-map
     ;; From the header: `agent-river--map-scan' starts past the line point is
     ;; on, and a freshly drawn map has already settled it onto the first
     ;; entry.
@@ -4798,45 +4477,45 @@ same either way."
       (while (agent-river--map-scan 1 #'agent-river--map-entry-line-p)
         (push (get-text-property (line-beginning-position) 'agent-river-map-path)
               seen))
-      ;; Outline's own n/p stop at headings only, which in this view means
-      ;; skipping every entry that is not a directory.
-      (should (member (expand-file-name "common" root) seen))
-      (should (member (expand-file-name "dialog" root) seen)))))
+      ;; Outline's own n/p stop at headings only; every line that names
+      ;; something is a stop here, reached or not.
+      (should (member "inc:INC-1" seen))
+      (should (member "inc:INC-2" seen)))))
 
 (ert-deftest agent-river-test-map-entry-motion-skips-the-rows ()
-  (agent-river-test--with-map root
-    (setq agent-river--map-folds
-          (list (cons (expand-file-name "common" root) t)))
+  (agent-river-test--with-map
+    (setq agent-river--map-folds (list (cons "inc:INC-1" t)))
     (agent-river--map-draw)
-    ;; The fine grain stops on the row under `common\''...
+    ;; The fine grain stops on the row under the first record...
     (goto-char (point-min))
     (should (agent-river--map-scan 1 #'agent-river--map-entry-line-p))
     (should (agent-river--map-scan 1 #'agent-river--map-entry-line-p))
     (should (agent-river--map-row-line-p))
-    ;; ... and the coarse one passes over it: a row inherits its node\'s
-    ;; path, which is exactly why it cannot be told apart by the path alone.
+    ;; ... and the coarse one passes over it: a row inherits its node's key,
+    ;; which is exactly why it cannot be told apart by the path alone.
     (goto-char (point-min))
     (should (agent-river--map-scan 1 #'agent-river--map-top-line-p))
     (should (agent-river--map-scan 1 #'agent-river--map-top-line-p))
     (should (equal (get-text-property (line-beginning-position)
                                       'agent-river-map-name)
-                   "dialog"))))
+                   "inc:INC-2"))))
 
 (ert-deftest agent-river-test-map-active-motion-skips-the-quiet ()
-  (agent-river-test--with-map root
+  (agent-river-test--with-map
+    (goto-char (point-min))
     (let (seen)
       (while (agent-river--map-scan 1 #'agent-river--map-active-line-p)
         (push (get-text-property (line-beginning-position)
                                  'agent-river-map-name)
               seen))
-      ;; In a thirty-module repository this is the difference between
-      ;; reading the view and searching it.
-      (should (member "dialog" seen))
-      (should-not (member "docs" seen))
-      (should-not (member "build.gradle.kts" seen)))))
+      ;; With a queue of them this is the difference between reading the view
+      ;; and searching it -- and a record nobody has picked up is deliberately
+      ;; not on this motion, which means "some agent is under this".
+      (should (member "inc:INC-1" seen))
+      (should-not (member "inc:INC-2" seen)))))
 
 (ert-deftest agent-river-test-map-motion-refuses-rather-than-drifts ()
-  (agent-river-test--with-map root
+  (agent-river-test--with-map
     (goto-char (point-max))
     (forward-line -1)
     (let ((before (point)))
@@ -4850,114 +4529,6 @@ same either way."
   ;; opening it is the consent, and killing it is the retirement.
   (should-not (memq #'agent-river--map-observe agent-river-observers))
   (should-not (get-buffer agent-river-map-buffer-name)))
-
-(ert-deftest agent-river-test-map-multi-root-collects-all-roots ()
-  "The multi-root mode collects all unique roots from touched files."
-  (agent-river-test--with-tree root1
-    (let* ((root2 (make-temp-file "agent-river-root2" t)))
-      (unwind-protect
-          (progn
-            ;; Create two separate states, one for each root
-            (let ((state1 (agent-river-state "s1" "alpha"))
-                  (state2 (agent-river-state "s2" "beta")))
-              ;; Register both states
-              (puthash "s1" state1 agent-river-registry)
-              (puthash "s2" state2 agent-river-registry)
-              ;; Touch a file in root1
-              (agent-river-fold state1 (list :kind "act" :cwd root1 :file "common/c.el"))
-              ;; Touch a file in root2
-              (agent-river-fold state2 (list :kind "act" :cwd root2 :file "other.el"))
-              ;; Get all roots
-              (let* ((all-roots (agent-river--map-all-roots 'session))
-                     (root-dirs (mapcar #'car all-roots)))
-                ;; Should have found both roots
-                (should (>= (length all-roots) 2))
-                ;; Both roots should be present in the list
-                (should (member root1 root-dirs))
-                (should (member root2 root-dirs)))))
-        (delete-directory root2 t)))))
-
-(defmacro agent-river-test--with-overview (var &rest body)
-  "Fold one session across two trees, draw the overview, run BODY.
-VAR is bound to the second tree; `agent-river-test--with-tree' names the
-first."
-  (declare (indent 1))
-  `(agent-river-test--with-tree root1
-     (agent-river-test--with-session state
-       (let ((,var (make-temp-file "agent-river-root2" t)))
-         (unwind-protect
-             (progn
-               ;; Two sessions, because that is what two roots are in
-               ;; practice.  One session folding both would only prove that
-               ;; its cwd slot holds whichever it saw last.
-               (agent-river-fold state (list :kind "act" :cwd root1
-                                             :file "common/c.el"
-                                             :path (expand-file-name "common/c.el" root1)))
-               (let ((other (agent-river-state "s2" "beta")))
-                 (agent-river-fold other (list :kind "act" :cwd ,var
-                                               :file "other.el"
-                                               :path (expand-file-name "other.el" ,var))))
-               (with-temp-buffer
-                 (rename-buffer agent-river-map-buffer-name)
-                 (agent-river-map-plain-mode)
-                 (setq agent-river--map-root nil
-                       agent-river--map-folds nil)
-                 (agent-river--map-draw)
-                 ,@body))
-           (delete-directory ,var t))))))
-
-(ert-deftest agent-river-test-the-overview-heads-every-tree-and-favours-none ()
-  (agent-river-test--with-overview root2
-    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-      ;; Naming the heading after one of the trees -- the most recent, as it
-      ;; used to be -- read as though that one were the project and the rest
-      ;; were somewhere inside it.  There is no reference project: the state
-      ;; spans whatever directories the sessions were started in.
-      (should (string-match-p "\\`# 2 roots  ·  " text))
-      ;; Each tree heads its own section, one level under the header.
-      (dolist (root (list root1 root2))
-        (should (string-match-p (concat "^## [^`]*`" (regexp-quote (abbreviate-file-name root)))
-                                text)))
-      ;; And the entries sit under the tree they belong to, not under the
-      ;; first one drawn.
-      (should (string-match-p "^### [^`]*`common/`" text))
-      (should (string-match-p "^### [^`]*`other.el`" text)))))
-
-(ert-deftest agent-river-test-one-tree-needs-no-heading-of-its-own ()
-  (agent-river-test--with-tree root
-    (agent-river-test--with-session state
-      (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"
-                                    :path (expand-file-name "common/c.el" root)))
-      (with-temp-buffer
-        (rename-buffer agent-river-map-buffer-name)
-        (agent-river-map-plain-mode)
-        (setq agent-river--map-root nil agent-river--map-folds nil)
-        (agent-river--map-draw)
-        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-          ;; The header already names it; repeating it as a section heading
-          ;; would indent the whole listing to say nothing.
-          (should (string-match-p (concat "\\`# `" (regexp-quote (abbreviate-file-name root)))
-                                  text))
-          (should (string-match-p "^## [^`]*`common/`" text))
-          (should-not (string-match-p "^### " text)))))))
-
-(ert-deftest agent-river-test-climbing-out-of-a-tree-reaches-the-overview ()
-  (agent-river-test--with-overview root2
-    ;; A touched root is the top of a tree the state knows about.  Climbing
-    ;; past it walked into directories no agent had been near, with the
-    ;; other trees still out of view.
-    (setq agent-river--map-root root2)
-    (agent-river-map-up)
-    (should-not agent-river--map-root)
-    ;; And from the overview there is nowhere further out.
-    (should-error (agent-river-map-up) :type 'user-error)))
-
-;;; Artifacts -- the second subject
-;;
-;; What the table has to be true of before any view reads it.  The rule these
-;; circle is the same one: a fact about the artifact belongs here, a fact about
-;; a session reaching it stays in the session, and neither is allowed to become
-;; a second account of the other.
 
 (defmacro agent-river-test--with-artifacts (&rest body)
   "Run BODY with empty registries, empty observer lists and an empty HUD."
@@ -5423,11 +4994,8 @@ it clears them."
 (ert-deftest agent-river-test-an-unreached-artifact-is-still-listed ()
   (agent-river-test--with-domain
     (agent-river-appeared "inc:INC-501" :domain 'inc :name "INC-501 nobody on it")
-    ;; The opposite of what `agent-river-map-untouched' decides for a tree, and
-    ;; deliberately: there the unreached entries are the rest of the disk, here
-    ;; an unreached record is a thing nobody has picked up, which is the single
-    ;; most important line this view can carry.
-    (should-not agent-river-map-untouched)
+    ;; The single most important line this view can carry: a thing that has
+    ;; arrived and nobody has picked up.
     (should (string-match-p "INC-501 nobody on it" (agent-river-test--domain-map)))))
 
 (ert-deftest agent-river-test-an-artifact-carries-its-own-context-onto-the-map ()
@@ -5473,21 +5041,12 @@ it clears them."
   (agent-river-test--with-domain
     (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
     (agent-river-ended "inc:INC-444")
-    (let* ((entries (agent-river--domain-entries "inc:" 'session)))
+    (let* ((entries (agent-river--map-entries "inc:" 'session)))
       ;; The same rendering a deleted file gets, saying the same thing: this was
       ;; worked on and is over, which is history and stays until somebody says
       ;; otherwise.
       (should (= (length entries) 1))
       (should (plist-get (car entries) :missing)))))
-
-(ert-deftest agent-river-test-a-domain-line-is-identified-by-its-key ()
-  (agent-river-test--with-domain
-    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
-    ;; Expanded, the identity would depend on whatever `default-directory' was,
-    ;; and two maps drawn from different buffers would disagree about which
-    ;; line was which.
-    (should (equal (agent-river--map-node-path "inc:" "inc:INC-444") "inc:INC-444"))
-    (should (equal (agent-river--map-node-path "/repo" "a.el") "/repo/a.el"))))
 
 (ert-deftest agent-river-test-a-domain-sorts-by-what-happened-in-it ()
   (agent-river-test--with-domain
@@ -5960,28 +5519,6 @@ line two" "safe tail"))))
 ;; second reader added later that resolves keys for itself, or a walk of the
 ;; registry added to a draw that already had one.
 
-(ert-deftest agent-river-test-placement-is-derived-once-and-agrees-with-itself ()
-  (agent-river-test--with-artifacts
-    (let ((state (agent-river-state "s1" "alpha")))
-      (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"
-                                      :path "/repo/a.el" :cwd "/repo"))
-      (agent-river-appeared "inc:INC-444" :domain 'inc)
-      (agent-river-fold state '(:kind "touch" :file "inc:INC-444" :cwd "/repo"))
-      (dolist (entry (agent-river--artifact-entries 'session))
-        ;; The entry carries the answer, so no reader recomputes it -- and the
-        ;; cached answer has to be the one the computation gives, or the cache
-        ;; is a second account of the placement rather than the same one.
-        (should (plist-member entry :abs))
-        (should (equal (plist-get entry :abs)
-                       (agent-river--artifact-resolve
-                        (list :cwd (plist-get entry :cwd)
-                              :anchor (plist-get entry :anchor)
-                              :file (plist-get entry :file)))))
-        ;; And a cached nil is an answer, not a miss: every non-file key gets
-        ;; one, which is exactly the set that cannot benefit from recomputing.
-        (should (equal (agent-river--artifact-absolute entry)
-                       (plist-get entry :abs)))))))
-
 (ert-deftest agent-river-test-a-hand-built-entry-still-resolves ()
   (agent-river-test--with-artifacts
     ;; `agent-river--artifact-gone-p' and `agent-river--rows-step' build an
@@ -6086,8 +5623,8 @@ line two" "safe tail"))))
         ;; or reversed it in place would reorder what the next reader sees,
         ;; and the bug would show up as the map drawing a different answer
         ;; depending on which section was rendered first.
-        (agent-river--map-reach "/repo" 'session)
-        (agent-river--map-all-roots 'session)
+        (agent-river--domain-parties 'inc 'session)
+        (agent-river--map-domain-roots 'session)
         (should (equal first snapshot))))))
 
 ;;; What the party aggregation owes
@@ -6097,36 +5634,23 @@ line two" "safe tail"))))
 ;; keep -- and, in the last test, the one thing it must not swallow.
 
 (ert-deftest agent-river-test-parties-come-back-heaviest-first ()
-  ;; The row order is the same reading as the shading, so it cannot contradict
-  ;; it: `agent-river--rows-parties' names them in the order it is handed, and
-  ;; a line shaded for the heaviest party with the lightest named first would
-  ;; be two answers to one question.
-  (progn
-    (agent-river-test--with-session state
-      (let ((other (agent-river-state "s2" "beta")))
-        (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/c.el"))
-        (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/c.el"))
-        (agent-river-fold other '(:kind "act" :cwd "/repo" :file "src/c.el"))
-        ;; alpha has two touches to beta's one, so alpha is heavier.
-        (let ((parties (plist-get (car (agent-river--map-reach "/repo" 'session))
-                                  :parties)))
-          (should (equal (mapcar (lambda (p) (plist-get p :party)) parties)
-                         '("alpha" "beta")))
-          (should (> (plist-get (nth 0 parties) :touches)
-                     (plist-get (nth 1 parties) :touches))))))))
-
-(ert-deftest agent-river-test-nodes-come-back-heaviest-first ()
-  ;; What a directory's reading is aggregated from, and the order the rows
-  ;; under it inherit: an unsorted list would put the party names in
-  ;; whichever order the table happened to hash them.
-  (progn
-    (agent-river-test--with-session state
-      (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/cold.el"))
-      (dotimes (_ 3)
-        (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/hot.el")))
-      (should (equal (mapcar (lambda (n) (plist-get n :rel))
-                             (agent-river--map-reach "/repo" 'session))
-                     '("src/hot.el" "src/cold.el"))))))
+  ;; `agent-river--rows-parties' names them in the order it is handed, so the
+  ;; rows under a record are in the order the aggregation decided and cannot
+  ;; contradict it.
+  (agent-river-test--with-domain
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (let ((state (agent-river-state "s1" "alpha"))
+          (other (agent-river-state "s2" "beta")))
+      (agent-river-reach "inc:INC-444" (agent-river-state-id state))
+      (agent-river-reach "inc:INC-444" (agent-river-state-id state))
+      (agent-river-reach "inc:INC-444" (agent-river-state-id other))
+      ;; alpha has two touches to beta's one, so alpha is heavier.
+      (let ((parties (gethash "inc:INC-444"
+                              (agent-river--domain-parties 'inc 'session))))
+        (should (equal (mapcar (lambda (p) (plist-get p :party)) parties)
+                       '("alpha" "beta")))
+        (should (> (plist-get (nth 0 parties) :touches)
+                   (plist-get (nth 1 parties) :touches)))))))
 
 (defmacro agent-river-spool-test--with (&rest body)
   "Run BODY with an empty spool, an empty table and nothing able to launch."

@@ -88,8 +88,8 @@ ground truth left in it.
 
 The third distinction is the one integrators get wrong. A fact that stops being
 true without an event to say so must not be stored: a pending approval is
-answered by a button in another buffer, a file the map says is there is
-deleted a second later. Fold what happened; query what is.
+answered by a button in another buffer, a file the state records a touch of
+is deleted a second later. Fold what happened; query what is.
 
 ## Artifacts: things that are not files
 
@@ -99,18 +99,19 @@ requested, a build that broke — has no session to hang on, and it matters most
 when *no* agent is running, which is exactly when there is no session to hang
 it on.
 
-So there is a second table, `agent-river-artifacts`, with a fold of its own. A
-non-file **domain** heads a section of its own on the map:
+So there is a second table, `agent-river-artifacts`, with a fold of its own.
+Each **domain** heads a section of the map, and the map is nothing but this
+table:
 
 ```
-# 2 roots  ·  1 agent
-##   ⏿ `Incidents`
-### ▾ ⏿ `INC-444 disk full on db-3`
+# 2 domains  ·  1 agent
+##  ⇄ `inc`
+### ▾  `INC-444 disk full on db-3`
 - severity: P1
 - queue: infra
-- alpha · 0s ago
-###     `INC-501 cert expiring`
-##     `~/src/agent-river`
+- alpha · 2 writes · 0s ago
+###    `INC-501 cert expiring`
+##     `pr`
 ```
 
 Three calls put it there:
@@ -140,8 +141,9 @@ Three calls put it there:
 **Declare before you reach.** A domain is read off the artifact table and
 `file` is what a key is when nobody has said otherwise, so a key reached before
 its record exists *is* a file: `inc:INC-444` resolves against the session's cwd
-and shows up in its tree as a name that is not on disk, which
-`agent-river-forget-gone-files` will then offer to sweep. Declaring later
+as a name that is not on disk, which `agent-river-forget-gone-files` will then
+offer to sweep — and it gets no line on the map, since the map lists records
+and it has none yet. Declaring later
 repairs it — the domain is read at every draw — but the order to write is
 `appeared`, then `reach`.
 
@@ -455,7 +457,7 @@ answer to one question: *what is it about?*
 | react to something arriving | `agent-river-artifact-observers` | an artifact |
 | report what only Emacs can see | `agent-river-note` | a session |
 | report something no session owns | `agent-river-appeared` | an artifact |
-| annotate the map's lines | `agent-river-map-contributors` | a path or key |
+| annotate the map's lines | `agent-river-map-contributors` | an artifact key |
 
 The first four hang off a **subject** — the thing an event is folded onto, of
 which there are exactly two. The last is a view: it is handed something to
@@ -569,9 +571,9 @@ are read when a reader asks that line for them. Nothing a contributor says
 reaches the line itself — the line is the listing, and what can be read straight
 down it is the map's own.
 
-Batch per root — thirty lines with a subprocess each, every TTL, is a fork bomb
-with a view attached — and expect to be **retired on the first error**, like an
-observer.
+Batch per section — thirty lines with a subprocess each, every TTL, is a fork
+bomb with a view attached — and expect to be **retired on the first error**,
+like an observer.
 
 ## Domains
 
@@ -643,6 +645,8 @@ The third is the only one that can place a key in a directory tree and the only
 one that re-splits a worktree from its main checkout. It answers **nil** for a
 key in a non-file domain, which is what every caller already does the right
 thing with — a key that cannot be placed is left alone rather than guessed at.
+Only one thing asks it now (`M-x agent-river-forget-gone-files`): the map used
+to place every key it drew and lists artifact records instead.
 
 ---
 
@@ -732,18 +736,28 @@ text restructure the view watching it.
 
 ## The map (`M-x agent-river-map`)
 
-The view of the artifact tables: one directory listed in full, each entry
-annotated with what has happened *beneath* it, so several agents spread over a
-large repository are visible at once. Who has been in a name, how long ago, and
-what is happening in it right now are rows under it (TAB); the line carries what
-can be read straight down the listing.
+The view of `agent-river-artifacts`: one section per domain, one line per
+record, each annotated with whoever has reached it. **The listing is the table**
+— nothing is read off the disk and nothing here is a path. Who has been on a
+record and how long ago are rows under it (TAB); the line carries what can be
+read straight down the listing. RET on a section zooms into it, `^` comes back
+out, and RET on a record does whatever that record offers (see *Actions*).
 
-Two facts per line, each on its own channel: contention is a marker and
-existence is a strike-through. `n`/`p`, `M-n`/`M-p` and `>`/`<` are three grains
-of motion, shared with the HUD and the approval queue.
+Two facts per line, each on its own channel: contention is a marker and having
+ended is a strike-through. `n`/`p`, `M-n`/`M-p` and `>`/`<` are three grains of
+motion, shared with the HUD and the approval queue — and `>` deliberately does
+*not* stop on a record nobody has reached, because it means "some agent is
+under this".
 
-Nothing drops out of this view by getting old. `M-x agent-river-forget-artifacts`
-is what says the work has landed, and `C` sweeps the files that are gone.
+The single most important line here is the one **nobody has picked up**: an
+unreached record is listed like any other, which is the whole reason this view
+exists. It was a lens over dired for most of its life — one directory listed in
+full, each entry carrying what had been reached beneath it — and that is gone.
+What an agent did to a file has better answers elsewhere: `agent-river-touching`
+for "is anybody else in this file", the block for "what is this session doing".
+
+Nothing drops out of this view by getting old. `M-x agent-river-drop-artifact`
+forgets one record, `M-x agent-river-artifacts-reset` forgets them all.
 
 ## The approval queue (`M-x agent-river-approval-queue`)
 

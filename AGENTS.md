@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (421 tests). -L . is required: the tests require all four .el files.
+# Full suite (396 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -317,7 +317,7 @@ These are load-bearing; the tests enforce most of them.
   What is true of the artifact lives in `agent-river-artifacts`; what is true
   of the *relationship* stays in the session's two tables and is still
   aggregated at read time (`agent-river--artifact-entries`,
-  `agent-river--map-reach`). That split is what keeps the frames out of the
+  `agent-river--domain-parties`). That split is what keeps the frames out of the
   artifact record: `artifacts` versus `task-artifacts` is a property of the
   reaching, not of the thing reached. The artifact table is **not a mirror**
   of the session tables -- a file an agent touched needs no record there, the
@@ -1614,61 +1614,88 @@ child's state rather than take a file name back out of
 
 ### The view of the artifact tables
 
-`agent-river-map` (`*agent-river-map*`) is the lens dired cannot be: one
-directory listed in full, each entry annotated with what has happened
-*beneath* it, so several agents spread over a large repository are visible at
-once. It is the only view of those tables — `agent-river-heat-mode` shaded the
-dired buffer you were already in and is gone, and with it the decay that made
-a reading fade. Everything here reads `agent-river--artifact-entries`, so no
-two parts of the draw can disagree about what the tables say.
+`agent-river-map` (`*agent-river-map*`) is what has arrived and who is on
+it: one section per domain, one line per record of `agent-river-artifacts`,
+each annotated with whoever has reached it. Everything reads
+`agent-river--artifact-entries` and the artifact table, so no two parts of
+the draw can disagree about what the tables say.
+
+**It was a lens over dired for most of its life**, and the removal is the
+thing to understand before changing anything here. One directory was listed
+in full, each entry carried what had been reached beneath it, RET descended
+into the next, and a diffstat read off git said what had changed. All of
+that is gone. What it answered has better answers elsewhere: *is anybody
+else in this file* is `agent-river-touching`, asked by the agent about to
+edit it, which needs no view at all and matches on the basename so a
+worktree and its main checkout are one file; *what is this session doing* is
+the block. What has **no** other answer is the thing that arrived on its own
+— an incident routed to you, a review requested, a build that broke — which
+nothing in the event stream could have produced and which matters most when
+no agent is running. That is what this view is now, and the line it exists
+to carry is the one nobody has picked up.
+
+What went with the trees, in one place so that nothing is reintroduced
+piecemeal: `agent-river--map-all-roots` and `--map-section-roots` (a session
+cwd is not a section any more), `--map-reach`, `--map-listing`,
+`--map-tree-entries`, `agent-river-map-untouched` and its `a`,
+`agent-river-map-ignore`, `agent-river-map-descend`,
+`--map-default-root`, `--map-node-path`, `--parties-by` (one bucket left,
+so the function that chose one is an indirection standing where a `when`
+is), `--rows-step` (a step is on a file and a line is a record, so it could
+never match again), the `:dir` cell on an entry and on a contributor's
+nodes, and the `:abs` derivation in `agent-river--artifact-walk` — nothing
+resolves a key per node any more, and a cache nobody reads is a second
+account waiting to happen. `agent-river-forget-gone-files` lost its `C`
+key with the file lines it was about; the command stays, since the session
+tables still record files.
 
 Four things about the map are load-bearing:
 
-- **There is no reference project, so the map opens on all of them.** The
-  state spans whatever directories the sessions were started in; a heading
-  naming one of them — the most recently seen, as it used to be — reads as
-  though that tree were the project and the others were somewhere inside it.
-  `agent-river--map-root` nil is the overview, and each tree heads its own
-  section (`agent-river--map-all-roots`). Setting it is a *zoom*, which is
-  where RET goes and where `^` comes back from: at a touched root `^` returns
-  to the overview rather than climbing into directories no agent has been
-  near. One tree is drawn without a section heading, since the header already
-  names it and repeating it would indent the listing to say nothing — which is
-  also why a file passes `file` to `agent-river--map-marker` rather than a
-  number, so that pushing entries down a level for the root headings cannot
-  push files into being headings too. Folds are keyed on absolute paths for
-  the same reason: `src` under one root is not `src` under another.
-- **Depth only where there is activity.** A whole tree unfolded is unreadable
-  in a monorepo, so RET descends (`agent-river-map-descend`) rather than
-  widening: one directory is listed and everything reached beneath an entry
-  is aggregated onto that entry's line. A file five directories down used to
-  be drawn under its entry as well, with the rest of its path inline, and
-  that is gone -- the listing is the lines the *listed directory* has, and
-  the way to the file is to descend to it. What it cost was a view of the
-  work without a keystroke; what it bought is that a line means one thing,
-  and that a node's children are its rows and nothing else.
-- **Nothing leaves this view by getting old.** A name stands for as long as
-  the tables say an agent reached it, and the only things that take it away
-  are `agent-river-forget-artifacts`, `agent-river-forget-gone-files` and a
-  new prompt clearing the task frame. There was a floor here once
+- **A section is a domain, and the listing is the table.** There is no
+  per-domain listing function to write: a record carries its own name,
+  whether it has ended and whatever context its producer put on it, and
+  asking a domain to answer those again would be the second account the
+  table exists to avoid. `agent-river--map-root` nil is the overview and
+  each domain heads its own section; setting it is a *zoom*, which is where
+  RET goes on a heading and where `^` comes back from. One domain is drawn
+  without a section heading, since the header already names it and repeating
+  it would indent the listing to say nothing — which is also why a leaf line
+  passes `file` to `agent-river--map-marker` rather than a number, so that
+  pushing records down a level for the section headings cannot push the
+  elision and empty-map lines into being headings too.
+- **A section root is an identity, never a path**
+  (`agent-river--domain-root`, `agent-river--map-domain`). `inc:` is a
+  string built from the domain because everything downstream compares roots
+  with `equal` and puts them on text properties; a line is identified by the
+  artifact key for the same reason. Expanded against `default-directory`,
+  two maps drawn from different buffers would disagree about which line was
+  which.
+- **An unreached record is listed, and that is the opposite of what the tree
+  listing decided.** There the unreached entries were the rest of the disk
+  and swamped the few that mattered, which is what `agent-river-map-untouched`
+  was for; here an unreached record is a thing nobody has picked up, which
+  is the single most important line this view can carry.
+- **Nothing leaves this view by getting old.** A record stands until
+  `agent-river-drop-artifact` or `agent-river-artifacts-reset` takes it
+  away, and a name on it until `agent-river-forget-artifacts` or a new
+  prompt clears the task frame. There was a floor here once
   (`agent-river-map-party-floor`, under an exponential decay): weights
-  approached zero without reaching it, so after an hour every file carried a
+  approached zero without reaching it, so after an hour everything carried a
   name and the floor was what kept a view where everything is marked from
   marking nothing. It is gone with the decay, and the answer to a map that
-  has filled up is now a gesture rather than a half-life — which is the same
-  answer `agent-river-forget-artifacts` already gave for work that has
-  landed, and one fewer number to tune.
+  has filled up is a gesture rather than a half-life.
+
 - **A party that is gone is not counted** (`agent-river--gone-p`,
   `agent-river--gone-parties`, read by the header). Its *name* stays on the
-  lines it reached, because the file was still touched and that does not
+  lines it reached, because the record was still reached and that does not
   stop being true; what goes is the claim that somebody is there. There was
   a present-tense reading on the line once -- `:current`, drawn as an eye in
   the gutter -- and the hard case it kept getting wrong was exactly this
   one: an agent-shell buffer killed, and the marker stayed pinned to one
-  file for as long as the registry held the state. The marker is gone and
-  what is happening now is `agent-river--rows-step`'s to say, which can name
-  the session and the tool where a glyph could only point. Three things to
-  keep:
+  file for as long as the registry held the state. It went, and so did the
+  row that replaced it (`agent-river--rows-step`, which named the session
+  and the tool): a step is a call open on a *file*, and there are no file
+  lines left for it to land on. Three things to keep:
   **gone is narrower than not-active** — `agent-river--active-p` falls back to
   the TTL, which is a guess, and a name is not withdrawn on a guess; the facts
   are a buffer we saw and that has since been killed (`agent-river--shell-hosted`,
@@ -1686,24 +1713,22 @@ Four things about the map are load-bearing:
   (`agent-river--map-header`). It carried the frame the numbers were read
   from — a fact that is true, does not change, and was being redrawn every
   few seconds onto a line that is read once. A legend belongs where the
-  thing is decided (`agent-river-map-scope`), not in the view. What stays is what *moves*: which tree is being shown, and how
-  many agents are in it. That count is of agents that **still exist**
+  thing is decided (`agent-river-map-scope`), not in the view. What stays is
+  what *moves*: which domain is being shown — or how many there are, in the
+  overview, since no one of them may stand for the rest — and how many
+  agents are in it. That count is of agents that **still exist**
   (`agent-river--gone-parties`), not of names on the map — a name outlives
-  its session on purpose, because the file was still touched, so counting
+  its session on purpose, because the record was still reached, so counting
   names would report an audience that has left as though it were still
   there.
-- **A file that is gone is struck through, not dropped**
-  (`agent-river-gone`, set on `:missing`). Removing them was tried first, in
-  two shapes, and both lost something. Dropping a deletion outright throws
-  away the deletion itself, which is a thing the agent *did* — and it would
-  make the map flicker every time a branch switch took files away and put
-  them back. The second shape refused them the position marker instead, and
-  it left an agent whose last act was a deletion named nowhere at all --
-  losing a party off the map is the worse of the two readings. The worry
-  behind both — that a present-tense marker on a vanished file reads as "the
-  agent is here" — was a rendering problem, and it is fixed where it was:
-  struck through, the line says the agent's last move was into a file that
-  has since gone, which is true and worth knowing.
+- **A record that is over is struck through, not dropped**
+  (`agent-river-gone`, set on `:missing` from `agent-river-artifact-gone`).
+  It was worked on and it is over, which is history and stays until somebody
+  says otherwise (`agent-river-drop-artifact`, which leaves the sessions'
+  tables alone — they reached it, and that stays true whatever became of the
+  thing at the other end). The same rendering and the same argument used to
+  apply to a deleted *file* on the tree listing, and dropping those outright
+  was tried and lost the deletion itself, which is a thing the agent did.
 - **A node's rows are contributed; the line is the listing**
   (`agent-river-map-contributors`, `agent-river--map-rows`). The line carries
   what can be read *down* the listing — the fold marker and the contention
@@ -1713,9 +1738,9 @@ Four things about the map are load-bearing:
   be asked for**: every node draws closed with a twisty, and TAB opens it,
   so there is one mechanism rather than two and no disclosure twisty to
   invent. They were enrichment and detail at once — drawn wherever there
-  were any — which in a listing whose entries are mostly files is a row or
-  three beneath every line the map has, so the view read as a stack of rows
-  with names threaded through it. There was a way onto the line itself once
+  were any — which in the tree listing this replaced meant a row or three
+  beneath every line the map had, so the view read as a stack of rows with
+  names threaded through it. There was a way onto the line itself once
   (`:summary`, a fixed-width column), and it went with the diffstat that was
   its only user: a column reserved buffer-wide for something no contributor
   can fill is a column in name only, and what a contributor has to say now
@@ -1762,11 +1787,10 @@ Four things about the map are load-bearing:
 - **Order is declared, not positional** (`:rank`, low first, ties keeping
   the order of `agent-river-map-contributors`). Which contributor was
   registered first is not a statement about which of their rows is worth
-  reading: what a record *is* (`artifact`, rank 0) and what is happening
-  *now* (`step`, 0) outrank who has been there (`parties`, 1). It
-  is also what `agent-river-map-detail-rows` cuts from, where it is set at
-  all — the tail is the least worth keeping rather than whoever was
-  registered last.
+  reading: what a record *is* (`artifact`, rank 0) outranks who has been on
+  it (`parties`, 1). It is also what `agent-river-map-detail-rows` cuts
+  from, where it is set at all — the tail is the least worth keeping rather
+  than whoever was registered last.
 - **Nothing is elided by default** (`agent-river-map-detail-rows` nil). The
   cap was inherited from the elision the file lines had, and the reason did
   not come with it: those were drawn wherever a node was open, where a node
@@ -1776,7 +1800,7 @@ Four things about the map are load-bearing:
   is already held off by the fold. A number still caps, for a contributor
   with more to say than a node can hold.
 - **Rows ride the fine grain only.** `n`/`p` stop on them; `M-n`/`M-p` skip
-  them (`agent-river--map-row-line-p`, since a row inherits its node's path
+  them (`agent-river--map-row-line-p`, since a row inherits its node's key
   and cannot be told apart by the path alone); `>`/`<` pass over them because
   they carry no `agent-river-map-active` — that motion is for finding the
   agents, and a contributor able to put itself on it would be competing for
@@ -1792,25 +1816,25 @@ Four things about the map are load-bearing:
   keymap: it throws measurements away, and a single keystroke in a view
   buffer is the wrong gesture for that.
 - **A deletion is news, and then it is history**
-  (`agent-river-forget-gone-files`, `C` in the map). The strike-through keeps a
-  gone file on the map on purpose — the deletion is a thing the agent did — but
-  after a merge or a cleanup those lines are a list of what used to be there,
-  and only the user knows when that moment came. So it is a command, not a
-  rule. Three things hold it apart from the one above, which is what earns it a
-  key in a view buffer. Its **subject is already gone**, so what is lost is the
-  record of an absence rather than the record of the work. It is **measured
-  against the disk, never against the strike-through**: an entry is also drawn
-  as missing when it was reached through an anchor the listed root has nothing
-  to do with, and that file is elsewhere rather than gone — so such a line
-  stays struck through afterwards, which looks like the command missing one and
-  is the command refusing one. And a key **nothing can place is unplaceable,
+  (`agent-river-forget-gone-files`). It had a key in the map, `C`, on the
+  grounds that its **subject is already gone** — what is lost is the record
+  of an absence rather than the record of the work. The map lists artifact
+  records now and draws no files at all, so the lines it was about are not
+  there and it is an `M-x` command like the one above. The state still
+  records the files, which is why the command stays. Two things hold it. It
+  is **measured against the disk, never against any rendering**: a key
+  reached through an anchor some other tree has nothing to do with is
+  elsewhere rather than gone. And a key **nothing can place is unplaceable,
   not gone** (`agent-river--artifact-gone-p` goes through
   `agent-river--artifact-absolute`, so the anchor wins over the cwd), or a state
   folded without a cwd would have every artifact it ever recorded swept away by
   a command that found none of them. It narrows the same `forget` event with
   `:files` rather than adding a kind of its own: the transition is identical
   and only its subject differs, and a second kind would be a second place for
-  what forgetting means to be decided. It asks first, because nothing undoes it.
+  what forgetting means to be decided. It asks first, because nothing undoes
+  it. It is also the last caller of `agent-river--artifact-absolute`: the map
+  used to place every key it drew, which is what the `:abs` derivation in
+  `agent-river--artifact-walk` existed for, and both went together.
 - **The artifact-side forgets ask and report on the same terms**
   (`agent-river-drop-artifact`, `agent-river-artifacts-reset`). Wholesale
   asks, like the one above and for a sharper version of its reason: a
@@ -1824,30 +1848,9 @@ Four things about the map are load-bearing:
   asking for -- and it reports only when something was removed, since a log
   line saying a record was forgotten is a measurement of something that
   happened.
-- **The listing is filtered to what has been reached**
-  (`agent-river-map-untouched` nil, the default; `a` toggles it for one
-  buffer). Agents spread over several roots turn the full
-  listing into mostly context — every sibling of every tree anyone started a
-  session in, with the handful of lines that carry an agent somewhere among
-  them. What the filter gives up is breadth: a view of only the touched paths
-  says where without saying where that is *relative to* anything, which is
-  what the full listing was for, and non-nil buys it back as the union of
-  disk and state. **Activity the map does not show is the one thing it exists
-  not to do**, so the filter drops an entry for having nothing known about it
-  and never for being absent from disk — `:missing`, an entry the disk does
-  not have (deleted, renamed, or reached through an anchor this root has
-  nothing to do with), is precisely what a disk-shaped filter would have
-  swallowed. An empty listing says which kind of empty it is: a filtered tree
-  full of files nobody has been near would otherwise read as a map that had
-  lost them.
-- **A section need not be a directory** (`agent-river--map-domain`). A
-  non-file domain heads a section of its own,
-  and **the section's listing is the artifact table itself** -- which is why
-  there is no per-domain listing function to write: a record already carries
-  its name, whether it has ended, and whatever context its producer put on
-  it, and asking a domain to answer those again would be the second account
-  that table exists to avoid. Four things it owes. **There is nothing to
-  register** (`agent-river--domain-label`, which is now `symbol-name`). The
+- **Registering a domain is not a thing, and neither is naming one**
+  (`agent-river--domain-label`, which is now `symbol-name`). **There is
+  nothing to register** (`agent-river--domain-label`, which is now `symbol-name`). The
   table that did it, `agent-river-map-domains`, held a `:visit` for RET --
   a second place answering what may be *done* to a thing, which is not the
   domain's to answer once (see the actions section below) -- and then held
@@ -1858,19 +1861,7 @@ Four things about the map are load-bearing:
   was always drawn anyway, because something that has arrived
   must not wait for configuration before it can be seen, which is the failure
   mode of every dashboard that has to be taught about a new source -- and now
-  that holds for its name as well as for its existence. **An
-  unreached record is still listed**, which is the opposite of what
-  `agent-river-map-untouched` decides for a tree and deliberately so: there
-  the unreached entries are the rest of the disk and swamp the few that
-  matter, here an unreached record is a thing nobody has picked up, the
-  single most important line this view can carry. **A line is identified by
-  its key** (`agent-river--map-node-path`), never by an expanded path: expanded, the
-  identity would depend on whatever `default-directory` happened to be, and
-  two maps drawn from different buffers would disagree about which line was
-  which. And **domain roots are appended to the tree roots, never derived
-  with them** (`agent-river--map-section-roots`) -- a domain has no
-  directory, so putting one through the walk that reads the state's roots
-  would ask the disk about a name that is not a path.
+  that holds for its name as well as for its existence.
 - **`>`/`<` does not stop on a record nobody has reached, and that is a
   decision rather than an oversight.** The motion is read off
   `agent-river-map-active`, which is set from the parties, so an incident
@@ -1881,12 +1872,6 @@ Four things about the map are load-bearing:
   with no way to ask either on its own. If this is revisited, the answer is a
   motion of its own, not a widening of this one: the map has three grains
   already and they are separable because each answers exactly one question.
-- **An ended record is struck through, like a gone file** -- `:missing` set
-  from `agent-river-artifact-gone`, saying the same thing for the same
-  reason: it was worked on and is over, which is history and stays until
-  somebody says otherwise (`agent-river-drop-artifact`, which leaves the
-  sessions' tables alone -- they reached it, and that stays true whatever
-  became of the thing at the other end).
 - **The context rows are an ordinary contributor** (`agent-river--rows-artifact`),
   gated on the *lookup* rather than on the section being a domain's: one
   special case fewer, and a record declared against a key the map already
@@ -1896,10 +1881,13 @@ Four things about the map are load-bearing:
   a context, which is what lets a record hold a severity, a body and a URL
   without this file learning about any of them; the rows are escaped like
   every other contributed row, since a context cell is the least of our text
-  there is.
+  there is. It is the only contributor left that is about the subject rather
+  than about who has been on it, which is what the section listing being the
+  artifact table makes of it: the rows say what the record *is*.
+
 Encoding discipline, since there are two facts on a line: contention is a
-marker and existence is a strike-through. There were two more. How heavily a
-name had been reached was drawn as shading, and it went with the decay that
+marker and having ended is a strike-through. There were two more. How heavily
+a name had been reached was drawn as shading, and it went with the decay that
 made it worth watching; what state the work was in was a fixed column read off
 git, and it went with the file lines it was mostly annotating. The
 strike-through is deliberately not a colour: `:missing` used to be drawn in
@@ -1918,12 +1906,12 @@ only where there were several parties to attribute it to, because with one
 party the gutter mark, the row's face and the row's glyph were three
 renderings of one fact about the only name there is. That exception needed a
 rule of its own — decided per node rather than per row, or the gutter's mark
-would read as belonging to whichever rows kept theirs — and the fact it was
-encoding is better said in words: `agent-river--rows-step` names the session,
-the tool and the file it has a call open on, which is what a reader was
-inferring from an arrow. It only became that answer when it stopped needing a
-line of its own to sit on -- a call open on a file below an entry matched no
-node and the row was absent, which is the case the reading exists for.
+would read as belonging to whichever rows kept theirs. What replaced it was a
+row that said the same thing in words (`agent-river--rows-step`: session, tool
+and file), and that went too when the file lines did — a step is a call open
+on a file, and this view has no line for one. **There is no present-tense
+reading on the map any more**, and the right place to add one back is a row,
+not a marker: a row can say who and what, where a glyph can only point.
 
 The rule for colour here generally: inherit a face the theme knows unless the
 value needs a shade no built-in face has. Nothing here does any more. The four
@@ -1952,8 +1940,8 @@ step. Four things the Markdown base forces:
   fontification rather than competing with it.
 - **Markup stays visible** (`markdown-ts-hide-markup` nil). Hiding it is the
   view mode's default and reads better on prose, but here the marker *is* the
-  indentation — hidden, a directory and the files under it start in the same
-  column and the tree stops being one.
+  indentation — hidden, a section and the records under it start in the same
+  column and the structure stops being one.
 - **Names are code spans, fenced and on one line**
   (`agent-river--map-name`). A path is what a code span is for, and inline
   markup does not apply inside one; bare, `foo_bar_baz.el` renders with `bar`
@@ -1985,21 +1973,22 @@ Padding is measured from the whole prefix, not from the name: `## ` and `- `
 are different widths, and measured from the name alone every list item's
 reading sits one column left of every heading's.
 
-Motion is dired's, because the map answers dired's question over a wider
-area. Three grains, and collapsing them loses the one a reader wants: `n`/`p`
-(and the remapped arrow keys) walk every line that names something, rows
-included, `M-n`/`M-p` walk the listing's own entries past an open node's
-rows, and `>`/`<` walk only the lines with agents on them — in a thirty-module repository that last one is the
+Motion is dired's, because the map was a lens over dired for most of its
+life and the gestures outlived the listing. Three grains, and collapsing them
+loses the one a reader wants: `n`/`p` (and the remapped arrow keys) walk
+every line that names something, rows included, `M-n`/`M-p` walk the
+listing's own entries past an open node's rows, and `>`/`<` walk only the
+lines with agents on them — with a queue of records that last one is the
 difference between reading the view and searching it. Three rules hold it
 together:
 
 - **Which lines a motion may stop on is read off text properties, not off the
-  text.** `agent-river-map-path` marks a line that names something (the root
-  heading and the elision line have none, which is what makes them
-  unstoppable-on), `agent-river-map-row` separates a contributed row from the
-  entry it hangs under, and `agent-river-map-active` is set from the parties rather than from the
-  rendered annotation — so a reformatting cannot pull the motion and the
-  reading apart.
+  text.** `agent-river-map-path` marks a line that names something (the
+  header, the elision line and the empty-map line have none, which is what
+  makes them unstoppable-on), `agent-river-map-row` separates a contributed
+  row from the record it hangs under, and `agent-river-map-active` is set
+  from the parties rather than from the rendered annotation — so a
+  reformatting cannot pull the motion and the reading apart.
 - **Point lands on the name** (`agent-river--map-beginning-of-name`), never in
   column zero, where it would sit on the Markdown marker and read as though
   the markup were the content. `agent-river--map-settle-point` runs after every
@@ -2290,9 +2279,14 @@ together:
   word: **subject** is taken, and by the thing most likely to be confused with
   this — two functions can share one and still answer different questions. That
   is exactly the trap here. `agent-river--map-reach` and
-  `agent-river--map-merge-parties` are both about sessions, compute the same
-  arithmetic over the same cell shape, and answer *is this the file the party
-  touched last* versus *is the agent anywhere beneath this directory*. Read as
-  "same subject", the rule licenses folding them together; read as written, it
-  forbids it. `agent-river--parties-by` is what the rule did allow, and the
-  seam beside it is what it did not.
+  `agent-river--map-merge-parties` were both about sessions, computed the
+  same arithmetic over the same cell shape, and answered *what has this party
+  done to this key* versus *what has been done anywhere beneath this
+  directory*. Read as "same subject", the rule licensed folding them
+  together; read as written, it forbade it. The first is gone with the tree
+  listing and `agent-river--parties-by`, which was what the rule *did* allow,
+  went with it: one bucket left is not a shared mechanism, it is a function
+  taking an argument that can only have one value. That is the rule\'s other
+  half arriving later — what licensed the sharing was two callers asking
+  genuinely different questions of one arithmetic, and with one of them gone
+  the sharing had nothing left to be.

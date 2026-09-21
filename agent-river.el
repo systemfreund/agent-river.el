@@ -6083,11 +6083,12 @@ elsewhere -- sweeping it would throw away a measurement about a file that
 still exists.  Such a line therefore stays struck through afterwards,
 which looks like the command missing one and is the command refusing one.
 
-Bound to \\<agent-river-map-mode-map>\\[agent-river-forget-gone-files] in the map, unlike
-`agent-river-forget-artifacts': the subject here is already gone, so what
-is lost is the record of an absence rather than the record of the work.
-It still asks, because a keystroke in a view buffer is easy to hit and
-nothing undoes this."
+It used to be on the map's own keymap, on the grounds that its subject was
+already gone -- what is lost is the record of an absence rather than the
+record of the work.  The map lists artifact records now and no files at
+all, so there is nothing there for this to be about and it is an ordinary
+\\[execute-extended-command] command again.  It asks either way, because
+nothing undoes it."
   (interactive)
   (let ((found nil) (n 0))
     (maphash (lambda (_key state)
@@ -6554,9 +6555,8 @@ asking about a second later.")
 
 Each carries `:party' (`agent-river--party-label'), `:cwd' (the anchor its
 `:file' is relative to), `:file', the cumulative `:touches', `:writes'
-and `:last', and `:abs' -- the key placed on disk.  `:anchor' is the
-real directory for a `:file' the cwd cannot place, and nil for everything
-under it -- see `agent-river--anchor'.
+and `:last'.  `:anchor' is the real directory for a `:file' the cwd cannot
+place, and nil for everything under it -- see `agent-river--anchor'.
 SCOPE is `session' for the whole session, `task' or nil for the current
 task.
 
@@ -6593,28 +6593,24 @@ each caller sorts a list of its own instead."
              (cwd (agent-river-state-cwd state))
              (anchors (agent-river-state-anchors state)))
          (maphash (lambda (path entry)
-                    ;; `:abs' is derived here, once, rather than by each
-                    ;; reader for itself.  That is this function's own promise
-                    ;; one grain finer: a map draw used to resolve every key
-                    ;; several times over and `expand-file-name' is not cheap.
-                    ;; Measured on 2026-09-17 with 5000 artifacts:
-                    ;; `--map-reach' alone took 135 ms, of which around 60 ms
-                    ;; was the same answer computed twice too often.
-                    (let* ((anchor (and anchors (gethash path anchors)))
-                           ;; Resolved from a three-key plist rather than from
-                           ;; the finished one, so the entry is consed once
-                           ;; instead of built and then copied by `append'.
-                           (abs (agent-river--artifact-resolve
-                                 (list :anchor anchor :cwd cwd :file path))))
-                      (push (list :party party
-                                  :cwd cwd
-                                  :anchor anchor
-                                  :file path
-                                  :touches (or (plist-get entry :touches) 0)
-                                  :writes (or (plist-get entry :writes) 0)
-                                  :last (plist-get entry :last)
-                                  :abs abs)
-                            entries)))
+                    ;; The key placed on disk used to be derived here as
+                    ;; `:abs', because the map resolved every key several
+                    ;; times per draw and `expand-file-name' is not cheap --
+                    ;; measured on 2026-09-17 at 5000 artifacts, 60 ms of one
+                    ;; draw was the same answer computed twice too often.  The
+                    ;; map lists artifact records now and resolves nothing, so
+                    ;; the derivation went with the readers that wanted it:
+                    ;; what is left asks `agent-river--artifact-absolute' for
+                    ;; one key at a time (`agent-river--artifact-gone-p'), and
+                    ;; a cache for that is a cache nobody reads.
+                    (push (list :party party
+                                :cwd cwd
+                                :anchor (and anchors (gethash path anchors))
+                                :file path
+                                :touches (or (plist-get entry :touches) 0)
+                                :writes (or (plist-get entry :writes) 0)
+                                :last (plist-get entry :last))
+                          entries))
                   (if (eq scope 'session)
                       (agent-river-state-artifacts state)
                     (agent-river-state-task-artifacts state)))))
@@ -6635,18 +6631,6 @@ file *outside* the cwd to the same shape, and resolving those against the
 cwd used to draw them inside a tree they have nothing to do with; they
 carry an `:anchor' instead, the directory they were really folded from,
 and it wins over the cwd here."
-  (if (plist-member entry :abs)
-      ;; Derived already, by `agent-river--artifact-entries'.  Read with
-      ;; `plist-member' rather than `plist-get': nil is a real answer here --
-      ;; it is what every non-file key gets -- and treating it as a miss would
-      ;; put the whole cost back for exactly the entries that cannot benefit.
-      (plist-get entry :abs)
-    (agent-river--artifact-resolve entry)))
-
-(defun agent-river--artifact-resolve (entry)
-  "Resolve ENTRY's key against its anchor or cwd.
-The body of `agent-river--artifact-absolute', split out so that the cached
-answer and the computed one cannot come apart."
   (let ((cwd (or (plist-get entry :anchor) (plist-get entry :cwd)))
         (file (plist-get entry :file)))
     (and cwd (not (string-empty-p cwd)) file (not (string-empty-p file))
@@ -6659,68 +6643,43 @@ answer and the computed one cannot come apart."
          (eq (agent-river--key-domain file) 'file)
          (expand-file-name file (file-name-as-directory cwd)))))
 
-;;; The map -- the project as a whole, one level at a time
+;;; The map -- what has arrived, and who is on it
 ;;
-;; dired answers "what is in this directory".  This answers the question
-;; that directory cannot: in a repository spread over thirty modules, with
-;; several agents running at once, *where is everyone*.  Derived from the
-;; artifact tables on every redraw, like everything else here, so it
-;; accumulates nothing of its own and cannot drift from the panel.
+;; The view of `agent-river-artifacts': one section per domain, one line per
+;; record, each annotated with whoever has reached it.  Derived from the
+;; tables on every redraw, like everything else here, so it accumulates
+;; nothing of its own and cannot drift from the panel.
 ;;
-;; One level of full breadth, and depth only where there is activity.  A
-;; whole tree unfolded is unreadable in a monorepo; a view of only the
-;; touched paths answers "where" without ever saying where that is relative
-;; to anything else.  So one directory is always listed in full, each entry
-;; carries what has happened beneath it, and RET descends -- the lens is
-;; moved rather than widened.
+;; **The listing is the artifact table.** There is no listing function to
+;; write and nothing is read off the disk: a record carries its own name,
+;; whether it is over, and whatever context its producer put on it, and the
+;; sessions' tables say who has reached it.
 ;;
-;; Placing a key in a real directory tree is the one thing the artifact
-;; tables were built not to do: they are keyed relative to a session's cwd
-;; precisely so that a worktree and its main checkout read as one file.  The
-;; anchor sits beside them in `agent-river-state-cwd', and putting the two
-;; back together is a deliberate act, done here in the view and nowhere in
-;; the fold.
+;; It was a lens over dired for most of its life -- one directory listed in
+;; full, each entry carrying what had been reached beneath it, RET descending
+;; into the next.  That is gone, and what it answered has better answers
+;; elsewhere: what an agent did to a file is the session's own tables, read
+;; by `agent-river-touching' where the question is "is anybody else in this
+;; file" and by the block where it is "what is this session doing".  What
+;; has *no* other answer is the thing that arrived on its own -- an
+;; incident routed to you, a review requested, a build that broke -- which
+;; matters most when no agent is running at all, and which nothing in the
+;; event stream could ever have produced.  That is the whole of what this
+;; view is now, and the queue of what nobody has picked up is the line it
+;; exists to carry.
 ;;
-;; The touch counts say where an agent has *been*, and nothing on a line
-;; says where it *is* -- after a long task those are different places, and
-;; a big enough number is not evidence of the second.  What is happening
-;; now is a row of its own (`agent-river--rows-step'), where it can say
-;; which session and which tool rather than pointing.
+;; Nothing here is a path.  A section root is `inc:', an identity built from
+;; the domain, and a line is the artifact key itself -- so there is no
+;; placing, no anchor and no cwd on this side any more.  Zooming is by
+;; section (RET on a heading, `^' back out) rather than by directory.
 
 (defcustom agent-river-map-scope 'session
-  "Which artifact frame the map is read from.
+  "Which artifact frame the parties on a map line are read from.
 
-`session' rather than `task', because the map is opened to find out where
-everyone has been working: a frame cleared by every prompt would blank
-half of it each time an agent was given its next instruction."
+`session' rather than `task', because the map is opened to find out who
+has been on a record: a frame cleared by every prompt would drop half the
+names each time an agent was given its next instruction."
   :type '(choice (const task) (const session)))
-
-(defcustom agent-river-map-ignore
-  '("\\`\\.git\\'" "\\`\\.#" "\\`#" "~\\'" "\\`\\.DS_Store\\'")
-  "Entries the map leaves out of a listing, as regexps on the bare name.
-Only the listing: an entry dropped here that an agent has nonetheless
-touched still appears, because activity the map does not show is the one
-thing it exists not to do."
-  :type '(repeat regexp))
-
-(defcustom agent-river-map-untouched nil
-  "Whether the map lists entries no agent has reached.
-
-Nil -- the default -- lists only what has been touched.  Agents spread
-over several roots turn the full listing into mostly context: every
-sibling directory of every tree anyone started a session in, with the
-handful of lines that carry an agent somewhere among them.  Filtered, the
-map is a list of where the work is, which is the question it is opened
-with.
-
-This never hides activity, which is the one thing the map exists not to
-do: an entry is dropped only when nothing has been reached beneath it, so
-a `:missing' entry -- known to the state and not to the disk -- always
-stays.  What is lost is the context around the work: which siblings a
-touched directory has, and how much of a tree nobody is in.  Set non-nil
-to get that back, or press \\[agent-river-map-toggle-untouched] in the map,
-which sets it for that buffer alone."
-  :type 'boolean)
 
 (defcustom agent-river-map-refresh-interval 3
   "Seconds between map redraws while anything is still moving.
@@ -6733,13 +6692,12 @@ dirt is worth a redraw."
   :type 'number)
 
 (defcustom agent-river-map-contended-marker "⇄"
-  "Marker for an entry more than one agent is working in.
+  "Marker for a record more than one agent has reached.
 
-A marker rather than a colour.  The listing already spends colour on
-what is gone and on what git says is different, and encoding a third,
-unrelated fact the same way leaves a reader unable to say which of them
-any given colour means.  This is also the thing most worth being able to
-scan a whole listing for."
+A marker rather than a colour.  The listing already spends colour on what
+is over, and encoding a second, unrelated fact the same way leaves a
+reader unable to say which of them any given colour means.  This is also
+the thing most worth being able to scan a whole listing for."
   :type 'string)
 
 (defcustom agent-river-map-open-marker "▾"
@@ -6934,36 +6892,72 @@ which is precisely backwards for the case this exists for."
 (defun agent-river--domain-parties (domain scope)
   "Return a hash of artifact key to the parties that reached it, in DOMAIN.
 
-The same derivation `agent-river--map-reach\' makes for a directory, over
-the same entries and with the same floor -- `agent-river--parties-by\' is
-where both of those now live.  What is left here is the whole of what a
-domain changes: an artifact key is already the whole of its own name, so
-there is nothing to relativise."
-  (agent-river--parties-by
-   (lambda (entry)
-     (let ((key (plist-get entry :file)))
-       (when (and key (eq (agent-river--key-domain key) domain))
-         key)))
-   scope))
+Heaviest first within a key.  The whole of the aggregation now: there was
+a `agent-river--parties-by\' between this and the walk, taking a function
+that said which key an entry counted under, because a directory tree
+counted under a path relative to its root and a domain counts under the
+key itself.  With the trees off the map there is one bucket left, and a
+function to choose it with is an indirection standing where a `when\' is.
 
-(defun agent-river--domain-entries (root &optional scope)
-  "Return ROOT's listing when ROOT is a domain.
+SCOPE is `session\' or `task\', which decides nothing here beyond which of
+the two frames the entries were walked from."
+  (let ((by-key (make-hash-table :test 'equal)))
+    (dolist (entry (agent-river--artifact-entries scope))
+      (let ((key (plist-get entry :file)))
+        (when (and key (eq (agent-river--key-domain key) domain))
+          (let* ((parties (or (gethash key by-key)
+                              (puthash key (make-hash-table :test 'equal) by-key)))
+                 (party (plist-get entry :party))
+                 (cell (gethash party parties)))
+            (puthash party
+                     (list :touches (+ (or (plist-get cell :touches) 0)
+                                       (plist-get entry :touches))
+                           :writes (+ (or (plist-get cell :writes) 0)
+                                      (or (plist-get entry :writes) 0))
+                           :last (agent-river--map-later
+                                  (plist-get cell :last) (plist-get entry :last)))
+                     parties)))))
+    (let ((out (make-hash-table :test 'equal)))
+      (maphash
+       (lambda (key parties)
+         (let (plists)
+           (maphash (lambda (party cell)
+                      (push (list :party party
+                                  :touches (plist-get cell :touches)
+                                  :writes (plist-get cell :writes)
+                                  :last (plist-get cell :last))
+                            plists))
+                    parties)
+           (puthash key (sort plists (lambda (a b)
+                                       (> (plist-get a :touches)
+                                          (plist-get b :touches))))
+                    out)))
+       by-key)
+      out)))
 
-The shape `agent-river--map-entries' returns, so that the draw below is
-one loop rather than two: a section is a section, and the only thing a
-domain changes is where its lines came from.
+(defun agent-river--map-entries (root &optional scope)
+  "Return the records ROOT's section lists, heaviest first.
 
-Every record in the domain, whether or not any agent has reached it.  That
-is the opposite of what `agent-river-map-untouched' decides for a tree, and
-deliberately so: there the unreached entries are the rest of the disk and
-swamp the few that matter, here an unreached record is a thing that has
-arrived and nobody has picked up, which is the single most important line
-this view can carry.
+One plist per record: `:name' the key, `:shown' what to call it, `:parties'
+whoever has reached it, `:missing' whether it has ended, `:last' when
+anything last happened to it.
 
-`:missing' is the record having ended, which draws it struck through --
-the same rendering a deleted file gets, saying the same thing: this was
-worked on and is over, which is history and worth keeping on screen until
-somebody says otherwise.
+**The listing is the artifact table itself**, which is why there is no
+listing function beside this one: a record already carries its name,
+whether it is over and whatever context its producer put on it.  The map
+used to list directories as well, reading the disk for what was in them
+and annotating each entry with what had been reached beneath it, and it is
+gone -- a file is a thing an agent *did* something to, and the session's
+own tables say that already; what this view is for is the thing that
+arrived on its own and has nobody on it yet.
+
+Every record in the domain, whether or not any agent has reached it: an
+unreached record is a thing nobody has picked up, which is the single most
+important line this view can carry.
+
+`:missing' is the record having ended, which draws it struck through: this
+was worked on and is over, which is history and worth keeping on screen
+until somebody says otherwise.
 
 Ordered by touch count and then by recency, so the ones being worked on
 rise and a queue with nothing happening in it is in the order things
@@ -6976,13 +6970,10 @@ arrived."
        (lambda (key artifact)
          (when (eq (agent-river-artifact-domain artifact) domain)
            (push (list :name key
-                       :dir nil
                        :parties (gethash key parties)
                        :missing (and (agent-river-artifact-gone artifact) t)
                        ;; What the line shows, where the key is machinery and
-                       ;; the name is what a human calls it.  A directory entry
-                       ;; has no such split -- its name *is* its key -- which is
-                       ;; why this is the one field a domain adds.
+                       ;; the name is what a human calls it.
                        :shown (agent-river-artifact-name artifact)
                        :last (agent-river-artifact-last artifact))
                  entries)))
@@ -7037,121 +7028,6 @@ the lookup misses for every ordinary line on the map."
           (when rows (puthash key (nreverse rows) table)))))
     table))
 
-(defun agent-river--map-section-roots (&optional scope)
-  "Return every section the map draws, newest first.
-
-Two readings, and they are appended rather than derived together.
-`agent-river--map-all-roots' is the state's own answer to which directory
-trees the agents are in; a domain has no directory at all, so putting one
-through that walk would ask the disk about a name that is not a path.
-Sorted together afterwards, because what a reader wants at the top is
-whatever moved last, whichever kind of section it was."
-  (let ((result (agent-river--map-all-roots scope)))
-    (dolist (cell (agent-river--map-domain-roots scope))
-      (push cell result))
-    (agent-river--map-by-last result)))
-
-(defun agent-river--map-all-roots (&optional scope)
-  "Return every directory tree the agents have touched, newest first.
-
-A root is a session's cwd, or -- for a file outside it -- the `:anchor'
-that says where the file really is.  Taking the cwd alone put every stray
-under whichever project happened to be current, which is the whole reason
-the anchor is folded: a session editing one file under ~/.claude has two
-roots, not one, and a view that shows a single root is hiding the second.
-Roots are sorted by the most recent touch within them."
-  (let ((roots (make-hash-table :test 'equal)))
-    (dolist (entry (agent-river--artifact-entries scope))
-      (let ((root (or (plist-get entry :anchor) (plist-get entry :cwd))))
-        (when (and root (not (string-empty-p root)))
-          (puthash root
-                   (agent-river--map-later
-                    (gethash root roots)
-                    (plist-get entry :last))
-                   roots))))
-    ;; Convert to a sorted list: most recent first
-    (let (result)
-      (maphash (lambda (root last-time)
-                 (push (cons root last-time) result))
-               roots)
-      (agent-river--map-by-last result))))
-
-(defun agent-river--parties-by (bucket &optional scope)
-  "Return a hash of key to party plists, heaviest first.
-
-BUCKET is called with one entry of `agent-river--artifact-entries\=' and answers
-the key it counts under, or nil -- \"not in this view\".
-
-What the two callers share: a directory tree counts under a path relative
-to its root, a domain section counts under the artifact key itself, and
-the arithmetic over the entries is the same either way.
-
-`agent-river--map-merge-parties\=' is deliberately not built on this. It
-merges over *nodes* rather than over entries -- a directory\='s reading is
-the aggregate of what lies beneath it -- which is the same arithmetic
-answering a different question."
-  (let* ((by-key (make-hash-table :test 'equal))
-         (entries (agent-river--artifact-entries scope)))
-    (dolist (entry entries)
-      (let ((key (funcall bucket entry)))
-        (when key
-          (let* ((last (plist-get entry :last))
-                 (party (plist-get entry :party))
-                 (parties (or (gethash key by-key)
-                              (puthash key (make-hash-table :test 'equal) by-key)))
-                 (cell (gethash party parties)))
-            (puthash party
-                     (list :touches (+ (or (plist-get cell :touches) 0)
-                                       (plist-get entry :touches))
-                           :writes (+ (or (plist-get cell :writes) 0)
-                                      (or (plist-get entry :writes) 0))
-                           :last (agent-river--map-later (plist-get cell :last) last))
-                     parties)))))
-    (let ((out (make-hash-table :test 'equal)))
-      (maphash
-       (lambda (key parties)
-         (let (plists)
-           (maphash (lambda (party cell)
-                      (push (list :party party
-                                  :touches (plist-get cell :touches)
-                                  :writes (plist-get cell :writes)
-                                  :last (plist-get cell :last))
-                            plists))
-                    parties)
-           (puthash key (sort plists (lambda (a b)
-                                       (> (plist-get a :touches)
-                                          (plist-get b :touches))))
-                    out)))
-       by-key)
-      out)))
-
-(defun agent-river--map-reach (root &optional scope)
-  "Return what the agents have reached inside ROOT, deepest detail kept.
-
-A list of plists, heaviest first, each carrying `:rel' -- the file's path
-relative to ROOT -- and `:parties', an alist-like list of plists with
-`:party', `:touches', `:writes' and `:last'.
-
-The aggregation itself is `agent-river--parties-by'; what is left here is
-what makes this view the view it is -- whether ROOT holds a path at all,
-and what the path is called once ROOT is taken off the front."
-  (let* ((prefix (file-name-as-directory (expand-file-name root)))
-         (by-rel (agent-river--parties-by
-                  (lambda (entry)
-                    ;; `--artifact-absolute' rather than the place, so a key in
-                    ;; another domain is out of this view by construction
-                    ;; rather than by failing to match the prefix.
-                    (let ((abs (agent-river--artifact-absolute entry)))
-                      (when (and abs (string-prefix-p prefix abs))
-                        (substring abs (length prefix)))))
-                  scope))
-         nodes)
-    (maphash (lambda (rel parties) (push (list :rel rel :parties parties) nodes))
-             by-rel)
-    (sort nodes (lambda (a b)
-                  (> (agent-river--map-touches (plist-get a :parties))
-                     (agent-river--map-touches (plist-get b :parties)))))))
-
 (defun agent-river--map-merge-parties (nodes)
   "Return the parties of NODES summed into one list, heaviest first.
 How a directory's reading is made: it is the aggregate of what lies
@@ -7175,86 +7051,8 @@ it can never disagree about who has been where."
       (maphash (lambda (_party cell) (push cell out)) table)
       (sort out (lambda (a b) (> (plist-get a :touches) (plist-get b :touches)))))))
 
-(defun agent-river--map-listing (root)
-  "Return ROOT's own directory entries, directories first, ignores dropped.
-Unreadable or missing, the answer is no entries rather than an error: the
-map still has the reached paths to show, and a root that went away should
-not take the view with it."
-  (let (dirs files)
-    (dolist (name (ignore-errors (directory-files root nil nil t)))
-      (unless (or (member name '("." ".."))
-                  (seq-some (lambda (re) (string-match-p re name))
-                            agent-river-map-ignore))
-        (if (file-directory-p (expand-file-name name root))
-            (push name dirs)
-          (push name files))))
-    (append (sort dirs #'string<) (sort files #'string<))))
-
-(defun agent-river--map-entries (root &optional scope)
-  "Return ROOT's listing, annotated with what the agents have done in it.
-
-One plist per entry in listing order -- directories first -- carrying
-`:name', `:dir', `:parties' and `:missing'.  `:parties' is the aggregate
-of everything reached beneath the entry, which is what gives the line one
-reading rather than a tally of its own.
-
-The listing is what is on disk and what has been reached, and it is
-filtered to the second unless `agent-river-map-untouched' says otherwise.
-
-`:missing' marks an entry the disk does not have -- deleted, renamed, or
-reached through an anchor this root has nothing to do with.  Showing it
-anyway is the point: an artifact whose top component is gone would
-otherwise be activity the map silently drops, and that is also why the
-filter is written as \"nothing known about it\" rather than \"is not on
-disk\" -- the two coincide for an inert entry and come apart for exactly
-the entries that matter."
-  (if (agent-river--map-domain root)
-      (agent-river--domain-entries root scope)
-    (agent-river--map-tree-entries root scope)))
-
-(defun agent-river--map-tree-entries (root &optional scope)
-  "Return ROOT's listing when ROOT is a directory.  See `agent-river--map-entries'."
-  (let* ((reach (agent-river--map-reach root scope))
-         (grouped (make-hash-table :test 'equal))
-         (deep (make-hash-table :test 'equal))
-         (names (agent-river--map-listing root))
-         entries)
-    ;; Group the reached paths by the entry the listing has a line for --
-    ;; the top component -- so a file five directories down is still
-    ;; reported under the one name that is on screen.  `deep' remembers that
-    ;; there was something under it, which is the only thing left that can
-    ;; say an entry the disk has lost was a directory.
-    (dolist (node reach)
-      (let* ((rel (plist-get node :rel))
-             (slash (string-search "/" rel))
-             (top (if slash (substring rel 0 slash) rel)))
-        (when slash (puthash top t deep))
-        (push (list :parties (plist-get node :parties)) (gethash top grouped))))
-    (dolist (name names)
-      (let ((under (gethash name grouped)))
-        (remhash name grouped)
-        (push (list :name name
-                    :dir (file-directory-p (expand-file-name name root))
-                    :parties (agent-river--map-merge-parties under))
-              entries)))
-    (let (orphans)
-      (maphash (lambda (name under)
-                 (push (list :name name
-                             :dir (and (gethash name deep) t)
-                             :parties (agent-river--map-merge-parties under)
-                             :missing t)
-                       orphans))
-               grouped)
-      (let ((all (append (nreverse entries)
-                         (sort orphans (lambda (a b)
-                                         (string< (plist-get a :name)
-                                                  (plist-get b :name)))))))
-        (if agent-river-map-untouched
-            all
-          (seq-filter (lambda (entry) (plist-get entry :parties)) all))))))
-
 (defconst agent-river-map-buffer-name "*agent-river-map*"
-  "Name of the project map buffer.")
+  "Name of the artifact map buffer.")
 
 (defvar-local agent-river--map-root nil
   "The directory the map buffer is currently showing.
@@ -7344,7 +7142,6 @@ has more to say than a node can hold."
 
 (defvar agent-river-map-contributors
   (list (list :name 'parties :read #'agent-river--rows-parties)
-        (list :name 'step :read #'agent-river--rows-step)
         (list :name 'artifact :read #'agent-river--rows-artifact))
   "What may add rows under the map's nodes, in the order they are drawn.
 
@@ -7367,10 +7164,8 @@ sets none goes on being placed by where it was registered.  It is also
 what `agent-river-map-detail-rows\=' cuts from where it is set at all: the
 tail is the least worth keeping rather than whoever came last.
 
-NODES are the lines about to be drawn, each `:path\=', `:dir\=' and
-`:parties\=', so a contributor can answer for a directory as well as a file
-and can decide for itself whether its rows aggregate -- the parties\=' do,
-a list of diagnostics does not.
+NODES are the lines about to be drawn, each `:path\=' -- the artifact key --
+and `:parties\='.
 
 Two functions rather than one because the redraw runs on a timer and must
 never wait: `:read\=' is synchronous and answers from whatever the
@@ -7553,96 +7348,21 @@ line is ordered by and cannot contradict it."
         (when rows (puthash (plist-get node :path) rows table))))
     table))
 
-(defun agent-river--rows-step (_root nodes)
-  "Return a row for any of NODES a session has a tool call open under.
-
-The one row here that is present tense, which is why it is a second sort
-rather than more of the first: the parties above it say where an agent has
-*been*, this says what is happening right now, and after a long task those
-are different statements about different moments.  It is also what is left
-of the position marker the gutter used to carry, and better than it was:
-an arrow could only point at a line, this names the session, the tool and
-the file.
-
-Attached to the *containing* node, not only to a node that is the file
-itself, and named relative to it.  The listing has a line per entry of one
-directory, so a call open on a file below that entry matched nothing and
-the row was simply absent -- which is exactly the case it exists for, since
-work three directories down is the work you cannot see.  The longest node
-that is a prefix of the file wins, so a call lands on one line rather than
-on every ancestor of it.
-
-Read from the sessions rather than from the node, because a step in
-flight is not in the artifact tables at all -- it is the call that has not
-come back yet."
-  (let ((table (make-hash-table :test 'equal)))
-    (maphash
-     (lambda (_id state)
-       (let ((step (agent-river-state-step state)))
-         (when (and step (plist-get step :file)
-                    (agent-river--state-working-p state))
-           (let* ((abs (agent-river--artifact-absolute
-                        (list :cwd (agent-river-state-cwd state)
-                              :file (plist-get step :file))))
-                  (node (and abs (agent-river--step-node abs nodes))))
-             (when node
-               (puthash node
-                        (append (gethash node table)
-                                (list (list :key (concat "step/" (agent-river-state-id state))
-                                            ;; Ahead of the rest: it is the
-                                            ;; only row about now, and it is
-                                            ;; also the one that stops being
-                                            ;; true while you read it.
-                                            :rank 0
-                                            :face 'agent-river-act
-                                            :text (format "%s: %s %ssince %s"
-                                                          (agent-river--party-label state)
-                                                          (or (plist-get step :tool) "?")
-                                                          (if (equal node abs)
-                                                              ""
-                                                            (concat
-                                                             (substring
-                                                              abs (1+ (length node)))
-                                                             " "))
-                                                          (agent-river--ago
-                                                           (plist-get step :at))))))
-                        table))))))
-     agent-river-registry)
-    table))
-
-(defun agent-river--step-node (abs nodes)
-  "Return the path in NODES that ABS is in, or nil when none of them is.
-
-The node itself where the listing has a line for the file, and the entry
-it falls under otherwise.  The longest match rather than the first, so a
-root listed beside a directory inside it does not take a file that belongs
-to the deeper line."
-  (let (best)
-    (dolist (node nodes)
-      (let ((path (plist-get node :path)))
-        (when (and path
-                   (or (equal path abs)
-                       (string-prefix-p (file-name-as-directory path) abs))
-                   (> (length path) (length (or best ""))))
-          (setq best path))))
-    best))
-
 (defun agent-river--map-marker (level)
   "Return the Markdown that opens a map line at LEVEL.
 
-Directories are headings and files are list items, which is what each of
-them is: a heading has something under it and folds, a leaf does not.
-Making every file a level-3 heading instead would set the whole listing in
-the heading face and leave the structure saying that a file contains the
-lines after it.  So a file passes `file' rather than a number: the
-overview pushes the entries down a level to make room for the root
-headings, and a file that took its level from its entry would have
-followed them into being a heading.
+A record is a heading, because it has something under it and folds: the
+rows a contributor puts there.  A line with nothing under it ever passes
+`file' rather than a number and comes out a list item -- the elision line
+and the empty-map line, which must not be headings that swallow whatever
+follows them.  The overview pushes the records down a level to make room
+for the section headings, which is why a number is the wrong thing for a
+line that is a leaf whatever level it is drawn at.
 
 The markup is left visible.  Hiding it is `markdown-ts-view-mode's own
 default and it looks better on prose, but here the marker is the
-indentation -- hidden, a directory and the files under it start in the
-same column and the tree stops being one."
+indentation -- hidden, a section and the records under it start in the
+same column and the structure stops being one."
   (pcase level (1 "# ") (2 "## ") (3 "### ") (_ "- ")))
 
 (defun agent-river--map-line (level name parties &optional missing rows)
@@ -7749,35 +7469,19 @@ next redraw, which is not a fold."
   (let ((cell (assoc path agent-river--map-folds)))
     (if cell (cdr cell) default)))
 
-(defun agent-river--map-node-path (root name)
-  "Return what identifies the line NAME draws under ROOT.
+(defun agent-river--map-nodes (_root entries)
+  "Return the lines ENTRIES will draw, as nodes for a contributor.
 
-Under a directory that is the absolute file name, which is what the folds,
-the contributors and `agent-river--map-here' have always compared.  Under a
-domain it is the artifact key, which is already an identity and must not be
-expanded into one -- `expand-file-name' would hand back a path under
-whatever `default-directory' happened to be, and two maps drawn from
-different buffers would then disagree about which line was which."
-  (if (agent-river--map-domain root)
-      name
-    (expand-file-name name root)))
+Each is `:path\=' -- the artifact key, which is its identity and never a
+path to expand -- and `:parties\='.  Every line is included whether or not
+it is open: a contributor is asked once per draw for the whole section,
+and asking again per entry would put its work behind a keystroke."
+  (mapcar (lambda (entry)
+            (list :path (plist-get entry :name)
+                  :parties (plist-get entry :parties)))
+          entries))
 
-(defun agent-river--map-nodes (root entries)
-  "Return the lines ENTRIES will draw under ROOT, as nodes for a contributor.
-
-Each is `:path\=', `:dir\=' and `:parties\='.  Every line is included whether
-or not it is open: a contributor is asked once per draw for the whole
-root, and asking again per entry would put its work behind a keystroke."
-  (let (nodes)
-    (dolist (entry entries)
-      (let ((path (agent-river--map-node-path root (plist-get entry :name))))
-        (push (list :path path
-                    :dir (plist-get entry :dir)
-                    :parties (plist-get entry :parties))
-              nodes)))
-    (nreverse nodes)))
-
-(defun agent-river--map-header (root entries &optional roots)
+(defun agent-river--map-header (root entries &optional sections)
   "Return the map's own heading for ROOT, given its ENTRIES.
 
 The name of what is being shown, and how many agents are in it.  It used
@@ -7788,15 +7492,15 @@ read once.  The fact still holds and is documented where it is decided
 it up.
 
 The count is of agents that still exist, not of names on the map.  A name
-outlives its session on purpose, because the file was still touched and
+outlives its session on purpose, because the record was still reached and
 that stays true -- so counting names would report an audience that has
 left as though it were still there, which is the one thing this number is
 for.
 
-ROOT is nil in the overview, which spans ROOTS trees and has no one path
-to be named after.  Titling it with any of them -- the most recent, say --
-is what this replaced: the heading then read as though that tree were the
-project and the others were somewhere inside it."
+ROOT is nil in the overview, which spans SECTIONS domains and has no one
+of them to be named after.  Titling it with any of them -- the most
+recent, say -- is what this replaced: the heading then read as though that
+one were the subject and the others were somewhere inside it."
   (let* ((gone (agent-river--gone-parties))
          (parties (seq-remove
                    (lambda (party) (gethash (plist-get party :party) gone))
@@ -7805,21 +7509,19 @@ project and the others were somewhere inside it."
                               (list :parties (plist-get entry :parties)))
                             entries)))))
     (concat (agent-river--map-marker 1)
-            (agent-river--map-mark (cond
-                                    ((null root) (format "%d roots" (or roots 0)))
-                                    ;; Through `agent-river--map-name' like
-                                    ;; the tree below it: a label is a name
-                                    ;; and the header is the one place a
-                                    ;; domain's was going in bare, which both
-                                    ;; rendered it differently from every
-                                    ;; other heading and left the one name
-                                    ;; here that nothing had fenced.
-                                    ((agent-river--map-domain root)
-                                     (agent-river--map-name
-                                      (agent-river--domain-label
-                                       (agent-river--map-domain root))))
-                                    (t (agent-river--map-name
-                                        (abbreviate-file-name root))))
+            (agent-river--map-mark (if root
+                                       ;; Through `agent-river--map-name' like
+                                       ;; the lines below it: a label is a
+                                       ;; name, and the header is the one
+                                       ;; place one was going in bare, which
+                                       ;; both rendered it differently from
+                                       ;; every other heading and left the one
+                                       ;; name here that nothing had fenced.
+                                       (agent-river--map-name
+                                        (agent-river--domain-label
+                                         (agent-river--map-domain root)))
+                                     (format "%d domain%s" (or sections 0)
+                                             (if (= (or sections 0) 1) "" "s")))
                                    'agent-river-prompt)
             (if parties
                 (format "  ·  %d agent%s" (length parties)
@@ -7877,26 +7579,18 @@ nothing."
       (with-current-buffer buffer
         (let* ((here (agent-river--map-here))
                (inhibit-read-only t)
-               ;; One walk of the registry for the whole draw.  The listing,
-               ;; the roots and every domain section are readings of one set
-               ;; of artifacts, and taking that set three times over is three
-               ;; chances for them to disagree as well as three times the
-               ;; work: measured on 2026-09-17 at 5000 artifacts, a draw
-               ;; spent about 30 ms re-walking.
+               ;; One walk of the registry for the whole draw.  Every section
+               ;; is a reading of one set of artifacts, and taking that set
+               ;; per section is as many chances for them to disagree as it is
+               ;; times the work: measured on 2026-09-17 at 5000 artifacts, a
+               ;; draw spent about 30 ms re-walking.
                (agent-river--artifact-memo (cons 'none nil))
-               ;; And the reading taken *of* that walk, on the same terms:
-               ;; which roots are domain sections.  A pure function of what
-               ;; the box above holds, asked once per section, and thrown
-               ;; away with the draw.
+               ;; And the reading taken *of* the artifact table on the same
+               ;; terms: which domains are in play at all.
                (agent-river--section-memo (cons nil nil))
-               (sections (agent-river--map-section-roots agent-river-map-scope))
                (roots (or (and agent-river--map-root (list agent-river--map-root))
-                          (mapcar #'car sections)
-                          ;; Nothing folded yet.  Showing where this Emacs
-                          ;; happens to be beats an empty buffer: the listing
-                          ;; is still a listing before any agent has reached
-                          ;; into it.
-                          (list (agent-river--map-default-root))))
+                          (mapcar #'car (agent-river--map-domain-roots
+                                         agent-river-map-scope))))
                (sections (mapcar (lambda (root)
                                    (let ((entries (agent-river--map-entries
                                                    root agent-river-map-scope)))
@@ -7916,17 +7610,26 @@ nothing."
                     (agent-river--map-header (car (car sections))
                                              (nth 1 (car sections))))
                   "\n")
+          ;; Nothing has been declared.  Said outright rather than left as a
+          ;; blank buffer, because the two read alike and only one of them is
+          ;; this view working: what it is waiting for is a producer, and a
+          ;; reader who has not wired one up needs to be told that rather than
+          ;; shown an empty listing.
+          (unless sections
+            (insert (propertize
+                     (concat (agent-river--map-marker 'file)
+                             "*nothing has arrived yet*\n")
+                     'agent-river-map-face 'agent-river-stale)))
           (dolist (section sections)
             (let ((root (car section))
                   (entries (nth 1 section))
                   (rows (nth 2 section)))
               (when split
-                (let ((domain (agent-river--map-domain root)))
+                (let ((label (agent-river--domain-label
+                              (agent-river--map-domain root))))
                   (insert (propertize
                            (concat (agent-river--map-line
-                                    2 (if domain
-                                          (agent-river--domain-label domain)
-					(abbreviate-file-name root))
+                                    2 label
                                     (agent-river--map-merge-parties
                                      (mapcar (lambda (entry)
                                                (list :parties (plist-get entry :parties)))
@@ -7938,46 +7641,40 @@ nothing."
                                     ;; them if it had.
                                     )
                                    "\n")
-                           ;; A root is a place like any other line's, so RET
-                           ;; zooms into it and the motions stop on it.  A domain
-                           ;; is not a directory, so it zooms through its own
-                           ;; thunk rather than through `agent-river-map-descend',
-                           ;; which would expand its name into a path.
-                           'agent-river-map-name (if domain
-                                                     (agent-river--domain-label domain)
-                                                   (abbreviate-file-name root))
+                           ;; A section is a place like any other line's, so
+                           ;; RET zooms into it and the motions stop on it.
+                           ;; Through a thunk of its own because a domain is
+                           ;; not a path: what the zoom stores is the section
+                           ;; root, which is an identity.
+                           'agent-river-map-name label
                            'agent-river-map-path root
-                           'agent-river-map-dir (not domain)
                            'agent-river-map-visit
-                           (and domain (lambda ()
-					 (setq agent-river--map-root root)
-					 (agent-river--map-draw)))
+                           (lambda ()
+                             (setq agent-river--map-root root)
+                             (agent-river--map-draw))
                            'agent-river-map-section t
                            'agent-river-map-active (and entries t)))))
               (dolist (entry entries)
-                (let* ((name (plist-get entry :name))
-                       (dir (plist-get entry :dir))
-                       (path (agent-river--map-node-path root name))
-                       ;; What the line reads.  For a directory entry the key
-                       ;; *is* the name, and this is the name; for an artifact
-                       ;; the key is machinery -- `inc:INC-444' -- and the
-                       ;; record carries what to call it.
-                       (label (or (plist-get entry :shown) name))
-                       (shown (agent-river--map-shown-rows (gethash path rows)))
+                (let* ((key (plist-get entry :name))
+                       ;; What the line reads.  The key is machinery --
+                       ;; `inc:INC-444' -- and the record carries what to call
+                       ;; it; a record declared without a name is read by its
+                       ;; key, which is the whole of what is known about it.
+                       (label (or (plist-get entry :shown) key))
+                       (shown (agent-river--map-shown-rows (gethash key rows)))
                        ;; Rows are detail and wait to be asked for, so a node
                        ;; draws closed until somebody says otherwise -- with a
                        ;; twisty saying there is something there.
-                       (open (agent-river--map-folded-p path nil)))
+                       (open (agent-river--map-folded-p key nil)))
                   (insert (propertize
                            (concat (agent-river--map-line
-                                    level (concat label (if dir "/" ""))
+                                    level label
                                     (plist-get entry :parties)
                                     (plist-get entry :missing)
                                     (and shown (if open 'open 'closed)))
                                    "\n")
-                           'agent-river-map-name name
-                           'agent-river-map-path path
-                           'agent-river-map-dir dir
+                           'agent-river-map-name key
+                           'agent-river-map-path key
                            ;; Whether its children were drawn, read back by TAB.
                            ;; Off the rendering rather than derived again, so
                            ;; the toggle cannot disagree with what is on screen.
@@ -7988,51 +7685,12 @@ nothing."
                            ;; apart if the line is ever formatted differently.
                            'agent-river-map-active (and (plist-get entry :parties) t)))
                   (when open
-                    (agent-river--map-rows-insert shown path))))
-              ;; An empty listing has to say which kind of empty it is.
-              ;; Filtered, the tree may be full of files nobody has been
-              ;; near, and a blank section then reads as though the map had
-              ;; lost them.  No `agent-river-map-path', so the motions pass
-              ;; over it the way they pass over the elision line.
-              (unless entries
-                (insert (propertize
-                         (concat (agent-river--map-marker 'file)
-                                 (if agent-river-map-untouched
-                                     "*empty*"
-                                   "*nothing reached here — `a` lists everything*")
-                                 "\n")
-                         'agent-river-map-face 'agent-river-stale)))))
+                    (agent-river--map-rows-insert shown key))))))
           (setq agent-river--map-drawn (current-time))
           (agent-river--map-shade)
           (agent-river--map-goto here)
           (agent-river--map-settle-point)
           (setq agent-river--map-dirty nil))))))
-
-(defun agent-river--map-default-root ()
-  "Return the directory the map opens on.
-
-The cwd of the most recently seen root session, widened to its project
-root where `project' can say where that is: a session started in one
-module of a monorepo has a cwd well below the repository, and opening the
-map there would show that module and label it the project.  With nothing
-folded yet, this buffer's own directory."
-  (let (best)
-    (maphash (lambda (_id state)
-               (when (and (agent-river-state-cwd state)
-                          (or (null best)
-                              (time-less-p (agent-river-state-last-seen best)
-                                           (agent-river-state-last-seen state))))
-                 (setq best state)))
-             agent-river-registry)
-    (let ((dir (if best
-                   (agent-river-state-cwd best)
-                 (directory-file-name (expand-file-name default-directory)))))
-      (or (and (fboundp 'project-current) (fboundp 'project-root)
-               (let ((project (ignore-errors
-                                (project-current nil (file-name-as-directory dir)))))
-                 (and project (directory-file-name
-                               (expand-file-name (project-root project))))))
-          dir))))
 
 ;;; Moving about the map
 ;;
@@ -8201,20 +7859,6 @@ is what a refresh by hand means."
         (push (cons path (not open)) agent-river--map-folds)))
     (agent-river--map-draw)))
 
-(defun agent-river-map-toggle-untouched ()
-  "Show or hide the entries no agent has reached, in this map buffer.
-
-Buffer-local, so the gesture is undone by the same gesture and never
-edits the user's setting behind their back: `agent-river-map-untouched'
-goes on being what a fresh map opens with."
-  (interactive)
-  (setq-local agent-river-map-untouched (not agent-river-map-untouched))
-  (agent-river--map-draw)
-  (message "map: %s"
-           (if agent-river-map-untouched
-               "listing everything"
-             "listing only what agents have reached")))
-
 ;;; What RET may do -- the actions a line offers
 ;;
 ;; Opening a thing is one of the things that can be done to it, and it used to
@@ -8371,60 +8015,36 @@ which is never true of a domain key."
 (defun agent-river-map-visit ()
   "Do what the line at point offers, asking which when it offers more than one.
 
-A directory is descended into: the lens is moved rather than widened, one
-directory is always listed in full, and going deeper means looking
-somewhere else.  Anything else is asked what it offers -- see
+A section heading zooms the map into that one domain, through a thunk the
+draw put on the line.  Anything else is asked what it offers -- see
 `agent-river-artifact-action-functions' -- and a line with one offer runs
 it without a second keystroke.
 
 On a contributed row, whatever that row said RET means -- and where it
 said nothing, the node the row is about.  Refusing would be the stricter
 reading of \"a motion with nowhere to go refuses\", but that rule is about
-landing *near* something the eye did not choose; the file a row is under
+landing *near* something the eye did not choose; the record a row is under
 is the thing the eye chose."
   (interactive)
   (let ((path (get-text-property (line-beginning-position) 'agent-river-map-path))
-        (dir (get-text-property (line-beginning-position) 'agent-river-map-dir))
         (visit (get-text-property (line-beginning-position) 'agent-river-map-visit)))
     (cond
      (visit (funcall visit))
      ((null path) (user-error "Nothing to visit on this line"))
-     (dir (agent-river-map-descend path))
      ((agent-river--artifact-act (agent-river--map-subject path)))
-     ;; Nothing was offered, and which of the two things to say is the
-     ;; domain's.  An artifact that is not a file has nothing here to open,
-     ;; and saying it is "not on disk" would answer a question nobody asked
-     ;; -- it was never going to be.
-     ((not (eq (agent-river--key-domain path) 'file))
-      (user-error "%s: nothing registered to open it with" path))
-     (t (user-error "%s is not on disk" (abbreviate-file-name path))))))
-
-(defun agent-river-map-descend (dir)
-  "Point the map at DIR.
-The hand-made folds are kept: they are keyed on absolute paths, so none
-of them can mean an entry of the listing being entered."
-  (setq agent-river--map-root (directory-file-name (expand-file-name dir)))
-  (agent-river--map-draw))
+     (t (user-error "%s: nothing registered to open it with" path)))))
 
 (defun agent-river-map-up ()
-  "Point the map at the parent of the directory it is showing.
+  "Show every domain again, from a map zoomed into one of them.
 
-A touched root goes back to the overview rather than to its parent.  Those
-are the tops of the trees the state knows about, and climbing past one
-leads into directories no agent has been near -- a listing that gets
-emptier the further up it goes, with the other trees still out of view."
+There is nothing above a section: a domain is an identity rather than a
+path, so `^\' is the way back out and not a step towards a parent.  It
+used to climb a directory at a time, because the map listed trees."
   (interactive)
-  (let ((root agent-river--map-root))
-    (cond
-     ((null root) (user-error "Already showing every root"))
-     ((member root (mapcar #'car (agent-river--map-section-roots agent-river-map-scope)))
-      (setq agent-river--map-root nil)
-      (agent-river--map-draw))
-     (t
-      (let ((up (file-name-directory (directory-file-name root))))
-        (if (or (null up) (equal (directory-file-name up) root))
-            (user-error "Already at the root")
-          (agent-river-map-descend up)))))))
+  (if (null agent-river--map-root)
+      (user-error "Already showing every domain")
+    (setq agent-river--map-root nil)
+    (agent-river--map-draw)))
 
 (declare-function markdown-ts-view-mode "markdown-ts-mode" ())
 ;; Declared so the byte-compiler sees a special variable rather than a free
@@ -8480,15 +8100,15 @@ then quietly stay in the fallback for the whole session."
 ;; the map is a view of a state that is written elsewhere -- an editable
 ;; buffer would offer edits that the next redraw silently throws away.
 (define-derived-mode agent-river-map-mode markdown-ts-view-mode "Agent-Map"
-  "Major mode for the project map, rendered as Markdown.
+  "Major mode for the artifact map, rendered as Markdown.
 
-Dired-like on purpose: RET descends, `^' goes up, TAB opens what is under
-a line.  The gestures are the ones the view is an answer to -- it exists
-because a dired buffer can only ever show one directory at a time."
+Dired-like on purpose: RET zooms into a section, `^' comes back out, TAB
+opens what is under a line.  The gestures outlived the listing -- this was
+a lens over dired for most of its life."
   (agent-river--map-setup))
 
 (define-derived-mode agent-river-map-plain-mode special-mode "Agent-Map"
-  "Major mode for the project map where Markdown cannot be rendered.
+  "Major mode for the artifact map where Markdown cannot be rendered.
 
 The same buffer, read as an outline instead.  The text is the same
 Markdown either way; only the fontification is missing, which is what
@@ -8505,18 +8125,12 @@ makes this a degradation rather than a second view to keep in step."
   (define-key map (kbd "TAB") #'agent-river-map-toggle)
   (define-key map (kbd "RET") #'agent-river-map-visit)
   (define-key map (kbd "^") #'agent-river-map-up)
-  (define-key map (kbd "a") #'agent-river-map-toggle-untouched)
-  ;; The one forgetting command that belongs on a key here: it drops only
-  ;; what is about a file that is already gone, where
-  ;; `agent-river-forget-artifacts' drops the record of the work itself and
-  ;; is deliberately left to `M-x'.
-  (define-key map (kbd "C") #'agent-river-forget-gone-files)
   ;; `markdown-ts-view-mode' binds this to `ignore' to keep `revert-buffer'
   ;; off it; here there is something to revert to.
   (define-key map (kbd "g") #'agent-river-map-refresh)
   ;; n/p are outline's in `markdown-ts-view-mode' and unbound in the
-  ;; fallback, so in one mode they skipped every file line and in the other
-  ;; there was no entry motion at all.
+  ;; fallback, so in one mode they skipped every row and in the other there
+  ;; was no entry motion at all.
   (define-key map (kbd "n") #'agent-river-map-next-line)
   (define-key map (kbd "p") #'agent-river-map-previous-line)
   (define-key map (kbd "SPC") #'agent-river-map-next-line)
@@ -8625,24 +8239,29 @@ a function that will throw again the moment an artifact arrives."
 
 ;;;###autoload
 (defun agent-river-map (&optional ask)
-  "Show where the agents are working across the whole project.
+  "Show what has arrived and who is on it.
 
-The lens dired cannot be: one directory listed in full, each entry
-saying what has happened beneath it, so several agents spread over a
-large repository are visible at once.
+One section per domain of `agent-river-artifacts', one line per record,
+each annotated with whoever has reached it -- and the line this view is
+for is the one nobody has.  It was a lens over dired for most of its life,
+listing a directory and what had been reached beneath each entry; that is
+gone, and what an agent did to a file is `agent-river-touching' and the
+block instead.
 
-Opens on every tree the agents have touched.  There is no reference
-project to open on instead: the state spans whatever directories the
-sessions were started in, and picking one of them would hide the others
-behind a heading claiming to be the root of all of them.  RET zooms into
-a tree from there, and `^' comes back out.
+Opens on every domain that has a record.  RET on a section zooms into it
+and `^' comes back out.
 
-With ASK (a prefix argument), prompt for one directory to show instead.
+With ASK (a prefix argument), prompt for one domain to show instead.
 
 Needs no mode to be switched on: the buffer is the consent, and killing it
 takes the map off the event stream."
   (interactive "P")
-  (let* ((root (and ask (read-directory-name "Map: " nil nil t)))
+  (let* ((domains (delq 'file (agent-river-domains)))
+         (root (and ask domains
+                    (agent-river--domain-root
+                     (intern (completing-read "Map: "
+                                              (mapcar #'symbol-name domains)
+                                              nil t)))))
          (buffer (get-buffer-create agent-river-map-buffer-name)))
     (with-current-buffer buffer
       ;; Set unconditionally rather than only on a fresh buffer: the answer
@@ -8651,18 +8270,17 @@ takes the map off the event stream."
       (if (agent-river--markdown-ts-p)
           (agent-river-map-mode)
         (agent-river-map-plain-mode))
-      (setq agent-river--map-root (and root (directory-file-name
-                                             (expand-file-name root)))
+      (setq agent-river--map-root root
             agent-river--map-folds nil)
       (add-hook 'kill-buffer-hook #'agent-river--map-teardown nil t))
     (add-hook 'agent-river-observers #'agent-river--map-observe)
-    ;; And the artifact stream, which is the half with no session behind it.
-    ;; A tree changes because an agent did something, so the session hook is
-    ;; enough to keep a listing current; an incident arriving changes the map
-    ;; with no event on that hook at all, and the redraw timer retires as soon
-    ;; as nothing is dirty -- so the record sat in the table, drawn by nobody,
-    ;; until somebody pressed `g'.  Quiet is exactly when this view has the
-    ;; most to say.
+    ;; And the artifact stream, which is the half with no session behind it --
+    ;; and now the half the whole listing comes from.  A session hook alone
+    ;; kept a tree listing current, because a tree changes when an agent does
+    ;; something; an incident arriving changes this map with no event on that
+    ;; hook at all, and the redraw timer retires as soon as nothing is dirty
+    ;; -- so the record sat in the table, drawn by nobody, until somebody
+    ;; pressed `g'.  Quiet is exactly when this view has the most to say.
     (add-hook 'agent-river-artifact-observers #'agent-river--map-observe)
     (agent-river--map-draw)
     (agent-river--ensure-map-timer)
