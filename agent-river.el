@@ -7554,12 +7554,23 @@ line is ordered by and cannot contradict it."
     table))
 
 (defun agent-river--rows-step (_root nodes)
-  "Return a row for any of NODES a session has a tool call open on.
+  "Return a row for any of NODES a session has a tool call open under.
 
 The one row here that is present tense, which is why it is a second sort
 rather than more of the first: the parties above it say where an agent has
-*been*, this says what is happening in the file right now, and after a
-long task those are different statements about different moments.
+*been*, this says what is happening right now, and after a long task those
+are different statements about different moments.  It is also what is left
+of the position marker the gutter used to carry, and better than it was:
+an arrow could only point at a line, this names the session, the tool and
+the file.
+
+Attached to the *containing* node, not only to a node that is the file
+itself, and named relative to it.  The listing has a line per entry of one
+directory, so a call open on a file below that entry matched nothing and
+the row was simply absent -- which is exactly the case it exists for, since
+work three directories down is the work you cannot see.  The longest node
+that is a prefix of the file wins, so a call lands on one line rather than
+on every ancestor of it.
 
 Read from the sessions rather than from the node, because a step in
 flight is not in the artifact tables at all -- it is the call that has not
@@ -7570,14 +7581,13 @@ come back yet."
        (let ((step (agent-river-state-step state)))
          (when (and step (plist-get step :file)
                     (agent-river--state-working-p state))
-           (let ((abs (agent-river--artifact-absolute
-                       (list :cwd (agent-river-state-cwd state)
-                             :file (plist-get step :file)))))
-             (when (and abs (seq-find (lambda (node)
-                                        (equal (plist-get node :path) abs))
-                                      nodes))
-               (puthash abs
-                        (append (gethash abs table)
+           (let* ((abs (agent-river--artifact-absolute
+                        (list :cwd (agent-river-state-cwd state)
+                              :file (plist-get step :file))))
+                  (node (and abs (agent-river--step-node abs nodes))))
+             (when node
+               (puthash node
+                        (append (gethash node table)
                                 (list (list :key (concat "step/" (agent-river-state-id state))
                                             ;; Ahead of the rest: it is the
                                             ;; only row about now, and it is
@@ -7585,14 +7595,37 @@ come back yet."
                                             ;; true while you read it.
                                             :rank 0
                                             :face 'agent-river-act
-                                            :text (format "%s: %s since %s"
+                                            :text (format "%s: %s %ssince %s"
                                                           (agent-river--party-label state)
                                                           (or (plist-get step :tool) "?")
+                                                          (if (equal node abs)
+                                                              ""
+                                                            (concat
+                                                             (substring
+                                                              abs (1+ (length node)))
+                                                             " "))
                                                           (agent-river--ago
                                                            (plist-get step :at))))))
                         table))))))
      agent-river-registry)
     table))
+
+(defun agent-river--step-node (abs nodes)
+  "Return the path in NODES that ABS is in, or nil when none of them is.
+
+The node itself where the listing has a line for the file, and the entry
+it falls under otherwise.  The longest match rather than the first, so a
+root listed beside a directory inside it does not take a file that belongs
+to the deeper line."
+  (let (best)
+    (dolist (node nodes)
+      (let ((path (plist-get node :path)))
+        (when (and path
+                   (or (equal path abs)
+                       (string-prefix-p (file-name-as-directory path) abs))
+                   (> (length path) (length (or best ""))))
+          (setq best path))))
+    best))
 
 (defun agent-river--map-marker (level)
   "Return the Markdown that opens a map line at LEVEL.

@@ -4691,6 +4691,35 @@ the view looks like once the work has moved on."
     (should-not (gethash "/repo/a.el"
                          (agent-river--rows-step "/repo" '((:path "/repo/a.el")))))))
 
+(ert-deftest agent-river-test-a-step-lands-on-the-entry-that-contains-it ()
+  ;; The listing has a line per entry of one directory, so a call open on a
+  ;; file below one of them matched no node at all and the row was simply
+  ;; absent -- which is the case it exists for, since work three directories
+  ;; down is the work you cannot see.  It is also what is left of the
+  ;; position marker, and better than it was: an arrow could only point at a
+  ;; line, this names the file.
+  (agent-river-test--with-session state
+    (agent-river-fold state '(:kind "act" :tool "Edit" :file "src/deep/b.el"
+                                    :cwd "/repo"))
+    (let ((rows (gethash "/repo/src"
+                         (agent-river--rows-step "/repo" '((:path "/repo/src"))))))
+      (should (string-match-p "Edit deep/b\\.el" (plist-get (car rows) :text))))
+    ;; The deepest node wins, so a root listed beside a directory inside it
+    ;; does not take a file that belongs to the deeper line -- and where the
+    ;; node *is* the file there is no path left to name.
+    (let ((rows (agent-river--rows-step
+                 "/repo" '((:path "/repo") (:path "/repo/src")
+                           (:path "/repo/src/deep/b.el")))))
+      (should (= (hash-table-count rows) 1))
+      (should (gethash "/repo/src/deep/b.el" rows))
+      (should-not (string-match-p "b\\.el"
+                                  (plist-get (car (gethash "/repo/src/deep/b.el" rows))
+                                             :text))))
+    ;; And a file under none of them lands nowhere rather than on the first.
+    (should (= (hash-table-count
+                (agent-river--rows-step "/repo" '((:path "/repo/docs"))))
+               0))))
+
 (ert-deftest agent-river-test-the-map-header-is-a-name-and-a-count ()
   ;; It used to caption the view as well -- which frame the numbers came
   ;; from.  That is still true and is documented where it is decided; a

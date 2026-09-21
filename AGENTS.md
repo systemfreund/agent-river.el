@@ -1762,8 +1762,8 @@ Four things about the map are load-bearing:
 - **Order is declared, not positional** (`:rank`, low first, ties keeping
   the order of `agent-river-map-contributors`). Which contributor was
   registered first is not a statement about which of their rows is worth
-  reading: what a record *is* (`artifact`, rank 0) and what is happening in
-  the file *now* (`step`, 0) outrank who has been in it (`parties`, 1). It
+  reading: what a record *is* (`artifact`, rank 0) and what is happening
+  *now* (`step`, 0) outrank who has been there (`parties`, 1). It
   is also what `agent-river-map-detail-rows` cuts from, where it is set at
   all — the tail is the least worth keeping rather than whoever was
   registered last.
@@ -1919,9 +1919,11 @@ party the gutter mark, the row's face and the row's glyph were three
 renderings of one fact about the only name there is. That exception needed a
 rule of its own — decided per node rather than per row, or the gutter's mark
 would read as belonging to whichever rows kept theirs — and the fact it was
-encoding is better said in words: `agent-river--rows-step` names the session
-and the tool it has a call open on, which is what a reader was inferring
-from an arrow.
+encoding is better said in words: `agent-river--rows-step` names the session,
+the tool and the file it has a call open on, which is what a reader was
+inferring from an arrow. It only became that answer when it stopped needing a
+line of its own to sit on -- a call open on a file below an entry matched no
+node and the row was absent, which is the case the reading exists for.
 
 The rule for colour here generally: inherit a face the theme knows unless the
 value needs a shade no built-in face has. Nothing here does any more. The four
