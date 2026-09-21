@@ -15,16 +15,20 @@
 ;; producer declared -- and this is how an agent gets pointed at one.
 ;;
 ;;   (setq agent-river-launch-launcher "agent-shell")  ; can anything launch
-;;   (setq agent-river-launch-brief #'my-brief)        ; is there anything to say
+;;   (setq agent-river-launch-briefs                   ; is there anything to say
+;;         (list (list :name "Review" :brief #'my-review-brief)))
 ;;   M-x agent-river-launch-artifact
 ;;
 ;; Two switches, both off out of the box, and the second is the sharp one: a
 ;; brief returns what to say about a given artifact or nil, so a launcher
 ;; with no brief can never launch.
 ;;
-;; `agent-river-launch-artifact' is also suitable as a `:visit' in
-;; `agent-river-map-domains', which is the whole of "launching happens from
-;; the map" -- RET on the line, no new keymap, no change to `agent-river.el'.
+;; Each brief that has something to say about a thing is one entry in the menu
+;; RET opens on the map -- this file registers itself on
+;; `agent-river-artifact-action-functions', which is the whole of "launching
+;; happens from the map": no new keymap and no change to `agent-river.el'.  A
+;; brief may name its own `:config', so "review this PR" and "rebase this PR"
+;; can be different prompts under different models.
 ;;
 ;; A person decides, every time.  What it would take to decide without one --
 ;; a durable ledger, occasion-shaped keys, matches and gates and a budget and
@@ -45,6 +49,56 @@
   "Starting a coding-agent session on an artifact."
   :group 'agent-river
   :prefix "agent-river-launch-")
+
+;;; Quoting producer text -- a mechanism every brief needs, not a GitHub one
+;;
+;; A brief that names an artifact's own text -- a body, a title, a branch a
+;; fork spelled however it liked -- is embedding text an operator did not
+;; write into a prompt an agent will read as instructions.  That is one
+;; question regardless of what kind of thing wrote it: a GitHub issue today,
+;; and the tracker, mailbox or build log the commentary above expects to
+;; follow it are all the identical case with different producer text.  A
+;; mechanism answering the identical question in every source's own copy is
+;; exactly the second account this package's merge rule refuses -- and here
+;; the stakes are sharper than usual, since the copy that drifts is the one
+;; guarding against a prompt injection, not a rendering that merely looks
+;; different.  It lived beside `agent-river-gh-brief' first and moved once a
+;; second brief needed it, so `agent-river-gh.el' calls this rather than
+;; keeping its own.
+
+(defun agent-river-launch-quote (parts)
+  "Return PARTS as one blockquote, every line of each of them inside it.
+
+The `>' goes on in exactly one place, and that is the whole point of the
+function.  A source that builds a quotation field by field instead --
+title here, a name added beside it there -- reopens the injection this
+exists to close: GitHub's own brief once formatted a branch name with
+`format' next to an already-quoted body, and a branch name carrying a
+newline closed the quotation early, so everything meant to read as GitHub's
+words read as the operator's instead.  Anything from a producer goes
+through here, together, so the next field to arrive is covered before it
+is written rather than after something breaks on it.
+
+An empty part is the blank quoted line between two others, and is spelled
+without the trailing space a prefix alone would leave.
+
+A part's *trailing* blank lines are dropped, because producer text
+commonly ends in a newline and `split-string' answers that with a final
+empty string -- which came out as a lone `>' hanging under the quotation.
+Only the trailing ones: a blank line inside a part is a paragraph break
+and is the producer's, and an empty part is a separator between fields
+and is the brief's."
+  (mapconcat
+   (lambda (part)
+     (if (string-empty-p (or part ""))
+         ">"
+       (let ((lines (split-string part "\r?\n")))
+         (while (and (cdr lines) (string-empty-p (car (last lines))))
+           (setq lines (butlast lines)))
+         (mapconcat (lambda (line)
+                      (if (string-empty-p line) ">" (concat "> " line)))
+                    lines "\n"))))
+   parts "\n"))
 
 ;;; Launchers -- the one end that starts a process
 ;;
@@ -78,35 +132,53 @@ One of the two switches in front of starting anything, and the blunt one:
 nil means nothing can be launched at all, whatever else is configured."
   :type '(choice (const :tag "Nothing can launch" nil) string))
 
-(defcustom agent-river-launch-brief nil
-  "Function of an artifact plist returning what to say to an agent, or nil.
+(defcustom agent-river-launch-briefs nil
+  "What an agent may be started on, as a list of named briefs.
 
-The other switch, and the sharp one.  It is called with the plist
-`agent-river-artifacts-list' produces -- `:key', `:domain', `:name',
-`:context' and the rest -- and returns
+The other switch, and the sharp one.  Each entry is a plist:
 
-  (:prompt STRING :cwd DIRECTORY)
+  :name   what the menu calls it, and what `agent-river-launch-artifact'
+          takes to pick one without asking
+  :brief  (RECORD) -> (:prompt STRING :cwd DIRECTORY :config FUNCTION)
+          or nil
 
-or nil, which means there is nothing to say about this artifact and so
-nothing to start.  Nil is therefore the arming switch: a launcher with no
-brief can never launch, whatever the launcher is.
+RECORD is the plist `agent-river-artifacts-list' produces -- `:key',
+`:domain', `:name', `:context' and the rest.  Nil means there is nothing
+to say about this artifact and so nothing to start, which is the arming
+switch it has always been: a launcher with no brief can never launch,
+whatever the launcher is.
 
-One function rather than one per domain, because dispatching on
-`:domain' is two lines inside it and a second mechanism deciding the same
-question is what this package spends its exceptions avoiding.
+A list rather than one function, because a brief is not one thing.  The
+same pull request is a thing to review and a thing to rebase, and those
+are different prompts and quite possibly different models -- which one is
+wanted is a question for the person looking at the line, not something a
+`:domain' can answer once.  So every brief with something to say about a
+record is one entry in the menu RET opens, and nil is what keeps the
+others out of it.  There is no applicability predicate beside it: that
+would be a second account of the answer the brief already gives.
 
-It is also where a context is read.  This package never reads a value out
-of one -- that is what lets a record carry a severity, a body and a URL
-without this file learning about any of them -- so the working tree an
-agent should start in comes out of the context here, in your code, which
-put it there in the first place."
-  :type '(choice (const :tag "Nothing to say" nil) function))
+`:config' is optional and overrides `agent-river-launch-shell-config' for
+this brief's sessions -- a function of no arguments returning the
+agent-shell config, the same shape the global has, so a brief that names
+one is not learning a second convention.  It is the model and session
+configuration a prompt is worth nothing without.
+
+A brief is also where a context is read.  This package never reads a
+value out of one -- that is what lets a record carry a severity, a body
+and a URL without this file learning about any of them -- so the working
+tree an agent should start in comes out of the context here, in your
+code, which put it there in the first place."
+  :type '(repeat (plist :key-type symbol :value-type sexp)))
 
 (defcustom agent-river-launch-shell-config
   (lambda ()
     (when (fboundp 'agent-shell-anthropic-make-claude-code-config)
       (agent-shell-anthropic-make-claude-code-config)))
-  "Function returning the agent-shell config a launched session runs under."
+  "Function returning the agent-shell config a launched session runs under.
+
+The default for every brief.  A brief that wants its own model or session
+configuration returns a `:config' of the same shape, which is preferred
+over this one -- see `agent-river-launch-briefs'."
   :type 'function)
 
 (defcustom agent-river-launch-shell-tries 60
@@ -152,11 +224,36 @@ behind."
                                  (format "launch: %s never took its prompt"
                                          (buffer-name buffer))))))))
 
+(defun agent-river-launch--shell-config (brief)
+  "Return the agent-shell config BRIEF asked for, or the configured default.
+
+Built here rather than where the brief was read, which is the reason it
+is a function on both sides: the docstring of
+`agent-river-launch--shell-available-p' says the config reaches for
+authentication, and the briefs are read on every RET to work out what a
+line offers.  Only the one that is launched is built."
+  (funcall (or (plist-get brief :config) agent-river-launch-shell-config)))
+
 (defun agent-river-launch--shell-launch (brief)
-  "Start an agent-shell session for BRIEF and hand it its prompt."
+  "Start an agent-shell session for BRIEF and hand it its prompt.
+
+`:session-strategy \='new\=' rather than agent-shell\='s own default, which is
+`prompt\=' -- and it is the layer\='s premise rather than a preference.  A
+launch here is a session that did not exist: `--resolve-pending\=' waits for
+an id to appear and links *that* session to the artifact, and its
+docstring says the id does not exist yet when the process starts.  A
+resumed session existed before the launch and is quite possibly in the
+registry already, so the wait would settle instantly onto something
+nobody started for this thing -- and the brief would land in a
+conversation about another one.
+
+It also stops a modal question arriving between the choice and the agent,
+which is the same failure `agent-river-launch--confirm-p\=' answers one
+gesture up: what the user picked has already said what should happen."
   (let* ((default-directory (or (plist-get brief :cwd) default-directory))
          (buffer (agent-shell--start
-                  :config (funcall agent-river-launch-shell-config)
+                  :config (agent-river-launch--shell-config brief)
+                  :session-strategy 'new
                   :no-focus t :new-session t)))
     (unless (buffer-live-p buffer)
       (error "agent-shell started no buffer"))
@@ -307,23 +404,80 @@ and the session appearing, which is a handful of seconds a day."
     (setq agent-river-launch--resolve-timer
           (run-with-timer 1 1 #'agent-river-launch--resolve-pending))))
 
-(defun agent-river-launch--brief (record)
-  "Return what to say to an agent about RECORD, or nil.
+(defun agent-river-launch--offers (record)
+  "Return (ENTRY . BRIEF) for every brief with something to say about RECORD.
 
-A brief that throws is no brief, the way a launcher that throws is a
-decision: this is user code called from a command, and an error here
-would read as the command being broken rather than the brief."
-  (when (functionp agent-river-launch-brief)
-    (condition-case err
-        (funcall agent-river-launch-brief record)
-      (error
-       (agent-river-log "fail" (agent-river--log-text
-                                (format "brief errored (%s)"
-                                        (error-message-string err))))
-       nil))))
+The whole of which briefs apply to a thing, and there is no second
+mechanism deciding it: a brief answering nil is a brief with nothing to
+say, which was already the arming switch when there was only one of them.
+Asked per entry now rather than once, so the list of briefs is the list
+of offers.
 
-(defun agent-river-launch--refusal (record brief)
-  "Return why RECORD cannot be launched with BRIEF, or nil.
+A brief with no `:prompt' is one of those, not an offer that fails later:
+what a launch is, is a prompt reaching an agent, so an answer without one
+has said nothing and is not put in front of the user as though it had.
+
+Guarded per entry, so one brief that throws costs its own offer rather
+than the ones beside it.  This is user code called from a command, and an
+error here would read as the command being broken rather than the brief."
+  (let (offers)
+    (dolist (entry agent-river-launch-briefs)
+      (let* ((fn (plist-get entry :brief))
+             (brief (and (functionp fn)
+                         (condition-case err
+                             (funcall fn record)
+                           (error
+                            (agent-river-log
+                             "fail"
+                             (agent-river--log-text
+                              (format "brief %s errored (%s)"
+                                      (or (plist-get entry :name) "?")
+                                      (error-message-string err))))
+                            nil)))))
+        (when (plist-get brief :prompt)
+          (push (cons entry brief) offers))))
+    (nreverse offers)))
+
+(defun agent-river-launch--pick (offers name)
+  "Return the offer called NAME, the only one, or the one chosen from OFFERS.
+
+NAME is how the map reaches a particular brief without asking again: the
+menu there is already one entry per offer, so the choice was made on the
+line and repeating it would put the question behind the answer."
+  (cond
+   (name (or (seq-find (lambda (offer)
+                         (equal (plist-get (car offer) :name) name))
+                       offers)
+             (user-error "No brief `%s' has anything to say about this" name)))
+   ((null (cdr offers)) (car offers))
+   (t (let ((by-name (mapcar (lambda (offer)
+                               (cons (plist-get (car offer) :name) offer))
+                             offers)))
+        (cdr (assoc (completing-read "Brief: " by-name nil t) by-name))))))
+
+(defun agent-river-launch--confirm-p (record key brief-name)
+  "Return non-nil when starting BRIEF-NAME on RECORD may go ahead.
+
+Asks, unless the gesture that reached here already named what would run:
+a map menu entry reading `Launch: Review\=' is the deliberate act the
+question would be asking for, and a second prompt after it is put to an
+answer just given.  `agent-river-artifact-chosen\=' is what says a choice
+was made rather than how this was called -- BRIEF-NAME alone would not,
+since the same argument arrives from a line that offered no alternative
+and ran its one action outright.
+
+Asked otherwise, and that is the ordinary case: starting a process is the
+most expensive thing this package does and the one gesture with nothing
+on the far side that can take it back.  What the question names is what
+will run, the brief included, which is the half a line cannot show."
+  (or agent-river-artifact-chosen
+      (y-or-n-p (format "Start %s on %s (%s)? "
+                        agent-river-launch-launcher
+                        (or (plist-get record :name) key)
+                        (or brief-name "?")))))
+
+(defun agent-river-launch--refusal (record offers)
+  "Return why RECORD cannot be launched, given OFFERS, or nil.
 
 One account of what stands in the way, read before the user is asked to
 confirm: asked afterwards, they would be confirming something that was
@@ -337,62 +491,105 @@ never going to happen."
         (format "Launcher `%s' is not available here"
                 agent-river-launch-launcher)
       "No launcher: set `agent-river-launch-launcher' first"))
-   ((null agent-river-launch-brief)
-    "Nothing to say to an agent: set `agent-river-launch-brief' first")
-   ((null (plist-get brief :prompt))
-    (format "The brief has nothing to say about %s" (plist-get record :key)))))
+   ((null agent-river-launch-briefs)
+    "Nothing to say to an agent: set `agent-river-launch-briefs' first")
+   ((null offers)
+    (format "No brief has anything to say about %s" (plist-get record :key)))))
 
 ;;;###autoload
-(defun agent-river-launch-artifact (key)
-  "Start an agent on the artifact KEY names.
+(defun agent-river-launch-artifact (key &optional brief-name)
+  "Start an agent on the artifact KEY names, briefed as BRIEF-NAME.
 
 The whole of what this layer does with a launcher, and it is a gesture
 rather than a rule: a person looked at the thing and said so.  What would
 be needed to make that decision without them is issue #37, and none of it
 is here.
 
-Suitable as a `:visit' in `agent-river-map-domains', which is what makes
-RET on a line of the map start an agent on it.
+BRIEF-NAME names an entry of `agent-river-launch-briefs'.  Without one,
+the only brief with something to say about KEY is used and several are
+offered by name -- so this is the same command whether it is reached by
+`M-x' with nothing chosen or from the map, where the line has already
+been asked and the brief was the choice.
 
-It asks first.  Starting a process is the most expensive thing this
-package does and the one gesture with nothing on the far side that can
-take it back, so the second keystroke is earned every time.  What the
-question names is what will run, which is the half a line cannot show."
+It asks first, unless the gesture that reached it already named what
+would run -- see `agent-river-launch--confirm-p'."
   (interactive (list (agent-river--read-artifact-key)))
   (let* ((record (agent-river-artifact-at key))
-         (brief (and record (agent-river-launch--brief record)))
-         (refusal (agent-river-launch--refusal record brief)))
+         (offers (and record (agent-river-launch--offers record)))
+         (refusal (agent-river-launch--refusal record offers)))
     (when refusal (user-error "%s" refusal))
-    (if (not (y-or-n-p (format "Start %s on %s? "
-                               agent-river-launch-launcher
-                               (or (plist-get record :name) key))))
-        (message "agent-river: not started")
-      (let ((launcher (agent-river-launch--launcher))
-            ;; What the brief said, plus what it had no business repeating.
-            ;; Ours first, so the record's own identity is the one a
-            ;; launcher sees: a headless launcher names its session after
-            ;; the key, and a brief is in no position to rename the thing
-            ;; it was asked about.
-            (brief (append (list :key key :name (plist-get record :name))
-                           brief)))
-        (condition-case err
-            (let ((handle (funcall (plist-get launcher :launch) brief)))
-              (push (list :key key
-                          :at (current-time)
-                          :launcher (plist-get launcher :name)
-                          :handle handle)
-                    agent-river-launch--launched)
-              (agent-river-launch--ensure-resolve-timer)
-              (agent-river-log "artifact"
-                               (agent-river--log-text
-                                (format "%s: started %s"
-                                        key (plist-get launcher :name))))
-              (message "agent-river: started"))
-          (error
-           (agent-river-log "fail" (agent-river--log-text
-                                    (format "launch failed: %s"
-                                            (error-message-string err))))
-           (message "agent-river: launch failed, see the log")))))))
+    (let* ((offer (agent-river-launch--pick offers brief-name))
+           (chosen (plist-get (car offer) :name)))
+      (if (not (agent-river-launch--confirm-p record key chosen))
+          (message "agent-river: not started")
+        (let ((launcher (agent-river-launch--launcher))
+              ;; What the brief said, plus what it had no business repeating.
+              ;; Ours first, so the record's own identity is the one a
+              ;; launcher sees: a headless launcher names its session after
+              ;; the key, and a brief is in no position to rename the thing
+              ;; it was asked about.
+              (brief (append (list :key key :name (plist-get record :name))
+                             (cdr offer))))
+          (condition-case err
+              (let ((handle (funcall (plist-get launcher :launch) brief)))
+                (push (list :key key
+                            :at (current-time)
+                            :launcher (plist-get launcher :name)
+                            :handle handle)
+                      agent-river-launch--launched)
+                (agent-river-launch--ensure-resolve-timer)
+                (agent-river-log "artifact"
+                                 (agent-river--log-text
+                                  (format "%s: started %s on %s"
+                                          key (plist-get launcher :name)
+                                          (or chosen "?"))))
+                (message "agent-river: started"))
+            (error
+             (agent-river-log "fail" (agent-river--log-text
+                                      (format "launch failed: %s"
+                                              (error-message-string err))))
+             (message "agent-river: launch failed, see the log"))))))))
+
+;;;###autoload
+(defun agent-river-launch--actions (record)
+  "Offer one launch per brief with something to say about RECORD.
+
+An `agent-river-artifact-action-functions' entry, and the reason this
+file needs no keymap of its own: a line of the map is asked what it
+offers, and this answers with the launches that are actually possible on
+it.  Nothing where the launcher cannot run here, which is
+`agent-river-launch--launcher' answering at selection rather than at the
+launch -- an offer that can only fail is worse than no offer.
+
+The entries are the briefs themselves rather than one `Launch' that then
+asks which.  What a reader is choosing between is what the agent will be
+told, so that is what the menu says; folded into one entry it would take
+two prompts to reach, with the second asking the question the first had
+already presented as answered.
+
+Nothing for a subject with no `:key' -- a file line names something the
+map placed on disk, not a record, and there is nothing for a brief to
+have been written about."
+  (let ((key (plist-get record :key)))
+    (when (and key (agent-river-launch--launcher))
+      (mapcar (lambda (offer)
+                (let ((name (plist-get (car offer) :name)))
+                  (list :name (format "Launch: %s" name)
+                        :act (lambda ()
+                               (agent-river-launch-artifact key name)))))
+              (agent-river-launch--offers record)))))
+
+;; Appended rather than pushed, so opening a file stays the first thing a line
+;; that is one offers.  The cookie on the function above it is what makes this
+;; work at all: extracted into the autoloads file, this form runs before
+;; anything here is defined, and without one the list would hold a symbol with
+;; an empty function cell -- which `agent-river--artifact-actions' would catch,
+;; report and skip, leaving every launch quietly unofferable.  The same silence
+;; `agent-river-gh--read' is autoloaded against, one file over.
+;;;###autoload
+(with-eval-after-load 'agent-river
+  (add-to-list 'agent-river-artifact-action-functions
+               #'agent-river-launch--actions t))
 
 (provide 'agent-river-launch)
 

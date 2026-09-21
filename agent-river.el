@@ -7016,9 +7016,16 @@ Split out so the cache above and the walk cannot come apart, the way
 An alist of DOMAIN (the symbol an artifact was declared with) to a plist:
 
   :label  the section heading.  The domain name capitalised, by default
-  :visit  (KEY) -> nil, what RET on one of its entries does
 
-Purely presentational.  A domain absent from this list is still drawn --
+Purely presentational, and now literally so: it carried a `:visit' for
+RET as well, which made it the second place answering \"what may be done
+to this thing\" -- a question that is not the domain's to answer once,
+because an issue is something to read and something to start an agent on
+at the same time.  That is
+`agent-river-artifact-action-functions' now, where a line is asked and
+may be offered several things.
+
+A domain absent from this list is still drawn --
 `agent-river--map-domain-roots' reads the artifact table, not this -- and
 that is deliberate: something that has arrived should not have to wait for
 configuration before it can be seen, which is the failure mode of every
@@ -7101,14 +7108,6 @@ differently."
   "Return DOMAIN's section heading."
   (or (plist-get (alist-get domain agent-river-map-domains) :label)
       (capitalize (symbol-name domain))))
-
-(defun agent-river--domain-visit (domain key)
-  "Return a thunk for RET on KEY in DOMAIN, or nil when it does nothing.
-Nil rather than a thunk that reports the absence: a line that offers to
-act has to keep the offer, so what is withheld without a `:visit' is the
-offer itself."
-  (let ((visit (plist-get (alist-get domain agent-river-map-domains) :visit)))
-    (when visit (lambda () (funcall visit key)))))
 
 (defun agent-river--map-domain-roots (&optional scope)
   "Return one (ROOT . LAST) per live non-file domain, newest first.
@@ -7199,7 +7198,6 @@ arrived."
                        ;; has no such split -- its name *is* its key -- which is
                        ;; why this is the one field a domain adds.
                        :shown (agent-river-artifact-name artifact)
-                       :visit (agent-river--domain-visit domain key)
                        :last (agent-river-artifact-last artifact))
                  entries)))
        agent-river-artifacts))
@@ -8972,9 +8970,6 @@ nothing."
                            'agent-river-map-name name
                            'agent-river-map-path path
                            'agent-river-map-dir dir
-                           ;; Withheld where the domain offered none, because a
-                           ;; line that makes an offer has to keep it.
-                           'agent-river-map-visit (plist-get entry :visit)
                            ;; Whether its children were drawn, read back by TAB.
                            ;; Off the rendering rather than derived again, so
                            ;; the toggle cannot disagree with what is on screen.
@@ -9264,10 +9259,167 @@ goes on being what a fresh map opens with."
                "listing everything"
              "listing only what agents have reached")))
 
+;;; What RET may do -- the actions a line offers
+;;
+;; Opening a thing is one of the things that can be done to it, and it used to
+;; be the only one a line could offer: a file was opened, and a domain named a
+;; single `:visit' in `agent-river-map-domains' that RET called.  What that
+;; cannot express is the ordinary case -- an issue on the map is something to
+;; read *and* something to start an agent on, and which of the two is wanted is
+;; not a property of the domain, it is a question for the person looking at the
+;; line.
+;;
+;; So a line is *asked* what it offers, by every function in
+;; `agent-river-artifact-action-functions', and the answers are collected.
+;; Applicability is asked rather than declared, which is the rule the domain
+;; sections already live by: a function that has nothing to do with this
+;; subject answers nil, and a producer that invents a domain gets whatever the
+;; registered functions offer without registering anything itself.
+;;
+;; Two consequences worth naming.  The domain table is `:label' and nothing
+;; else now, which is what its docstring always claimed it was -- one mechanism
+;; answers "what may RET do here" and it is this one, where a `:visit' beside
+;; it would be a second.  And opening a file is an action like any other
+;; (`agent-river--actions-file') rather than a branch of the command, because a
+;; file line answering that question somewhere else is exactly the second
+;; mechanism this collapses.  With one offer nothing is asked, so a plain file
+;; still opens on RET with one keystroke.
+
+(defun agent-river--actions-file (subject)
+  "Offer to open the file SUBJECT names, when there is one on disk.
+
+The map's old `find-file' branch, as an ordinary action.  It is the
+default entry in `agent-river-artifact-action-functions' and the smallest
+example of one: it reads `:path', which is set only where the line names
+something absolute, and answers nil for everything else."
+  (let ((path (plist-get subject :path)))
+    (when (and path (file-exists-p path))
+      (list (list :name "Open file"
+                  :act (lambda () (find-file path)))))))
+
+(defvar agent-river-artifact-action-functions (list #'agent-river--actions-file)
+  "Functions asked what RET on a line of the map may do.
+
+Each is called with the subject the line names -- the plist
+`agent-river-artifact-at' produces for a record (`:key', `:domain',
+`:name', `:context' and the rest), plus `:path' where the line names
+something absolute on disk -- and returns a list of
+
+  (:name STRING :act THUNK)
+
+or nil, which is how a function says it has nothing to do with this
+subject.  Nil is the whole of the applicability rule: there is no
+predicate to register and no domain to be listed under, so something that
+has arrived is offered whatever these have for it without waiting to be
+configured.
+
+One offer is run without asking, so a line with a single action behaves
+as it always did; several are offered by name.  A thunk that wants
+confirming asks for it itself -- `agent-river-launch-artifact' does,
+because starting a process is the one gesture here with nothing on the
+far side that can take it back.
+
+The order is this list's own, and nothing sorts it: the menu is a
+`completing-read', where order decides what is read first and not what is
+worth reading -- which is why a contributed row has a `:rank' and this
+has not.  What the two shipped registrations append is therefore in load
+order, and reordering them is a `setq'.")
+
+(defun agent-river--artifact-actions (subject)
+  "Return everything offered for SUBJECT, in the order the functions are asked.
+
+Each function is guarded on its own, and the difference from an
+observer's guard is that this runs on a keystroke rather than on every
+tool call: there is no runaway to retire, so a thrower is reported and
+skipped rather than removed.  What the guard is for is the other half --
+one function that throws must not take the offers beside it down with
+it, which would leave a reader with a line that does nothing and no
+account of why."
+  (let (actions)
+    (dolist (fn agent-river-artifact-action-functions)
+      (condition-case err
+          (dolist (action (funcall fn subject))
+            (push action actions))
+        (error
+         (agent-river-log
+          "fail" (agent-river--log-text
+                  (format "action %s errored (%s)"
+                          (if (symbolp fn) fn "function")
+                          (error-message-string err)))))))
+    (nreverse actions)))
+
+(defvar agent-river-artifact-chosen nil
+  "Non-nil while an action the user picked by name out of several is running.
+
+Bound by `agent-river--artifact-act\=' around the thunk, and read by an
+action that confirms for itself: a menu entry reading `Launch: Review\='
+has already named what will happen, and a `y-or-n-p\=' after it is a second
+question put to an answer just given.
+
+Nil where the line had one offer and it was run outright, and that is the
+case the whole variable exists to keep apart.  A line whose only action is
+a launch starts a process on RET alone, so there the confirmation is the
+only thing between a keystroke and a running agent -- which is why this
+says a *choice was made* and never merely how the action was reached.  A
+brief name handed to `agent-river-launch-artifact\=' proves nothing: the
+same argument arrives from a line that offered no alternative.")
+
+(defun agent-river--artifact-act (subject)
+  "Run what SUBJECT offers, and return non-nil when something was offered.
+
+Nothing is asked where there is nothing to choose: one offer is run, the
+way RET on a file has always opened it, because a menu with one entry is
+a question with no alternative.  Nil rather than an error where nothing
+is offered, so the caller -- which is the one holding what the line names
+-- says which kind of nothing it was."
+  (let ((actions (agent-river--artifact-actions subject)))
+    (when actions
+      (let* ((alone (null (cdr actions)))
+             (action
+              (if alone
+                  (car actions)
+                ;; By name, and the first of a duplicated one wins.  Two
+                ;; actions spelled alike are a configuration somebody wrote,
+                ;; where uniquifying would answer it with a name nobody chose.
+                (let ((by-name (mapcar (lambda (a) (cons (plist-get a :name) a))
+                                       actions)))
+                  (cdr (assoc (completing-read "Action: " by-name nil t)
+                              by-name)))))
+             ;; Only where there was something to choose between.  See the
+             ;; variable: an action that confirms for itself reads this to
+             ;; know whether the gesture that reached it already said so.
+             (agent-river-artifact-chosen (not alone)))
+        (funcall (plist-get action :act)))
+      t)))
+
+(defun agent-river--map-subject (path)
+  "Return what the map line naming PATH is about, for an action function.
+
+An artifact record where the table has one: the key is the identity, and
+the record already carries the name and whatever context its producer put
+on it.  Where the table has none the line names a file -- `file' is what a
+key is when nobody said otherwise -- and what an action needs of that is
+the absolute name.
+
+It travels as `:path', beside the key rather than inside it, which is the
+rule `agent-river--artifact-absolute' states one subject over: a key
+cannot say where it is, and a non-file key resolved against a directory
+becomes a file in a tree it has nothing to do with.  Here the absolute
+name is what the map already had, so there is nothing to resolve and
+nothing to get wrong -- and it is set only when it is genuinely absolute,
+which is never true of a domain key."
+  (let ((record (agent-river-artifact-at path)))
+    (append (and (file-name-absolute-p path) (list :path path))
+            (or record (list :domain (agent-river--key-domain path))))))
+
 (defun agent-river-map-visit ()
-  "Descend into the directory at point, or open the file at point.
-The lens is moved rather than widened: one directory is always listed in
-full, and going deeper means looking somewhere else.
+  "Do what the line at point offers, asking which when it offers more than one.
+
+A directory is descended into: the lens is moved rather than widened, one
+directory is always listed in full, and going deeper means looking
+somewhere else.  Anything else is asked what it offers -- see
+`agent-river-artifact-action-functions' -- and a line with one offer runs
+it without a second keystroke.
 
 On a contributed row, whatever that row said RET means -- and where it
 said nothing, the node the row is about.  Refusing would be the stricter
@@ -9282,11 +9434,11 @@ is the thing the eye chose."
      (visit (funcall visit))
      ((null path) (user-error "Nothing to visit on this line"))
      (dir (agent-river-map-descend path))
-     ((file-exists-p path) (find-file path))
-     ;; An artifact that is not a file has nothing here to open, and saying it
-     ;; is "not on disk" would answer a question nobody asked -- it was never
-     ;; going to be.  Only its producer knows what opening one means, which is
-     ;; what `:visit' in `agent-river-map-domains' is for.
+     ((agent-river--artifact-act (agent-river--map-subject path)))
+     ;; Nothing was offered, and which of the two things to say is the
+     ;; domain's.  An artifact that is not a file has nothing here to open,
+     ;; and saying it is "not on disk" would answer a question nobody asked
+     ;; -- it was never going to be.
      ((not (eq (agent-river--key-domain path) 'file))
       (user-error "%s: nothing registered to open it with" path))
      (t (user-error "%s is not on disk" (abbreviate-file-name path))))))
