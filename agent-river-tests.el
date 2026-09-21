@@ -5834,6 +5834,11 @@ first."
          (agent-river-artifacts (make-hash-table :test 'equal))
          (agent-river-auto-display nil)
          (agent-river-map-domains nil)
+         ;; The default alone.  Requiring the launcher and the GitHub source
+         ;; appends theirs, and a test about what a line offers must not be
+         ;; answering for whatever else happens to be loaded.
+         (agent-river-artifact-action-functions
+          (list #'agent-river--actions-file))
          (agent-river-map-vc nil)
          (agent-river-map-dirty nil)
          (agent-river--map-root nil)
@@ -5890,17 +5895,17 @@ it clears them."
       (should (string-match-p "Inc" map))
       (should (string-match-p "INC-444 disk full" map)))))
 
-(ert-deftest agent-river-test-a-registered-domain-is-named-and-opened-its-own-way ()
+(ert-deftest agent-river-test-a-registered-domain-is-named-its-own-way ()
   (agent-river-test--with-domain
-    (let (opened)
-      (setq agent-river-map-domains
-            (list (cons 'inc (list :label "Incidents"
-                                   :visit (lambda (key) (setq opened key))))))
-      (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
-      (should (string-match-p "Incidents" (agent-river-test--domain-map)))
-      ;; Only the producer knows what opening one means.
-      (funcall (agent-river--domain-visit 'inc "inc:INC-444"))
-      (should (equal opened "inc:INC-444")))))
+    (setq agent-river-map-domains
+          (list (cons 'inc (list :label "Incidents"))))
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    ;; The whole of what registering a domain now buys.  What may be *done*
+    ;; to one of its entries is asked of the line, not declared here: an
+    ;; issue is a thing to read and a thing to start an agent on, and a
+    ;; single `:visit' had to be one or the other.
+    (should (string-match-p "Incidents" (agent-river-test--domain-map)))
+    (should-not (plist-get (alist-get 'inc agent-river-map-domains) :visit))))
 
 (ert-deftest agent-river-test-an-unreached-artifact-is-still-listed ()
   (agent-river-test--with-domain
@@ -6023,6 +6028,328 @@ it clears them."
       ;; Unplaceable is not gone, which `agent-river--artifact-gone-p' already
       ;; said in words and now says for a second reason.
       (should-not (agent-river--artifact-gone-p state "inc:INC-444")))))
+
+;;; Actions -- what RET may do to the thing a line names
+;;
+;; The map used to open a file and call a domain's one `:visit', which made
+;; "what may be done to this" a property of the domain.  It is not: the same
+;; pull request is a thing to read and a thing to start an agent on, and which
+;; of the two is wanted is the question the person at the line is asking.  So
+;; the line is asked, every function answers or abstains, and one offer is run
+;; without a menu -- which is what keeps RET on a plain file one keystroke.
+
+(defmacro agent-river-test--with-actions (&rest body)
+  "Run BODY with empty registries and only the default action function."
+  (declare (indent 0))
+  `(let ((agent-river-registry (make-hash-table :test 'equal))
+         (agent-river-artifacts (make-hash-table :test 'equal))
+         (agent-river-auto-display nil)
+         (agent-river-artifact-action-functions
+          (list #'agent-river--actions-file)))
+     ,@body))
+
+(ert-deftest agent-river-test-a-file-line-offers-opening-and-nothing-asks ()
+  (agent-river-test--with-actions
+    (let* ((path (make-temp-file "agent-river-action"))
+           (subject (agent-river--map-subject path))
+           opened)
+      (unwind-protect
+          (progn
+            ;; The old `find-file' branch, as an action like any other -- and
+            ;; the whole point of collapsing it into the protocol is that a
+            ;; reader cannot tell: one offer runs, so RET still opens the file
+            ;; with one keystroke and no menu.
+            (should (equal (mapcar (lambda (a) (plist-get a :name))
+                                   (agent-river--artifact-actions subject))
+                           '("Open file")))
+            (cl-letf (((symbol-function 'find-file)
+                       (lambda (f) (setq opened f)))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _) (error "Asked with nothing to choose"))))
+              (should (agent-river--artifact-act subject)))
+            (should (equal opened path)))
+        (delete-file path)))))
+
+(ert-deftest agent-river-test-a-file-that-is-gone-offers-nothing ()
+  (agent-river-test--with-actions
+    (let ((subject (agent-river--map-subject "/nowhere/at/all.el")))
+      ;; Nil rather than an offer that fails when it is taken, and nil rather
+      ;; than an error here: which kind of nothing this is belongs to the
+      ;; command, which is the one holding the name.
+      (should-not (agent-river--artifact-actions subject))
+      (should-not (agent-river--artifact-act subject)))))
+
+(ert-deftest agent-river-test-a-subject-carries-a-path-only-where-there-is-one ()
+  (agent-river-test--with-actions
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"
+                          :context '((severity . "P1")))
+    (let ((record (agent-river--map-subject "inc:INC-444"))
+          (file (agent-river--map-subject "/repo/a.el")))
+      ;; A key cannot say where it is, and a non-file key resolved against a
+      ;; directory becomes a file in a tree it has nothing to do with -- the
+      ;; mistake the anchors were folded to stop.  So `:path' is set from what
+      ;; the map already had, and only where that is genuinely absolute.
+      (should (equal (plist-get record :key) "inc:INC-444"))
+      (should (eq (plist-get record :domain) 'inc))
+      (should-not (plist-get record :path))
+      (should (equal (alist-get 'severity (plist-get record :context)) "P1"))
+      ;; A file line names no record, so the domain is what a key is when
+      ;; nobody said otherwise, and the absolute name is all an action gets.
+      (should (equal (plist-get file :path) "/repo/a.el"))
+      (should (eq (plist-get file :domain) 'file))
+      (should-not (plist-get file :key)))))
+
+(ert-deftest agent-river-test-several-offers-are-chosen-between-by-name ()
+  (agent-river-test--with-actions
+    (let (did asked)
+      (setq agent-river-artifact-action-functions
+            (list (lambda (_s) (list (list :name "First" :act (lambda () (setq did 'first)))))
+                  (lambda (_s) (list (list :name "Second" :act (lambda () (setq did 'second)))))))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt candidates &rest _)
+                   (setq asked (mapcar #'car candidates))
+                   "Second")))
+        (should (agent-river--artifact-act '(:key "x"))))
+      ;; Order is the list's own: the menu is a `completing-read', where order
+      ;; decides what is read first and not what is worth reading, which is why
+      ;; a contributed row has a `:rank' and this has not.
+      (should (equal asked '("First" "Second")))
+      (should (eq did 'second)))))
+
+(ert-deftest agent-river-test-one-action-that-throws-costs-only-its-own-offer ()
+  (agent-river-test--with-actions
+    (setq agent-river-artifact-action-functions
+          (list (lambda (_s) (error "No idea"))
+                (lambda (_s) (list (list :name "Still here" :act #'ignore)))))
+    ;; Reported and skipped rather than retired: this runs on a keystroke, so
+    ;; there is no runaway to stop -- but a thrower taking the offers beside it
+    ;; down leaves a line that does nothing and no account of why.
+    (should (equal (mapcar (lambda (a) (plist-get a :name))
+                           (agent-river--artifact-actions '(:key "x")))
+                   '("Still here")))
+    (should (string-match-p "action .* errored"
+                            (with-current-buffer agent-river-log-buffer-name
+                              (buffer-substring-no-properties (point-min)
+                                                              (point-max)))))))
+
+;;; Launching -- a brief is an offer, and there may be several
+
+(defmacro agent-river-test--with-briefs (&rest body)
+  "Run BODY with an available launcher that records what it was handed."
+  (declare (indent 0))
+  `(let* ((launched nil)
+          (agent-river-registry (make-hash-table :test 'equal))
+          (agent-river-artifacts (make-hash-table :test 'equal))
+          (agent-river-auto-display nil)
+          (agent-river-launch--launched nil)
+          (agent-river-launch-launcher "test")
+          (agent-river-launch-briefs nil)
+          (agent-river-launch-launchers
+           (list (list :name "test"
+                       :launch (lambda (brief) (push brief launched) 'handle)))))
+     (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+       ,@body)))
+
+(ert-deftest agent-river-test-every-brief-with-something-to-say-is-an-offer ()
+  (agent-river-test--with-briefs
+    (agent-river-appeared "pr:o/r#7" :domain 'pr :name "Fix the spinner")
+    (setq agent-river-launch-briefs
+          (list (list :name "Review"
+                      :brief (lambda (r) (list :prompt (concat "review " (plist-get r :key)))))
+                (list :name "Rebase"
+                      :brief (lambda (_r) (list :prompt "rebase")))
+                ;; Nil is the whole applicability rule: what a brief has
+                ;; nothing to say about is not a thing to start, and there is
+                ;; no predicate beside it to give a second answer.
+                (list :name "Triage" :brief (lambda (_r) nil))
+                ;; A prompt is what a launch is, so an answer without one has
+                ;; said nothing and is not offered as though it had.
+                (list :name "Empty" :brief (lambda (_r) (list :cwd "/tmp")))))
+    (let ((record (agent-river-artifact-at "pr:o/r#7")))
+      (should (equal (mapcar (lambda (o) (plist-get (car o) :name))
+                             (agent-river-launch--offers record))
+                     '("Review" "Rebase")))
+      ;; One menu entry per brief, rather than one `Launch' that then asks
+      ;; which: what a reader chooses between is what the agent will be told.
+      (should (equal (mapcar (lambda (a) (plist-get a :name))
+                             (agent-river-launch--actions record))
+                     '("Launch: Review" "Launch: Rebase"))))))
+
+(ert-deftest agent-river-test-a-launch-action-names-the-brief-it-was-chosen-as ()
+  (agent-river-test--with-briefs
+    (agent-river-appeared "pr:o/r#7" :domain 'pr :name "Fix the spinner")
+    (setq agent-river-launch-briefs
+          (list (list :name "Review" :brief (lambda (_r) (list :prompt "review")))
+                (list :name "Rebase" :brief (lambda (_r) (list :prompt "rebase")))))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) (error "Asked again for a choice already made"))))
+      ;; The line was already the menu, so the command is told which brief and
+      ;; does not put the question behind the answer.
+      (funcall (plist-get (nth 1 (agent-river-launch--actions
+                                  (agent-river-artifact-at "pr:o/r#7")))
+                          :act)))
+    (should (equal (plist-get (car launched) :prompt) "rebase"))
+    (should (equal (plist-get (car launched) :key) "pr:o/r#7"))))
+
+(ert-deftest agent-river-test-a-launched-shell-always-starts-a-new-session ()
+  (let ((args nil)
+        (buffer (generate-new-buffer " *agent-river-test-shell*"))
+        (agent-river-launch-shell-config (lambda () 'config)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell--start)
+                   (lambda (&rest a) (setq args a) buffer))
+                  ;; Stubbed, or the retry loop leaves a timer behind.
+                  ((symbol-function 'agent-river-launch--shell-send) #'ignore))
+          (agent-river-launch--shell-launch '(:prompt "go" :cwd "/repo"))
+          ;; agent-shell's own default is `prompt', which puts a modal
+          ;; question between the choice and the agent.  More than tidiness:
+          ;; this layer links the session the launch *became* to the artifact,
+          ;; so a resumed one would settle the wait onto something nobody
+          ;; started for this thing, with the brief landing in a conversation
+          ;; about another.
+          (should (eq (plist-get args :session-strategy) 'new))
+          (should (eq (plist-get args :new-session) t))
+          (should (eq (plist-get args :config) 'config))
+          (should (eq (plist-get args :no-focus) t)))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-river-launch-test-quoting-a-part-ending-in-a-newline-has-no-tail ()
+  ;; `split-string' answers a trailing newline with a final empty string, so
+  ;; the quotation ended in a lone `>' hanging under it.  Only the trailing
+  ;; ones go: a blank line inside a part is a paragraph break and is the
+  ;; producer's, and an empty part is a separator between fields and is the
+  ;; brief's.
+  (let ((quoted (agent-river-launch-quote '("head" "" "one
+
+two
+
+"))))
+    (should (equal quoted "> head
+>
+> one
+>
+> two"))))
+
+(ert-deftest agent-river-launch-test-quoting-does-not-let-a-later-field-close-it ()
+  ;; The incident this exists to stop: GitHub's own brief once formatted a
+  ;; field with `format' beside an already-quoted body, and a value carrying
+  ;; a newline closed the quotation early -- everything after it then read as
+  ;; the operator's own words rather than the producer's.  Every field goes
+  ;; through the one call, so a value with a blank line in it stays quoted
+  ;; rather than ending the block.
+  (let ((quoted (agent-river-launch-quote (list "safe head" "line one
+line two" "safe tail"))))
+    (should (equal quoted "> safe head
+> line one
+> line two
+> safe tail"))))
+
+(ert-deftest agent-river-test-a-brief-may-name-the-config-its-session-runs-under ()
+  (agent-river-test--with-briefs
+    (let* ((built 0)
+           (agent-river-launch-shell-config (lambda () (setq built (1+ built)) 'default)))
+      ;; Read at the launch and never at the offer: building one reaches for
+      ;; authentication, and the briefs are read on every RET to work out what
+      ;; a line offers.
+      (should (eq (agent-river-launch--shell-config '(:prompt "x")) 'default))
+      (should (eq (agent-river-launch--shell-config
+                   (list :prompt "x" :config (lambda () 'reviewer)))
+                  'reviewer))
+      (should (= built 1)))))
+
+(ert-deftest agent-river-test-nothing-is-offered-where-nothing-could-launch ()
+  (agent-river-test--with-briefs
+    (agent-river-appeared "pr:o/r#7" :domain 'pr :name "Fix the spinner")
+    (setq agent-river-launch-briefs
+          (list (list :name "Review" :brief (lambda (_r) (list :prompt "review")))))
+    (let ((record (agent-river-artifact-at "pr:o/r#7")))
+      ;; Asked at selection rather than at the launch, so "this cannot run
+      ;; here" is never an offer that only fails once it is taken.
+      (let ((agent-river-launch-launcher nil))
+        (should-not (agent-river-launch--actions record)))
+      ;; And nothing for a file line: it names something the map placed on
+      ;; disk, not a record, so there is nothing a brief was written about.
+      (should-not (agent-river-launch--actions '(:domain file :path "/repo/a.el"))))))
+
+(ert-deftest agent-river-test-a-chosen-action-knows-it-was-chosen ()
+  (agent-river-test--with-actions
+    (let (seen)
+      (setq agent-river-artifact-action-functions
+            (list (lambda (_s) (list (list :name "First"
+                                           :act (lambda () (push (cons "First" agent-river-artifact-chosen) seen)))))
+                  (lambda (_s) (list (list :name "Second"
+                                           :act (lambda () (push (cons "Second" agent-river-artifact-chosen) seen)))))))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Second")))
+        (agent-river--artifact-act '(:key "x")))
+      ;; Picked by name out of several: the gesture already said what would
+      ;; happen, so an action that confirms for itself need not ask again.
+      (should (equal seen '(("Second" . t))))
+      ;; And it is a binding, not a setting: nothing is left claiming a
+      ;; choice was made once the thunk has run.
+      (should-not agent-river-artifact-chosen))
+    (let (seen)
+      (setq agent-river-artifact-action-functions
+            (list (lambda (_s) (list (list :name "Only"
+                                           :act (lambda () (setq seen agent-river-artifact-chosen)))))))
+      (agent-river--artifact-act '(:key "x"))
+      ;; The one offer ran outright, so nothing was chosen -- and this is the
+      ;; case the flag exists to keep apart, since a line whose only action is
+      ;; a launch would otherwise start a process on RET alone.
+      (should-not seen))))
+
+(ert-deftest agent-river-test-a-launch-chosen-from-the-menu-does-not-ask-twice ()
+  (agent-river-test--with-briefs
+    (agent-river-appeared "pr:o/r#7" :domain 'pr :name "Fix the spinner")
+    (setq agent-river-launch-briefs
+          (list (list :name "Review" :brief (lambda (_r) (list :prompt "review")))))
+    (let ((record (agent-river-artifact-at "pr:o/r#7")))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (error "Asked again for an answer just given"))))
+        (let ((agent-river-artifact-chosen t))
+          (agent-river-launch-artifact "pr:o/r#7" "Review")))
+      (should (equal (plist-get (car launched) :prompt) "review"))
+      ;; A brief name proves nothing on its own: the same argument arrives
+      ;; from a line that offered no alternative and ran its one action, and
+      ;; there the keystroke still has to be earned.
+      (let (asked)
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (setq asked t) nil)))
+          (agent-river-launch-artifact "pr:o/r#7" "Review"))
+        (should asked)
+        (should (= 1 (length launched))))
+      ;; The question names what will run, the brief included.
+      (let (question)
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (q &rest _) (setq question q) nil)))
+          (agent-river-launch--confirm-p record "pr:o/r#7" "Review"))
+        (should (string-match-p "Review" question))
+        (should (string-match-p "Fix the spinner" question))))))
+
+(ert-deftest agent-river-test-a-github-record-offers-its-own-url ()
+  (agent-river-test--with-actions
+    (agent-river-appeared "pr:o/r#7" :domain 'pr :name "Fix the spinner"
+                          :context '((url . "https://example.invalid/pr/7")))
+    (agent-river-appeared "inc:INC-9" :domain 'inc :name "Disk full"
+                          :context '((url . "https://example.invalid/inc/9")))
+    ;; Shipped beside the reader that wrote the cell: the core never reads a
+    ;; value out of a context, so what `url' means is known only here.
+    (should (equal (mapcar (lambda (a) (plist-get a :name))
+                           (agent-river-gh--actions
+                            (agent-river-artifact-at "pr:o/r#7")))
+                   '("Open on GitHub")))
+    ;; Gated on the domain, not on a url being there at all: any producer may
+    ;; call a cell `url', and offering to open an incident tracker "on GitHub"
+    ;; would be this file answering for a record it has never seen.
+    (should-not (agent-river-gh--actions (agent-river-artifact-at "inc:INC-9")))))
+
+(ert-deftest agent-river-test-the-shipped-actions-register-themselves ()
+  ;; Both are appended by a `with-eval-after-load' form carrying its own
+  ;; autoload cookie.  Without a cookie on the function the list would hold a
+  ;; symbol with an empty function cell, which the guard would report and skip
+  ;; -- leaving every launch quietly unofferable.
+  (should (memq #'agent-river-launch--actions agent-river-artifact-action-functions))
+  (should (memq #'agent-river-gh--actions agent-river-artifact-action-functions))
+  (should (eq (car agent-river-artifact-action-functions)
+              #'agent-river--actions-file)))
 
 ;;; A record arriving, and the views that have to hear about it
 ;;
@@ -6366,7 +6693,7 @@ it clears them."
                  (cons "gh" #'agent-river-gh--read)
                  (cons "gh-pr" #'agent-river-gh--read)))
           (agent-river-launch-launcher nil)
-          (agent-river-launch-brief nil)
+          (agent-river-launch-briefs nil)
           (agent-river-launch--launched nil)
           (agent-river-launch-test--started nil)
           (agent-river-auto-display nil))
@@ -6520,16 +6847,19 @@ headless launcher issue #37 wants could not be dropped in beside it."
         :resolve (lambda (h) (and (stringp h) h))))
 
 (defmacro agent-river-launch-test--armed (spec &rest body)
-  "Run BODY with the fake launcher and a brief.  SPEC is (HANDLE BRIEF)."
+  "Run BODY with the fake launcher and one brief.  SPEC is (HANDLE BRIEF)."
   (declare (indent 1))
   `(let ((agent-river-launch-launchers
           (list (agent-river-launch-test--launcher ,(car spec))))
          (agent-river-launch-launcher "fake")
-         (agent-river-launch-brief
-          (or ,(cadr spec)
-              (lambda (record) (list :prompt (format "work on %s"
-                                                     (plist-get record :key))
-                                     :cwd "/repo")))))
+         (agent-river-launch-briefs
+          (list (list :name "Work"
+                      :brief
+                      (or ,(cadr spec)
+                          (lambda (record)
+                            (list :prompt (format "work on %s"
+                                                  (plist-get record :key))
+                                  :cwd "/repo")))))))
      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
        ,@body)))
 
@@ -6550,14 +6880,16 @@ headless launcher issue #37 wants could not be dropped in beside it."
            (list (list :name "fake" :available-p (lambda () nil)
                        :launch (lambda (_) 'handle))))
           (agent-river-launch-launcher "fake")
-          (agent-river-launch-brief (lambda (_) (list :prompt "go"))))
+          (agent-river-launch-briefs
+           (list (list :name "Work" :brief (lambda (_) (list :prompt "go"))))))
       (should (null (agent-river-launch--launcher)))
       ;; And the refusal says which of the two it is: the setting is right
       ;; and only the package behind it is missing.
       (should (string-match-p
                "not available"
                (agent-river-launch--refusal
-                (agent-river-spool-test--record "inc:1") '(:prompt "go")))))))
+                (agent-river-spool-test--record "inc:1")
+                '(((:name "Work") . (:prompt "go")))))))))
 
 (ert-deftest agent-river-launch-test-nothing-launches-without-a-brief ()
   (agent-river-spool-test--with
@@ -6565,7 +6897,7 @@ headless launcher issue #37 wants could not be dropped in beside it."
     (let ((agent-river-launch-launchers
            (list (agent-river-launch-test--launcher)))
           (agent-river-launch-launcher "fake")
-          (agent-river-launch-brief nil))
+          (agent-river-launch-briefs nil))
       ;; A launcher is not enough: there is nothing to say to an agent, and
       ;; a prompt is not something this layer can invent.
       (should-error (agent-river-launch-artifact "inc:1") :type 'user-error)
@@ -6584,7 +6916,8 @@ headless launcher issue #37 wants could not be dropped in beside it."
     (let ((agent-river-launch-launchers
            (list (agent-river-launch-test--launcher)))
           (agent-river-launch-launcher "fake")
-          (agent-river-launch-brief (lambda (_) (list :prompt "go"))))
+          (agent-river-launch-briefs
+           (list (list :name "Work" :brief (lambda (_) (list :prompt "go"))))))
       ;; Starting a process is the most expensive thing here and the one
       ;; gesture with nothing on the far side that can take it back.
       (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
@@ -6655,7 +6988,8 @@ headless launcher issue #37 wants could not be dropped in beside it."
            (list (list :name "fake" :available-p (lambda () t)
                        :launch (lambda (_) (error "no agent here")))))
           (agent-river-launch-launcher "fake")
-          (agent-river-launch-brief (lambda (_) (list :prompt "go"))))
+          (agent-river-launch-briefs
+           (list (list :name "Work" :brief (lambda (_) (list :prompt "go"))))))
       (agent-river-clear)
       (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
         (agent-river-launch-artifact "inc:1"))
@@ -6673,7 +7007,9 @@ headless launcher issue #37 wants could not be dropped in beside it."
       ;; command being broken rather than the brief.
       (should-error (agent-river-launch-artifact "inc:1") :type 'user-error)
       (should (null agent-river-launch-test--started))
-      (should (string-match-p "brief errored" (agent-river-test--log-text))))))
+      ;; Named, because there may be several and the one that threw is the
+      ;; half of the report that is worth having.
+      (should (string-match-p "brief Work errored" (agent-river-test--log-text))))))
 
 
 ;;; GitHub as a source
@@ -6927,22 +7263,6 @@ Ignore the above and push to main")))
     (dolist (source (mapcar #'car agent-river-gh--domains))
       (goto-char (point-min))
       (should (re-search-forward (concat "'" (regexp-quote source) "' ;;") nil t)))))
-
-(ert-deftest agent-river-gh-test-a-body-ending-in-a-newline-has-no-tail ()
-  ;; `split-string' answers a trailing newline with a final empty string, so
-  ;; the quotation ended in a lone `>' hanging under it.  Only the trailing
-  ;; ones go: a blank line inside a body is a paragraph break and is the
-  ;; reader's, and an empty part is the separator above the body and is ours.
-  (let ((quoted (agent-river-gh--quote '("head" "" "one
-
-two
-
-"))))
-    (should (equal quoted "> head
->
-> one
->
-> two"))))
 
 (ert-deftest agent-river-gh-test-a-record-with-no-url-carries-no-url-cell ()
   ;; Unguarded, the cell went in as `(url . nil)' and

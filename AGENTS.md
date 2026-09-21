@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (434 tests). -L . is required: the tests require all four .el files.
+# Full suite (449 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -820,6 +820,83 @@ performed the dispatch, and nothing in this package performs one. A user does.
   `agent-river-drop-artifact` takes back -- so the session is looked up while
   there is still nothing to take back. A test pins it.
 
+### Actions — what RET may do to the thing a line names
+
+`agent-river-artifact-action-functions` is the third extension protocol
+beside consumers and producers, and the only one that answers a question
+rather than carrying state either way: a line of the map is *asked* what can
+be done to the thing it names, by every function in the list, and the answers
+are collected (`agent-river--artifact-actions`) and either run or offered
+(`agent-river--artifact-act`). Each is handed the subject and returns
+`(:name STRING :act THUNK)` entries, or nil.
+
+- **It replaced a `:visit` per domain, and the reason is that "what may be
+  done to this" is not a property of the domain.** An issue on the map is a
+  thing to read *and* a thing to start an agent on; a single thunk had to be
+  one or the other, and which is wanted is the question the person at the
+  line is asking. So the domain table is `:label` and nothing else — one
+  mechanism answers this and a `:visit` beside it would be a second.
+- **Opening a file is an action like any other** (`agent-river--actions-file`,
+  the default entry). It was a branch of `agent-river-map-visit` and leaving
+  it there would be exactly the second mechanism this collapses: a file line
+  answering the question somewhere else. Nothing about it reads differently
+  to a user, which is the point of the next bullet.
+- **One offer is run without asking.** A menu with one entry is a question
+  with no alternative, so RET on a plain file still opens it with one
+  keystroke. The friction a sharp action needs is the action's own, and
+  **whether it is still worth asking for is what `agent-river-artifact-chosen`
+  answers**: bound around the thunk when the user picked it by name out of
+  several, nil when the line's one offer was run outright. A menu entry
+  reading `Launch: Review` has already named what will happen, so
+  `agent-river-launch--confirm-p` takes it as the deliberate act and does not
+  put a second question to an answer just given — which is
+  `agent-river--approval-confirm-p`'s rule one subject over: keep the friction
+  where it earns its place, not where the mechanism happens to pass. Where it
+  still earns it is the case the flag exists to keep apart: a line whose only
+  action is a launch runs it outright, so there the confirmation is the only
+  thing between a keystroke and a running agent. Hence a *choice was made*
+  rather than *how this was called* — a brief name handed to
+  `agent-river-launch-artifact` proves nothing, since the same argument
+  arrives from a line that offered no alternative.
+- **Nil is the whole of the applicability rule.** There is no predicate to
+  register and no domain to be listed under, which is the rule the domain
+  sections already live by: something that has arrived is offered whatever
+  these have for it without waiting to be configured. Asking twice — a
+  predicate and then the thing itself — would be a second account of one
+  answer, which is why `agent-river-launch--offers` returns the brief it
+  already computed rather than a yes.
+- **Guarded per function, reported and skipped, never retired.** This runs on
+  a keystroke rather than on every tool call, so there is no runaway to stop
+  — an observer's third rule does not apply and the other two do. What the
+  guard is for is the other half: one thrower must not take the offers beside
+  it down with it, which leaves a line that does nothing and no account of
+  why.
+- **The subject carries `:path` beside the key, never inside it**
+  (`agent-river--map-subject`). An artifact record where the table has one,
+  and where it has none the line names a file — `file` is what a key is when
+  nobody said otherwise. What an action needs of a file is the absolute name,
+  and it travels as a separate key for `agent-river--artifact-absolute`'s
+  reason: a key cannot say where it is, and a non-file key resolved against a
+  directory becomes a file in a tree it has nothing to do with. Here the
+  absolute name is what the map already had, so there is nothing to resolve,
+  and it is set only where the name genuinely is absolute — which is never
+  true of a domain key.
+- **Order is the list's own, and deliberately not a `:rank`.** A contributed
+  row has one because which contributor was registered first says nothing
+  about which row is worth reading, and every row is on screen at once. A
+  menu is a `completing-read`, where order decides what is read first and not
+  what is worth reading. What the two shipped registrations append is
+  therefore in load order, and reordering is a `setq`.
+- **Two things register themselves and both are appended**: the GitHub
+  source's `browse-url` (`agent-river-gh--actions`) and one launch per brief
+  (`agent-river-launch--actions`). The GitHub one is **gated on the domain,
+  not on a `url` cell being present** — any producer may call a cell `url`,
+  and offering to open somebody's incident tracker "on GitHub" would be that
+  file answering for a record it has never seen. It ships there rather than
+  in a user's config because that is the file that put the cell in the
+  context: the core never reads a value out of one, so what a cell means is
+  known only beside the reader that wrote it.
+
 ### The third direction — `agent-river-spool.el`, `agent-river-launch.el`
 
 Consumers carry state outward, producers add events about a session that
@@ -941,15 +1018,67 @@ before the deletion, so that deferring is not the same as forgetting.
 - **There is no `:cwd` on a spec.** Where an agent would be started is not a
   property of the thing it would work on, and this package never reads a
   value out of a context — so a source that knows a working tree puts it in
-  the context and `agent-river-launch-brief`, which is the user's own code,
-  reads it back out.
+  the context and a brief, which is the user's own code, reads it back out.
 - **Two switches, and the sharp one is the brief.**
   `agent-river-launch-launcher` says whether anything can launch at all;
-  `agent-river-launch-brief` returns what to say about a given artifact, or
-  nil, which is the arming switch — a launcher with no brief can never
-  launch. One function rather than one per domain, because dispatching on
-  `:domain` is two lines inside it and a second mechanism deciding one
-  question is what this package spends its exceptions avoiding.
+  a brief returns what to say about a given artifact, or nil, which is the
+  arming switch — a launcher with no brief can never launch.
+- **A brief is not one thing, so there is a list of them**
+  (`agent-river-launch-briefs`, `agent-river-launch--offers`). It was one
+  function dispatching on `:domain` inside itself, and what that cannot
+  express is the ordinary case: the same pull request is a thing to review
+  and a thing to rebase, and those are different prompts under quite
+  possibly different models. Which is wanted is a question for the person at
+  the line, not something a domain answers once. So every brief with
+  something to say about a record is one offer, and **nil is the whole of
+  the applicability rule** — the answer the brief already gives, read once
+  rather than restated as a predicate beside it, which would be the second
+  account this package spends its exceptions avoiding. A brief with no
+  `:prompt` is one of those and not an offer that fails when it is taken:
+  what a launch *is*, is a prompt reaching an agent. Guarded per entry, so a
+  thrower costs its own offer and not the ones beside it, and the log line
+  names it — with several of them, which one threw is the half of the report
+  worth having.
+- **The model is the brief's to name** (`:config`,
+  `agent-river-launch--shell-config`). A prompt is worth little without the
+  configuration it is said under, and `agent-river-launch-shell-config` is
+  one thunk for the whole package — so a brief may return a `:config` of the
+  same shape, which that thunk is the default for. **A function on both
+  sides rather than a built config**, and the reason is where the offers are
+  computed: building one reaches for authentication (see
+  `--shell-available-p`), and the briefs are read on every RET to work out
+  what a line offers. Only the one that is launched is built. Launcher-
+  specific keys on a brief are that launcher's to read; `:prompt` and `:cwd`
+  are everybody's.
+- **Quoting producer text is a launch concern, not a GitHub one**
+  (`agent-river-launch-quote`, moved here from `agent-river-gh.el`). A brief
+  that embeds an artifact's own text — a body, a title, a branch a fork
+  spelled however it liked — answers the identical question whatever wrote
+  that text: is this quoted material or is it read as the operator's own
+  instruction. `agent-river-gh-brief` was the only brief when this was
+  written and kept its own copy, but the file's own commentary expects a
+  tracker, a mailbox or a build to follow it, and each would face the same
+  question — which is what the merge rule in the Conventions section is for:
+  sameness of the *question answered* licenses sharing a mechanism, and this
+  is the identical question with different producer text each time. The
+  stakes are sharper than the ordinary case for that rule: the copy that
+  drifts here is not a rendering that looks different, it is an injection
+  defence quietly not applied to the next source's text. It stayed a GitHub
+  function until a second brief needed it, which is the point in
+  "merge only where there is something to merge" at which there is.
+- **A launched shell always starts a new session**
+  (`:session-strategy 'new` in `agent-river-launch--shell-launch`).
+  agent-shell's own default is `prompt`, which puts a modal question about
+  resuming between the choice and the agent — the failure
+  `agent-river-launch--confirm-p` answers one gesture up, arriving from
+  underneath. But it is the layer's premise rather than a tidiness: a launch
+  here is a session that *did not exist*, which is what
+  `--resolve-pending` waits for and links to the artifact. A resumed session
+  existed before the launch and is quite possibly in the registry already, so
+  the "named and heard from" wait would settle instantly onto something nobody
+  started for this thing, and the brief would land in a conversation about
+  another one. Deliberately not a setting: the alternative is not a preference
+  somebody might hold, it is this layer not working.
 - **Unavailable is absent** (`agent-river-launch--launcher`,
   `--available-p`). Asked at selection, so "this cannot run here" is the
   first thing said rather than the last: asked at the launch, the user was
@@ -958,10 +1087,29 @@ before the deletion, so that deferring is not the same as forgetting.
   anything here being told.
 - **Launching asks first** (`agent-river-launch-artifact`). Starting a
   process is the most expensive thing this package does and the one gesture
-  with nothing on the far side that can take it back. It is also suitable
-  as a `:visit` in `agent-river-map-domains`, which is what makes RET on a
-  line of the map start an agent on it — the whole of "launching happens
-  from the map", with no new keymap and no change to `agent-river.el`.
+  with nothing on the far side that can take it back. What the question
+  names is what will run, **the brief included** now that there may be
+  several. It takes an optional brief name, which is how the map reaches a
+  particular one: the line was already the menu, so asking again would put
+  the question behind the answer — and `agent-river-launch--confirm-p` is
+  where that is decided, off `agent-river-artifact-chosen` rather than off
+  the argument, for the reason the actions section gives.
+- **The map offers one launch per brief, not one `Launch` that then asks**
+  (`agent-river-launch--actions`, registered on
+  `agent-river-artifact-action-functions`). What a reader is choosing
+  between is what the agent will be told, so that is what the menu says;
+  folded into one entry it would take two prompts to reach, the second
+  asking what the first presented as answered. This is the whole of
+  "launching happens from the map" — no new keymap and no change to
+  `agent-river.el`. Nothing is offered where the launcher cannot run here
+  (unavailable is absent, asked at selection) or where the subject has no
+  `:key`: a file line names something the map placed on disk, not a record,
+  and there is nothing a brief was written about. **The registering form
+  needs an autoload cookie on the function too**, for
+  `agent-river-gh--read`'s reason one file over — extracted into the
+  autoloads file it runs before anything here is defined, and a symbol with
+  an empty function cell is caught by the guard, reported and skipped, which
+  leaves every launch quietly unofferable.
 - **The edge lands by itself, and that is the point of doing it here**
   (`agent-river-launch--resolve-pending`). Whoever starts an agent on an
   artifact is the one caller holding both ends of the relationship, so the
@@ -1118,19 +1266,22 @@ before the deletion, so that deferring is not the same as forgetting.
   holding tools. With a person in the loop the person is the defence, so the
   quoting is a courtesy rather than the whole of it — and it is kept anyway,
   because it is what has to be right on the day #37 is built.
-- **The `>` goes on in one place** (`agent-river-gh--quote`), and the pull
-  request is what paid for it. The body was split on newlines from the
-  start; the branch name added beside it was `format`ed into a single line,
-  so a name carrying a newline closed the quotation and everything after it
-  read as the operator's own words — the injection the framing exists to
-  stop, walking out through the field that had just been added next to it.
-  A branch name is a stranger's text exactly as a body is: a fork spells one
-  however it likes. What stays outside is ours and interpolates nothing —
-  the framing, the export, and the note that a pull request is a draft,
-  which is a sentence read off a boolean.
+- **The quoting itself is `agent-river-launch-quote` now, not this file's.**
+  It is where the pull request paid for the lesson that still governs it: the
+  body was split on newlines from the start, and the branch name added
+  beside it was `format`ed into a single line instead, so a name carrying a
+  newline closed the quotation and everything after it read as the
+  operator's own words. Moved to the launch layer for the reason given
+  there — the question it answers has nothing to do with GitHub, and every
+  future source asks it too. What is left here is what genuinely is GitHub's:
+  a branch name is a stranger's text exactly as a body is, a fork spells one
+  however it likes, and both are handed to the shared quoting call rather
+  than interpolated by hand. What stays outside the quotation entirely is
+  ours and interpolates nothing — the framing, the export, and the note that
+  a pull request is a draft, which is a sentence read off a boolean.
 - **Two framings, dispatched on the domain** (`agent-river-gh--framing`),
-  which is the two lines inside one brief that `agent-river-launch-brief`
-  asks for rather than a function per domain. They are written side by side
+  which is the two lines inside one brief that `agent-river-launch-briefs`
+  asks for rather than a brief per domain. They are written side by side
   because what has to stay parallel is the part that is not about the work:
   both introduce the same quotation and both say it is not an instruction.
   Only the ask differs — an issue is a request to weigh, a pull request is a
@@ -1732,7 +1883,10 @@ Four things about the map are load-bearing:
   its name, whether it has ended, and whatever context its producer put on
   it, and asking a domain to answer those again would be the second account
   that table exists to avoid. Five things it owes. **Registering one is
-  optional and only about presentation** -- `:label` and `:visit`; a domain
+  optional and only about presentation** -- `:label`, and now nothing else:
+  it carried a `:visit` for RET as well, which made it a second place
+  answering what may be *done* to a thing, and that is not the domain's to
+  answer once (see the actions section below). A domain
   absent from the list is still drawn, because something that has arrived
   must not wait for configuration before it can be seen, which is the failure
   mode of every dashboard that has to be taught about a new source. **An

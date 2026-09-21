@@ -52,6 +52,7 @@
 
 (require 'seq)
 (require 'agent-river-spool)
+(require 'agent-river-launch)
 
 (defgroup agent-river-gh nil
   "GitHub issues and pull requests as a source of artifacts."
@@ -285,39 +286,6 @@ stranger's request rather than as work already under way."
                    "quotation.")
            "Work out whether it is well-founded before acting on it."))))
 
-(defun agent-river-gh--quote (parts)
-  "Return PARTS as one blockquote, every line of each of them inside it.
-
-The `>' goes on in exactly one place, and that is the whole point of the
-function.  The body was split on newlines from the start and the branch
-name added beside it was not, so a name carrying one closed the
-quotation and everything after it read as the operator's own words --
-the injection the framing exists to stop, walking out through the field
-that had just been added next to it.  Anything that is GitHub's goes
-through here, and the next field to arrive is covered before it is
-written.
-
-An empty part is the blank quoted line between the head and the body,
-and is spelled without the trailing space a prefix alone would leave.
-
-A part's *trailing* blank lines are dropped, because a GitHub body
-commonly ends in a newline and `split-string' answers that with a final
-empty string -- which came out as a lone `>' hanging under the
-quotation.  Only the trailing ones: a blank line inside a body is a
-paragraph break and is the reader's, and an empty part is the separator
-above and is ours."
-  (mapconcat
-   (lambda (part)
-     (if (string-empty-p (or part ""))
-         ">"
-       (let ((lines (split-string part "\r?\n")))
-         (while (and (cdr lines) (string-empty-p (car (last lines))))
-           (setq lines (butlast lines)))
-         (mapconcat (lambda (line)
-                      (if (string-empty-p line) ">" (concat "> " line)))
-                    lines "\n"))))
-   parts "\n"))
-
 ;;;###autoload
 (defun agent-river-gh-brief (record)
   "Return what to say to an agent about RECORD, and where to start it.
@@ -354,7 +322,7 @@ look at rather than a thing to launch on."
          :cwd (alist-get 'cwd context)
          :prompt
          (concat opening "\n\n"
-                 (agent-river-gh--quote
+                 (agent-river-launch-quote
                   (append (list (or (plist-get record :name) "") url)
                           (when branch
                             (list (if-let* ((base (alist-get 'base context)))
@@ -371,6 +339,37 @@ look at rather than a thing to launch on."
                  ;; it is what exists for where the state *leaves* the
                  ;; package, and a prompt to another agent is exactly that.
                  (or (agent-river-markdown) "")))))))
+
+;;;###autoload
+(defun agent-river-gh--actions (record)
+  "Offer to open the GitHub object RECORD names in a browser.
+
+An `agent-river-artifact-action-functions' entry, and it ships here
+rather than in a user's config because this is the file that put the url
+in the context.  `agent-river.el' never reads a value out of one -- that
+is what lets a record carry a severity, a body and a URL without the core
+learning about any of them -- so what a cell means is known only beside
+the reader that wrote it, which is the same line a source adapter is on.
+
+Gated on the domain rather than on a url being there at all.  Any
+producer may call a cell `url', and offering to open somebody's incident
+tracker \"on GitHub\" would be this file answering for a record it has
+never seen."
+  (let ((url (and (rassq (plist-get record :domain) agent-river-gh--domains)
+                  (alist-get 'url (plist-get record :context)))))
+    (when url
+      (list (list :name "Open on GitHub"
+                  :act (lambda () (browse-url url)))))))
+
+;; Appended, like the launcher's: opening a thing comes before starting an
+;; agent on it only by load order, and reordering is the user's `setq'.  The
+;; cookie above is what keeps the entry from being a symbol with an empty
+;; function cell at startup -- the same silence `agent-river-gh--read' is
+;; autoloaded against.
+;;;###autoload
+(with-eval-after-load 'agent-river
+  (add-to-list 'agent-river-artifact-action-functions
+               #'agent-river-gh--actions t))
 
 
 ;;; Polling

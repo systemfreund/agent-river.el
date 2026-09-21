@@ -579,17 +579,55 @@ aggregating case at once; read it before writing anything that shells out.
 ## Domains
 
 Registering a domain in `agent-river-map-domains` is optional and only ever
-about presentation — a `:label` for the section and a `:visit` for RET:
+about presentation — a `:label` for the section:
 
 ```elisp
 (add-to-list 'agent-river-map-domains
-             (cons 'inc (list :label "Incidents"
-                              :visit (lambda (key) (browse-url (ticket-url key))))))
+             (cons 'inc (list :label "Incidents")))
 ```
 
 A domain absent from it is still drawn: something that has arrived should not
 have to wait for configuration before it can be seen, which is the failure mode
 of every dashboard that has to be taught about a new source.
+
+## Actions — what RET may do
+
+A line of the map is *asked* what can be done to the thing it names, by every
+function in `agent-river-artifact-action-functions`. Each is handed the subject
+— the plist `agent-river-artifact-at` produces for a record, plus `:path` where
+the line names something absolute on disk — and returns actions, or nil:
+
+```elisp
+(defun my/incident-actions (subject)
+  (when (eq (plist-get subject :domain) 'inc)
+    (list (list :name "Open the ticket"
+                :act (lambda () (browse-url (ticket-url (plist-get subject :key)))))
+          (list :name "Acknowledge"
+                :act (lambda () (ticket-ack (plist-get subject :key)))))))
+
+(add-to-list 'agent-river-artifact-action-functions #'my/incident-actions t)
+```
+
+Nil is the whole of the applicability rule — there is no predicate to register
+and no domain to be listed under, so something that has arrived is offered
+whatever these have for it without waiting to be configured. **One offer is run
+without asking**, which is what keeps RET on a plain file a single keystroke;
+several are offered by name.
+
+An action that wants confirming asks for it itself, and reads
+`agent-river-artifact-chosen` to know whether it still should: that is non-nil
+only while an action the user picked *by name out of several* is running. A
+menu entry saying `Launch: Review` has already named what will happen, so the
+launcher does not ask again — but a line whose only action is a launch runs it
+outright, and there the confirmation is the only thing between a keystroke and
+a running agent.
+
+Three come registered: opening a file (the default entry), opening a GitHub
+issue or pull request in a browser (`agent-river-gh.el`), and one launch per
+brief (`agent-river-launch.el`). The order is the list's own — the menu is a
+`completing-read`, where order decides what is read first and not what is worth
+reading, so unlike a map contributor's rows there is no `:rank` and reordering
+is a `setq`.
 
 ## Placing a key
 
@@ -823,37 +861,43 @@ Two switches, and both are off out of the box.
 
 ```elisp
 (setq agent-river-launch-launcher "agent-shell")   ; can anything launch
-(setq agent-river-launch-brief #'my/brief)         ; is there anything to say
+(setq agent-river-launch-briefs                    ; is there anything to say
+      (list (list :name "Review" :brief #'my/review-brief)
+            (list :name "Rebase" :brief #'my/rebase-brief)))
 ```
 
-A **brief** is a function of the artifact plist returning what to say and
-where to say it, or nil:
+A **brief** is a function of the artifact plist returning what to say, where to
+say it and who says it, or nil:
 
 ```elisp
-(defun my/brief (record)
-  (when (eq (plist-get record :domain) 'issue)
-    (list :prompt (concat "Have a look at " (plist-get record :name) ".\n\n"
+(defun my/review-brief (record)
+  (when (eq (plist-get record :domain) 'pr)
+    (list :prompt (concat "Review " (plist-get record :name) ".\n\n"
                           (agent-river-markdown))
-          :cwd (alist-get 'cwd (plist-get record :context)))))
+          :cwd (alist-get 'cwd (plist-get record :context))
+          ;; Optional, and the same shape as `agent-river-launch-shell-config':
+          ;; this brief's sessions run under this model and session config.
+          :config #'my/reviewer-config)))
 ```
 
 Nil is the arming switch: a launcher with no brief can never launch. It is
 also the only place a context is read, which is what lets a record carry a
 severity, a body and a URL without agent-river learning about any of them.
 
-`M-x agent-river-launch-artifact` asks before it starts anything. It is also
-suitable as a `:visit` in `agent-river-map-domains`, which is what makes RET
-on a line of the map start an agent on it:
+A **list** of briefs rather than one function, because a brief is not one
+thing: the same pull request is a thing to review and a thing to rebase, and
+those are different prompts and quite possibly different models. Which one is
+wanted is a question for the person at the line, not something a `:domain` can
+answer once — so every brief with something to say about a record is one entry
+in the menu RET opens, and nil is what keeps the others out of it. There is no
+applicability predicate beside it; that would be a second account of the answer
+the brief already gives.
 
-```elisp
-(setf (alist-get 'issue agent-river-map-domains)
-      (list :label "Issues" :visit #'agent-river-launch-artifact))
-(setf (alist-get 'pr agent-river-map-domains)
-      (list :label "Pull requests" :visit #'agent-river-launch-artifact))
-```
-
-Registering is optional — a domain nothing has been told about is still
-drawn — but a domain with no `:visit` is a section you can only look at.
+`M-x agent-river-launch-artifact` asks before it starts anything, and takes an
+optional brief name so the map can reach a particular one without asking twice.
+Launching from the map needs no configuration at all: this file registers
+itself on `agent-river-artifact-action-functions`, so a line already offers
+`Launch: Review` beside `Open on GitHub`.
 
 A **launcher** is a plist in `agent-river-launch-launchers`:
 
@@ -863,6 +907,12 @@ A **launcher** is a plist in `agent-river-launch-launchers`:
 | `:available-p` | can it run here at all — is the package it drives loaded |
 | `:launch` | `(BRIEF) -> HANDLE`; BRIEF also carries `:key` and `:name` |
 | `:resolve` | `(HANDLE) -> session id`, once there is one, or nil |
+
+The shipped agent-shell launcher always starts a **new** session
+(`:session-strategy 'new`), whatever `agent-shell-session-strategy` is set to.
+Not a preference: this layer links the session a launch *became* to the
+artifact, so a resumed one would be linked to something nobody started for it,
+with the brief landing in a conversation about another thing.
 
 `:resolve` exists because agent-shell's session id only appears after the
 handshake: a launch hands back a buffer and the id is asked for afterwards,
@@ -924,3 +974,10 @@ GitHub said — title, url, branch names, body — is quoted and introduced as
 somebody else's words, so nothing in it reads as an instruction that arrived
 with your standing. An issue is framed as a request to weigh, a pull request
 as a change to read.
+
+The quoting itself — `agent-river-launch-quote`, in `agent-river-launch.el` —
+is not GitHub's: any brief that embeds an artifact's own text faces the same
+question, whatever wrote that text, so it is shared rather than reimplemented
+per source. Everything a producer wrote goes through it together, one call,
+because a field quoted on its own can close the quotation early and hand
+everything after it the operator's own standing.
