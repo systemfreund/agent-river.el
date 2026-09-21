@@ -126,10 +126,10 @@ its hook synchronous."
   :type 'integer)
 
 (defcustom agent-river-tool-glyphs
-  '(;; Three hosts' names for one thing.
-    ("Bash" . "💻") ("BashOutput" . "💻") ("execute" . "💻")
-    ;; Changing part of a file, and putting a whole one down.
-    ("Edit" . "✏️") ("edit" . "✏️") ("Write" . "📄"))
+  '(("Bash" . "💻") ("BashOutput" . "💻") ("execute" . "💻")
+    ("Edit" . "✏️") ("edit" . "✏️") ("Write" . "📄")
+    ("Read" . "👓") ("dead" . "👓")
+    ("Agent" . "🤖"))
   "What a log line draws in place of a tool's name, keyed by that name.
 
 Usually the host's own word is the most specific thing the line can say.
