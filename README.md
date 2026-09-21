@@ -84,12 +84,12 @@ ground truth left in it.
 |---|---|---|
 | **Measurement** | 23 steps, 6 touches of `mpv.el` | folded into the state |
 | **Claim** | `agent-river-set-intent` — what the agent says it is doing | its own slots, reports as `:claimed-intent`, **never feeds a signal** |
-| **Current-state** | is this buffer modified, is git dirty, is a permission request still open | queried where it is read, **never folded** |
+| **Current-state** | is this buffer modified, is this file still on disk, is a permission request still open | queried where it is read, **never folded** |
 
 The third distinction is the one integrators get wrong. A fact that stops being
 true without an event to say so must not be stored: a pending approval is
-answered by a button in another buffer, a diffstat is wrong again by the next
-write. Fold what happened; query what is.
+answered by a button in another buffer, a file the map says is there is
+deleted a second later. Fold what happened; query what is.
 
 ## Artifacts: things that are not files
 
@@ -562,19 +562,16 @@ and never the screen.
 A row is `:text` (one line; the map escapes it), `:key` (stable across redraws,
 or point lands on the wrong row after one), `:rank` (low first) and optionally
 `:face` — **a face symbol, never a face on the text**, because tree-sitter owns
-`face` in that buffer and would quietly drop a text property. `:summary` is how
-a contributor earns the line's fixed-width column, and it must be a reading *of
-the rows*, the same data smaller, never a second account of it.
+`face` in that buffer and would quietly drop a text property.
 
-Rows are detail: a node whose only children are rows draws closed and TAB opens
-it, so a contributor's rows are read when a reader asks that line for them.
-`:summary` is the way onto the line itself, and the only thing a contributor
-can say that is read without a keystroke.
+Rows are detail: a node draws closed and TAB opens it, so a contributor's rows
+are read when a reader asks that line for them. Nothing a contributor says
+reaches the line itself — the line is the listing, and what can be read straight
+down it is the map's own.
 
 Batch per root — thirty lines with a subprocess each, every TTL, is a fork bomb
 with a view attached — and expect to be **retired on the first error**, like an
-observer. The diffstat (`agent-river--rows-vc`) is the asynchronous, batched and
-aggregating case at once; read it before writing anything that shells out.
+observer.
 
 ## Domains
 
@@ -740,14 +737,13 @@ text restructure the view watching it.
 
 The view of the artifact tables: one directory listed in full, each entry
 annotated with what has happened *beneath* it, so several agents spread over a
-large repository are visible at once. Who has been in a name, and how long ago,
-are rows under it (TAB); the line carries what can be read straight down the
-listing.
+large repository are visible at once. Who has been in a name, how long ago, and
+what is happening in it right now are rows under it (TAB); the line carries what
+can be read straight down the listing.
 
-Three facts per line, each on its own channel: contention and position are
-markers, existence is a strike-through, and the diffstat is a fixed column.
-`n`/`p`, `M-n`/`M-p` and `>`/`<` are three grains of motion, shared with the HUD
-and the approval queue.
+Two facts per line, each on its own channel: contention is a marker and
+existence is a strike-through. `n`/`p`, `M-n`/`M-p` and `>`/`<` are three grains
+of motion, shared with the HUD and the approval queue.
 
 Nothing drops out of this view by getting old. `M-x agent-river-forget-artifacts`
 is what says the work has landed, and `C` sweeps the files that are gone.
