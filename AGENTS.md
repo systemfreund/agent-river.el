@@ -376,7 +376,10 @@ These are load-bearing; the tests enforce most of them.
   "where on disk" -- and it went with the position marker, its last caller:
   a section listing keys them by the key itself, which is what a non-file
   artifact's name already is. **Which domains are in play is derived too**
-  (`agent-river-domains`, narrowed by `agent-river--map-live-domains`). It
+  (`agent-river-domains`, and `agent-river--domain-sections` for the
+  non-file ones the map draws -- there was a third,
+  `agent-river--map-live-domains`, which narrowed one to the other and
+  ended up with no caller at all). It
   was a `defcustom` holding `(file)`, documented as the list a reader could
   consult instead of walking the table, and nothing ever added to it -- so
   it went on saying `file` while `inc` records piled up beside it. A

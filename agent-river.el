@@ -1732,7 +1732,7 @@ declared list of what has arrived is a second account of the table by
 construction: it can only be right for as long as somebody keeps it in
 step, and here nobody did, which is the failure this package spends most
 of its comments avoiding one subject at a time.  The walk it was meant to
-save is the one `agent-river--map-live-domains\=' was already doing."
+save is the one `agent-river--domain-sections\=' was already doing."
   (let (domains)
     (maphash (lambda (_key artifact)
                (let ((domain (agent-river-artifact-domain artifact)))
@@ -6697,17 +6697,6 @@ inferred from the string's shape: a directory can be called anything, and
 a listing that decided what to do by looking at a name would eventually
 run git over somebody's incident queue."
   (cdr (assoc root (agent-river--domain-sections))))
-
-(defun agent-river--map-live-domains ()
-  "Return every non-file domain with a record in `agent-river-artifacts\='.
-Discovered rather than declared, so a producer that invents a domain sees
-it on the map without registering anything.
-
-Read off `agent-river--domain-sections\=' rather than filtering
-`agent-river-domains\=' a second time, so the sections the map draws and the
-domains it names cannot come from two walks that saw the table
-differently."
-  (mapcar #'cdr (agent-river--domain-sections)))
 
 (defun agent-river--domain-label (domain)
   "Return DOMAIN's section heading: the domain, as it was declared.

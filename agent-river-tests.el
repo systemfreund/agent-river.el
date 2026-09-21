@@ -4827,7 +4827,11 @@ the text -- which is all the motion reads -- is the same either way."
     ;; it went on saying `file' while `inc' records piled up beside it.  A
     ;; declared list of what has arrived is a second account of the table.
     (should (equal (agent-river-domains) '(inc review file)))
-    (should (equal (agent-river--map-live-domains) '(inc review)))))
+    ;; And the map's sections are the non-file ones: `notes.org' is in the
+    ;; table and on no line, which is what a record declared without a
+    ;; domain now is.
+    (should (equal (mapcar #'cdr (agent-river--domain-sections))
+                   '(inc review)))))
 
 (ert-deftest agent-river-test-forgetting-a-record-nobody-has-says-so ()
   (agent-river-test--with-artifacts
@@ -5532,7 +5536,8 @@ line two" "safe tail"))))
               (should-not (agent-river--map-domain "rev:"))
               (should (eq (agent-river--map-domain "review:") 'review))
               (should-not (agent-river--map-domain "/repo"))
-              (should (equal (agent-river--map-live-domains) '(inc review)))
+              (should (equal (mapcar #'cdr (agent-river--domain-sections))
+                             '(inc review)))
               (should (= reads 1))))
         (advice-mapc (lambda (f _p) (advice-remove 'agent-river-domains f))
                      'agent-river-domains)))))
