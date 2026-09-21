@@ -123,6 +123,7 @@ and is the brief's."
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
 (declare-function shell-maker-busy "shell-maker")
 (declare-function agent-shell-anthropic-make-claude-code-config "agent-shell-anthropic")
+(declare-function shell-maker-set-buffer-name "shell-maker")
 (defvar agent-shell--state)
 
 (defcustom agent-river-launch-launcher nil
@@ -139,8 +140,8 @@ The other switch, and the sharp one.  Each entry is a plist:
 
   :name   what the menu calls it, and what `agent-river-launch-artifact'
           takes to pick one without asking
-  :brief  (RECORD) -> (:prompt STRING :cwd DIRECTORY :config FUNCTION)
-          or nil
+  :brief  (RECORD) -> (:prompt STRING :cwd DIRECTORY :config FUNCTION
+                       :buffer-name STRING) or nil
 
 RECORD is the plist `agent-river-artifacts-list' produces -- `:key',
 `:domain', `:name', `:context' and the rest.  Nil means there is nothing
@@ -156,6 +157,12 @@ wanted is a question for the person looking at the line, not something a
 record is one entry in the menu RET opens, and nil is what keeps the
 others out of it.  There is no applicability predicate beside it: that
 would be a second account of the answer the brief already gives.
+
+`:buffer-name' is optional and names the buffer the session runs in --
+agent-shell's own name for it otherwise.  It is the brief's rather than
+this layer's because two briefs on one artifact are two sessions somebody
+has to tell apart, and only the brief knows which of them it is.  A
+launcher-specific key, like `:config': see `agent-river-launch--shell-name'.
 
 `:config' is optional and overrides `agent-river-launch-shell-config' for
 this brief's sessions -- a function of no arguments returning the
@@ -180,6 +187,45 @@ The default for every brief.  A brief that wants its own model or session
 configuration returns a `:config' of the same shape, which is preferred
 over this one -- see `agent-river-launch-briefs'."
   :type 'function)
+
+(defun agent-river-launch-shell-config-with-options (options &optional base)
+  "Return a config function like BASE, with OPTIONS set on the session.
+
+For a brief\='s `:config\=' -- the model and session configuration a prompt
+is worth nothing without.  BASE defaults to
+`agent-river-launch-shell-config\=', so what comes back is the *configured*
+agent plus these options rather than an agent of this brief\='s own, and
+that is the whole of why this is here rather than in everybody\='s config.
+Written out by hand the same four lines have to name some agent\='s config
+maker, and at that point `agent-river-launch-shell-config\=' has stopped
+deciding anything: point it at another agent and every brief goes on
+building the old one, with nothing anywhere saying so.
+
+OPTIONS is an alist of (OPTION . VALUE) in the agent\='s own vocabulary --
+\"model\", \"mode\", \"effort\".  This package neither knows nor checks what
+any of them mean, the way it never reads a value out of an artifact\='s
+context: what a cell means is known beside whoever wrote it.  Their order
+is the caller\='s to get right and it is the agent that cares -- they are
+applied one at a time and re-advertised after each, so a model has to
+come before anything scoped to it.
+
+BASE is read now rather than at every call, which is what makes setting
+`agent-river-launch-shell-config\=' to the result of this the ordinary
+thing it looks like.  Read later it would be its own base and call
+itself for ever -- on the availability check as much as on the launch,
+so a map where nothing had been launched yet would hang on the first
+RET.
+
+Nil in is nil out.  Nil is what the default answers where agent-shell
+cannot build a config at all, and `agent-river-launch--shell-available-p\='
+reads it to say the launcher cannot run here; a wrapper that turned it
+into an alist holding one key would have the launcher claim it can, and
+the first artifact somebody took would be where they found out."
+  (let ((base (or base agent-river-launch-shell-config)))
+    (lambda ()
+      (when-let* ((config (funcall base)))
+        (setf (alist-get :default-config-options config) (lambda () options))
+        config))))
 
 (defcustom agent-river-launch-shell-tries 60
   "How many times a launched shell is offered its prompt, one a second.
@@ -234,6 +280,43 @@ authentication, and the briefs are read on every RET to work out what a
 line offers.  Only the one that is launched is built."
   (funcall (or (plist-get brief :config) agent-river-launch-shell-config)))
 
+(defun agent-river-launch--shell-name (buffer name)
+  "Give BUFFER the NAME a brief asked for, where it asked for one.
+
+A brief\='s `:buffer-name\=', and a launcher-specific key the way `:config\=' is:
+what a headless CLI would do with one is nothing.  Absent is the ordinary
+answer and leaves agent-shell the name it chose, so nothing renames
+anything unless somebody wrote a name down.  The brief rather than this
+layer, because two briefs on one artifact are two sessions that have to be
+told apart, and the only thing that knows which is which is the brief --
+named from the record here, `Review\=' and `Address the review\=' would be one
+name and a `<2>\='.
+
+`shell-maker-set-buffer-name\=' and not `agent-shell-rename-buffer\=', which is
+buffer-locally aliased to a command taking no argument that prompts for
+one.  The setter is what agent-shell calls itself in `agent-shell-restart\=',
+and it records the name as an override -- a bare `rename-buffer\=' would be
+undone by the next thing that asks shell-maker what this buffer is called.
+
+Guarded, and that guard is the reason this is a function rather than two
+lines in the caller.  Everything here happens *after* the launch: the
+process is up and the prompt is already on its way.  A throw would leave
+`:launch\=' through `agent-river-launch-artifact\='s handler, which writes
+`launch failed\=' and never pushes the record `--resolve-pending\=' reads --
+so a session that is running would be unnamed, unlinked to the artifact it
+was started for, and described in the log as one that never started."
+  (when (and (stringp name)
+             (not (string-empty-p (string-trim name)))
+             (fboundp 'shell-maker-set-buffer-name))
+    (condition-case err
+        (shell-maker-set-buffer-name buffer (string-trim name))
+      (error
+       (agent-river-log "fail"
+                        (agent-river--log-text
+                         (format "launch: %s could not be named %s (%s)"
+                                 (buffer-name buffer) name
+                                 (error-message-string err))))))))
+
 (defun agent-river-launch--shell-launch (brief)
   "Start an agent-shell session for BRIEF and hand it its prompt.
 
@@ -257,6 +340,7 @@ gesture up: what the user picked has already said what should happen."
                   :no-focus t :new-session t)))
     (unless (buffer-live-p buffer)
       (error "agent-shell started no buffer"))
+    (agent-river-launch--shell-name buffer (plist-get brief :buffer-name))
     (agent-river-launch--shell-send buffer (plist-get brief :prompt)
                                     agent-river-launch-shell-tries)
     buffer))
