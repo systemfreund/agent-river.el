@@ -5563,12 +5563,49 @@ the text, the way it does for the insertion at the other end."
       (delete-region (point-min) (point)))))
 
 (defun agent-river--block-here ()
-  "Return what names the block line point is on, or nil when it is on none.
-The id of the session for its header, that id and an index for one of its
-detail lines.  This is the map\\='s `agent-river--map-here' at the block\\='s
-grain, for the same reason: the block is torn down and rebuilt, so a place
-in it has to be named rather than remembered as a position."
+  "Return the id of the session whose line point is on, or nil for none.
+This is the map\\='s `agent-river--map-here' at the block\\='s grain, for the same
+reason: the block is torn down and rebuilt, so a place in it has to be named
+rather than remembered as a position.  It held the id and an index while a
+session had detail lines under it, and is a plain id now that the block is
+one line per session."
   (get-text-property (line-beginning-position) 'agent-river-block))
+
+;;;###autoload
+(defun agent-river-session-at-point ()
+  "Return the id of the session the place point is in names, or nil.
+
+For a command that acts on the session somebody is looking at, and the
+reason it is worth a function: `agent-river--current\=' is whichever session
+acted most recently, which with several running is quite possibly not the
+one on the line -- and a command that acts on the wrong session reads
+exactly like one that acted on the right one.  That is the default
+`agent-river-link-artifact\=' refuses to fall back on, for the same reason.
+
+Three places name a session exactly and this is all of them.  A **block
+line** carries the id the rebuild finds it by.  An **agent-shell buffer**
+holds the ACP session id, which is the string the hooks key the registry
+with -- so this answers there wherever point is, the buffer being the
+subject.  And a **line of the approval queue** names the request, which
+knows whose door it is holding open; nil there while the
+`permission-request\=' event has not landed yet, since the responder that
+fills the entry first is not told whose question it is.
+
+A log line answers nothing: it names an event, and the session inside a
+paired call id is there to match an outcome to the line that opened it,
+not to say what the reader is looking at.  A map line names an artifact,
+and the parties drawn on it are labels rather than ids.
+
+The id, never a state.  It may name a session the registry has folded
+nothing for yet -- an agent-shell buffer has its id from the handshake and
+the first hook event lands some moments later, which is the window
+`agent-river-launch--resolve-pending\=' exists to wait out."
+  (or (and (derived-mode-p 'agent-river-mode) (agent-river--block-here))
+      (agent-river--shell-session)
+      (and (derived-mode-p 'agent-river-approval-queue-mode)
+           (when-let* ((here (agent-river--approval-here))
+                       (offer (gethash (car here) agent-river--offers)))
+             (plist-get offer :session)))))
 
 (defun agent-river--block-goto (here)
   "Put point back on the block line HERE names, if the rebuild still has it.

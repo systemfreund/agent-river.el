@@ -3357,6 +3357,39 @@ first line from a survey."
     ;; A cursor parked on an outline star says nothing about the line.
     (should (looking-at-p "beta"))))
 
+(ert-deftest agent-river-test-a-place-names-the-session-it-is-about ()
+  (agent-river-test--with-block
+    ;; Point starts on alpha's line, and the line is the answer -- not
+    ;; `agent-river--current', which is whichever session acted last and
+    ;; with two of them is quite possibly not the one being looked at.
+    (should (equal (agent-river-session-at-point) "s1"))
+    (should (agent-river--scan 1 #'agent-river--entry-line-p))
+    (should (equal (agent-river-session-at-point) "s2"))
+    ;; And a place in the block that names no session says so rather than
+    ;; falling back to one: a command acting on the wrong session reads
+    ;; exactly like one that acted on the right one.
+    (goto-char (point-max))
+    (should-not (agent-river-session-at-point)))
+  ;; A log line names an event, not a subject.  The session inside a paired
+  ;; call id is there to match an outcome to the line that opened it.
+  (agent-river-test--with-log
+    (should-not (agent-river-session-at-point)))
+  ;; The queue names the session whose door is being held open, through the
+  ;; request rather than through the line.
+  (let ((agent-river--offers (make-hash-table :test 'equal)))
+    (puthash "req-1" (agent-river-test--offer "req-1" "s2") agent-river--offers)
+    (agent-river-test--with-queue
+      (should (agent-river--approval-scan 1 #'agent-river--approval-line-p))
+      (should (equal (agent-river-session-at-point) "s2"))))
+  ;; And nil where the responder has filled the entry but the
+  ;; `permission-request' event has not landed: that half carries the
+  ;; session, and this one was never told whose question it is.
+  (let ((agent-river--offers (make-hash-table :test 'equal)))
+    (puthash "req-1" (agent-river-test--offer "req-1" nil) agent-river--offers)
+    (agent-river-test--with-queue
+      (should (agent-river--approval-scan 1 #'agent-river--approval-line-p))
+      (should-not (agent-river-session-at-point)))))
+
 (ert-deftest agent-river-test-log-motion-lands-on-the-timestamp ()
   (agent-river-test--with-log
     ;; A log line starts with its timestamp and has no structure in front of

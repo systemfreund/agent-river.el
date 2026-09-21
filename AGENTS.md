@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (392 tests). -L . is required: the tests require all four .el files.
+# Full suite (393 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -806,6 +806,29 @@ export's claim to be a snapshot of the block true: two orderings would be two
 accounts of one question, right only for as long as somebody kept them in
 step. Ordered by label rather than by whichever session acted last, so a line
 does not move under the eye because another agent took a step.
+
+**Which session a place names is asked, never guessed**
+(`agent-river-session-at-point`). Three places answer it exactly and that is
+all of them: a block line, which carries the id the rebuild finds it by; an
+agent-shell buffer, where the ACP id is the string the hooks key the registry
+with, and where the buffer is the subject so point does not matter; and a
+line of the approval queue, through the request rather than through the line
+— nil there until the `permission-request` half lands, since the responder
+that fills the entry first is not told whose question it is. What this exists
+to keep a command away from is `agent-river--current`, the session that acted
+most recently, which is what something with nothing else to go on falls back
+to: with several running it is quite possibly not the one being looked at,
+and a command that acted on the wrong session reads exactly like one that
+acted on the right one. `agent-river-link-artifact` refuses that fallback for
+its own subject and says so in its docstring; this is the same refusal with
+something to put in its place. A log line answers nothing on purpose — it
+names an event, and the session inside a paired call id is there to match an
+outcome to the line that opened it, not to say what a reader is looking at;
+nor does a map line, which names an artifact whose parties are labels rather
+than ids. It returns the id and never a state, because a place may name a
+session the registry has folded nothing for yet: an agent-shell buffer has
+its id from the handshake and the first hook event lands after it, which is
+the window `agent-river-launch--resolve-pending` was built to wait out.
 
 ### Linking a session to an artifact by hand
 
