@@ -6091,6 +6091,22 @@ headless launcher issue #37 wants could not be dropped in beside it."
     ;; it rides in the context and is read back by the brief.
     (should (equal "/repo" (alist-get 'cwd context)))))
 
+(ert-deftest agent-river-gh-test-the-repository-rides-in-the-context ()
+  ;; And not only in the key.  Downstream is a brief and a map row, and
+  ;; neither may take `o/r' back out of `issue:o/r#42': which a key is --
+  ;; declared or a path -- is read off the table rather than parsed, and a
+  ;; consumer that parsed one would be answering for every producer that
+  ;; ever spells a key with a colon in it.  The cell and the key are the
+  ;; one `repo' the delivery carried, read once.
+  (let* ((spec (agent-river-gh--read "gh" (agent-river-gh-test--delivery)))
+         (context (plist-get spec :context)))
+    (should (equal "o/r" (alist-get 'repo context)))
+    (should (equal "issue:o/r#42" (plist-get spec :key))))
+  (let ((context (plist-get (agent-river-gh--read
+                             "gh-pr" (agent-river-gh-test--pr))
+                            :context)))
+    (should (equal "o/r" (alist-get 'repo context)))))
+
 (ert-deftest agent-river-gh-test-a-closed-issue-is-ended ()
   ;; The reader's own answer, and pointedly not taken through the spool any
   ;; more: whether a *first* sighting that is already over earns a record at

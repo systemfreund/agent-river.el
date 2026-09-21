@@ -187,9 +187,12 @@ context, so there is nowhere here for that text to be acted on.  What
 does act on it is `agent-river-launch-brief', which is the user's own
 code and is where the quoting is decided -- see `agent-river-gh-brief'.
 
-`cwd' is in here for a different reason.  Where an agent would be
-started is not a property of the thing it would work on, and a brief
-that wants it reads it back out of the context its own source put it in.
+`repo' and `cwd' are in here for a different reason.  Neither is
+something GitHub said about the object: one is which query the poller
+was running and the other is where an agent would be started, which is
+not a property of the thing it would work on -- so both ride in the
+context and a brief that wants either reads it back out of the context
+its own source put it in.
 
 The branch, the base and the rest of it are a pull request's and an
 issue has none of them -- which the chain says by *asking* rather than
@@ -199,6 +202,19 @@ brief needs to decide whether a pull request is worth a session at all,
 and `fork' is the one that says whether the text above it really came
 from a stranger."
   (append
+   ;; The repository, which the key already holds -- and that is why it is a
+   ;; cell rather than something downstream digs back out.  A key is either
+   ;; declared or it is a path, and which of the two is read off the table
+   ;; rather than parsed out of the key; a brief taking `o/r' back out of
+   ;; `issue:o/r#42' would be the prefix rule this package refuses one
+   ;; subject over, and it would be a second account of a name this file
+   ;; already has in its hand.  The two cannot disagree, because the key and
+   ;; this cell are one `repo' read once.  It is also the fact a line most
+   ;; wants and least has: with several entries in `agent-river-gh-repos' a
+   ;; record reading `#42 The map forgets a worktree' does not say which of
+   ;; them it came from, so this is the first row under it.
+   (when-let* ((repo (agent-river-spool--string (alist-get 'repo data))))
+     `((repo . ,repo)))
    ;; Guarded like every sibling, and it is the guard rather than the cell
    ;; that matters: unguarded, a record with no url carried `(url . nil)'
    ;; into the table, where `agent-river--rows-artifact' draws every cell it

@@ -997,6 +997,16 @@ nobody has touched; `agent-river-forget-artifacts` is the existing answer for
 a record that has stopped being news, used more often than the unfiltered
 default would need it.
 
+A delivery's context carries what GitHub said about the object — `url`,
+`author`, `labels`, `body`, and a pull request's `branch`, `base`, `review`,
+`draft` and `fork` — and two cells GitHub did not say: `repo`, the
+`owner/name` the poller was asking about, and `cwd`, the checkout it asked
+from. The key holds the repository too (`issue:owner/repo#42`), and the cell
+is there so that nothing downstream has to take it back out: which a key is —
+declared, or a path — is read off the table rather than parsed out of the key,
+and a brief or a row that parsed one would be answering for every producer
+that ever spells a key with a colon in it.
+
 `agent-river-gh-brief` is the worked example of a brief, and handles both
 domains. It shows the one thing a brief for foreign text owes: everything
 GitHub said — title, url, branch names, body — is quoted and introduced as

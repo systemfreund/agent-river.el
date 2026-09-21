@@ -1076,6 +1076,13 @@ before the deletion, so that deferring is not the same as forgetting.
   property of the thing it would work on, and this package never reads a
   value out of a context — so a source that knows a working tree puts it in
   the context and a brief, which is the user's own code, reads it back out.
+  A delivery's own facts travel the same way where a consumer will want
+  them: `agent-river-gh--context` carries the repository as a `repo` cell
+  even though the key already spells it, because taking `o/r` back out of
+  `issue:o/r#42` is the prefix rule `agent-river--key-domain` refuses one
+  subject over — a consumer that parsed a key would be answering for every
+  producer that ever puts a colon in one. The cell cannot disagree with the
+  key: both are the delivery's one `repo`, read once.
 - **Two switches, and the sharp one is the brief.**
   `agent-river-launch-launcher` says whether anything can launch at all;
   a brief returns what to say about a given artifact, or nil, which is the
