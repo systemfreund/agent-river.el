@@ -563,7 +563,7 @@ needs two more things configured."
 `agent-river-spool-mode'"))))
           (agent-river-log "fail" (agent-river--log-text
                                    (format "gh: %s" missing)))
-          (message "agent-river: %s" missing))
+          (message "agent-river-gh: %s" missing))
         (setq agent-river-gh--timer
               (run-with-timer agent-river-gh-interval agent-river-gh-interval
                               #'agent-river-gh-poll))
