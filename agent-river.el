@@ -363,14 +363,21 @@ a note it would have shared a colour with those, leaving a reader unable
 to say whether a line was about an agent or about the work.")
 
 (defface agent-river-gone '((t :inherit agent-river-stale :strike-through t))
-  "Face for a name the state knows and the disk does not.
+  "Face for a record whose subject is over.
+
+It was a name the state knew and the disk did not, on the tree listing
+this replaced; it is `agent-river-artifact-gone' now -- an issue closed, a
+pull request merged -- which is the same statement about a subject that
+has no disk to be missing from.  Either way the line stays: it was worked
+on and it is over, which is history until somebody says otherwise.
 
 Struck through rather than merely greyed, because grey is the map's word
-for several things at once -- stale, elided -- and \"this file is not
-there\" is worth saying exactly.  A face and not Markdown `~~\': the names
-are code spans and inline markup does not apply inside one, and every
-face the map wants already travels as an overlay because tree-sitter owns
-`face' in that buffer.  So this works in the plain fallback too.")
+for several things at once -- stale, elided -- and \"this is over\" is
+worth saying exactly.  A face and not Markdown `~~\': every face
+the map wants already travels as an overlay, because tree-sitter owns
+`face' in that buffer and a face written as a text property there is drawn
+once and then quietly gone.  So this works in the plain fallback too,
+which a markup answer would not.")
 
 (defconst agent-river-kinds
   '(("prompt" "◆" agent-river-prompt)
@@ -524,9 +531,8 @@ it is still the same turn.")
 The index behind `agent-river--shell-buffer', and the reason liveness is
 cheap.  A buffer recorded here is one we have seen hosting that session,
 and it is kept after it dies: that a session *had* a buffer and no longer
-does is exactly what tells `agent-river--active-p' and
-`agent-river--gone-p' that it is over, and it is the one thing a snapshot
-of the buffers alive now can never say.")
+does is exactly what tells `agent-river--active-p' that it is over, and it
+is the one thing a snapshot of the buffers alive now can never say.")
 
 (defun agent-river--shell-scan (id)
   "Return the agent-shell buffer hosting session ID by looking for it.
@@ -700,31 +706,6 @@ inactive for it."
    (t (let ((seen (agent-river-state-last-seen state)))
         (and seen (< (float-time (time-subtract (current-time) seen))
                      agent-river-session-ttl))))))
-
-(defun agent-river--gone-p (state)
-  "Return non-nil when STATE's session is known to have ended.
-
-Deliberately narrower than the negation of `agent-river--active-p': that
-one falls back to the TTL, and a session that has merely gone quiet for
-longer than the TTL is a guess at something we cannot see.  This is asked
-where a view stops saying something -- the map's position markers, and
-the names it keeps on a cold file -- so it answers from facts only: a
-session we saw agent-shell hosting whose buffer has since been killed,
-and a subagent whose own SubagentStop said it was finished.  A silent
-session nobody here owns is not gone, it is silent, and withdrawing a
-reading over that would be acting on an estimate.
-
-Which is why the root branch is gated on `agent-river--shell-hosted' and
-not merely on there being no buffer: a session run from a terminal with
-hooks wired has no buffer here and never did, and calling that gone would
-take its name and its marker off the map while it was still working.
-
-Subagents do not appear here at all any more.  They are a tally on their
-session (`agent-river--delegate') rather than a registry entry beside it,
-so there is nothing for this to retire on their behalf -- a delegated step
-was the session's, and the session is gone exactly when the session is."
-  (and (agent-river--shell-hosted (agent-river-state-id state))
-       (not (agent-river--shell-buffer (agent-river-state-id state)))))
 
 (defun agent-river--state-working-p (state)
   "Return non-nil while STATE is mid-turn, as opposed to merely alive.
@@ -1185,7 +1166,7 @@ replaying a session's events from the start."
 ;; composite ("SESSION" or "SESSION/AGENT"), so one more kind of key looks
 ;; free -- but every walker of that table would then have to begin by asking
 ;; which kind it had, and there are more of them than it seems:
-;; `agent-river--artifact-entries', `agent-river--gone-parties',
+;; `agent-river--artifact-entries', `agent-river--active-count',
 ;; `agent-river--spinning-p', the block draw, every report.  A struct serving two meanings is a union type whichever way
 ;; it is spelled, and the walker that forgets to test is wrong only for the
 ;; records it sees least often -- which here is the ones that arrived with no
@@ -2628,15 +2609,15 @@ Deferred by a tick, because `kill-buffer-hook' runs while the buffer is
 still live: redrawn inline, `agent-river--shell-buffer' would still find
 the dying buffer and draw the session straight back in.
 
-The map is told as well, and it has to be told here.  Its names and its
-position markers are the other view that reads a session as existing, and
-nothing else will ever say otherwise: a killed session sends no further
-events, so with no other agent running the map would have sat there
-naming it until someone pressed `g'.  Marking it dirty is enough -- the
-map's timer defers the redraw for us, past this buffer's death."
+The map used to be told as well, and it no longer is.  It read a session
+as existing in three places -- a position marker, a shaded name, and the
+agent count in its header -- and each of them went with the reading it
+was part of, so a kill now changes nothing the map draws: the names on
+the lines a session reached stay whatever becomes of the session, because
+it did reach them.  Marking the map dirty here would be a redraw that can
+only produce the same text."
   (remhash buffer agent-river--teardown-hooked)
-  (run-at-time 0 nil #'agent-river--redraw-block)
-  (agent-river--map-invalidate))
+  (run-at-time 0 nil #'agent-river--redraw-block))
 
 (defun agent-river--ensure-shell-teardown (id)
   "Ensure BUFFER's session teardown is installed for session ID at most once.
@@ -6393,33 +6374,6 @@ one name per agent rather than one per agent plus one per thing it
 delegated to."
   (or (agent-river-state-label state) "?"))
 
-(defun agent-river--gone-parties ()
-  "Return a hash of party label to whether every session behind it has ended.
-
-A party is a label, not a session, so the answer is a fold over every
-session behind it rather than a lookup: one live sibling keeps the party
-alive, and asking per session would have buried it with the finished one.
-
-The case that used to make this vivid is gone -- two `Explore' subagents
-of one root were both `alpha/Explore' -- because a subagent is no longer a
-session.  The fold stays because the rule it implements is about labels
-and not about subagents, and `agent-river--unique-label' is a convention
-rather than a guarantee: it is what stops two sessions sharing a label,
-and a lookup here would make this depend on that holding.
-
-Kept apart from `agent-river--artifact-entries': who still exists is a fact
-about the registry and not about the artifact tables, and pushing a copy
-of it onto every entry would be a second account of the same thing."
-  (let ((gone (make-hash-table :test 'equal)))
-    (maphash (lambda (_id state)
-               (let ((party (agent-river--party-label state)))
-                 (puthash party
-                          (and (gethash party gone t)
-                               (agent-river--gone-p state))
-                          gone)))
-             agent-river-registry)
-    gone))
-
 (defvar agent-river--artifact-memo nil
   "A one-draw cache of `agent-river--artifact-entries', or nil when not caching.
 
@@ -7375,52 +7329,48 @@ and asking again per entry would put its work behind a keystroke."
                   :parties (plist-get entry :parties)))
           entries))
 
-(defun agent-river--map-header (root entries &optional sections)
-  "Return the map's own heading for ROOT, given its ENTRIES.
+(defun agent-river--map-header (root &optional sections)
+  "Return the map's own heading for ROOT.
 
-The name of what is being shown, and how many agents are in it.  It used
-to caption the view as well -- which frame the numbers came from -- and
-that was a legend for a listing, carried on every redraw by a line that is
-read once.  The fact still holds and is documented where it is decided
-\(`agent-river-map-scope'); the heading is not where a reader goes to look
-it up.
+The name of what is being shown, and nothing else.  Two readings have
+come off this line and both for the same kind of reason.  It captioned
+the view -- which frame the numbers were read from -- and that is a
+legend: a fact that holds whatever happens, redrawn every few seconds
+onto a line that is read once.  It belongs where the frame is decided
+\(`agent-river-map-scope'), not where a reader is looking at the
+listing.
 
-The count is of agents that still exist, not of names on the map.  A name
-outlives its session on purpose, because the record was still reached and
-that stays true -- so counting names would report an audience that has
-left as though it were still there, which is the one thing this number is
-for.
+And it counted the agents in view, `2 agents' or else `quiet'.  That was
+a second account of the parties, which the listing already gives per
+line: a record somebody has reached carries the contention marker the
+view is scannable down, the names in its rows, and the
+`agent-river-map-active' property that `\\[agent-river-map-next-active]'
+walks by.  Summed into the header the same reading lost the only part
+worth having -- which line -- and answered with a number the motion
+answers with point.  What it read as, besides, was wrong for the case
+this view exists for: the line nobody has picked up is why the map is
+open, and `quiet' put that emptiness in the headline, every redraw, as
+though it were the view's subject rather than its contents.
 
 ROOT is nil in the overview, which spans SECTIONS domains and has no one
 of them to be named after.  Titling it with any of them -- the most
 recent, say -- is what this replaced: the heading then read as though that
 one were the subject and the others were somewhere inside it."
-  (let* ((gone (agent-river--gone-parties))
-         (parties (seq-remove
-                   (lambda (party) (gethash (plist-get party :party) gone))
-                   (agent-river--map-merge-parties
-                    (mapcar (lambda (entry)
-                              (list :parties (plist-get entry :parties)))
-                            entries)))))
-    (concat (agent-river--map-marker 1)
-            (agent-river--map-mark (if root
-                                       ;; Through `agent-river--map-name' like
-                                       ;; the lines below it: a label is a
-                                       ;; name, and the header is the one
-                                       ;; place one was going in bare, which
-                                       ;; both rendered it differently from
-                                       ;; every other heading and left the one
-                                       ;; name here that nothing had fenced.
-                                       (agent-river--map-name
-                                        (agent-river--domain-label
-                                         (agent-river--map-domain root)))
-                                     (format "%d domain%s" (or sections 0)
-                                             (if (= (or sections 0) 1) "" "s")))
-                                   'agent-river-prompt)
-            (if parties
-                (format "  ·  %d agent%s" (length parties)
-                        (if (= (length parties) 1) "" "s"))
-              "  ·  quiet"))))
+  (concat (agent-river--map-marker 1)
+          (agent-river--map-mark (if root
+                                     ;; Through `agent-river--map-name' like
+                                     ;; the lines below it: a label is a
+                                     ;; name, and the header is the one
+                                     ;; place one was going in bare, which
+                                     ;; both rendered it differently from
+                                     ;; every other heading and left the one
+                                     ;; name here that nothing had fenced.
+                                     (agent-river--map-name
+                                      (agent-river--domain-label
+                                       (agent-river--map-domain root)))
+                                   (format "%d domain%s" (or sections 0)
+                                           (if (= (or sections 0) 1) "" "s")))
+                                 'agent-river-prompt)))
 
 (defun agent-river--map-here ()
   "Return what identifies the line point is on, for a redraw to find again.
@@ -7498,11 +7448,8 @@ nothing."
                (level (if split 3 2)))
           (erase-buffer)
           (insert (if split
-                      (agent-river--map-header
-                       nil (apply #'append (mapcar #'cadr sections))
-                       (length sections))
-                    (agent-river--map-header (car (car sections))
-                                             (nth 1 (car sections))))
+                      (agent-river--map-header nil (length sections))
+                    (agent-river--map-header (car (car sections))))
                   "\n")
           ;; Nothing has been declared.  Said outright rather than left as a
           ;; blank buffer, because the two read alike and only one of them is

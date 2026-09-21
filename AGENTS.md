@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (393 tests). -L . is required: the tests require all four .el files.
+# Full suite (390 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -950,8 +950,8 @@ something the stream already carries: `say` folds the end of every turn,
 excerpts it in the HUD and puts it in the export, and asking the agent to
 write a file as well is the same fact from a less reliable source. Measured
 before removing it, the spool had existed for five days and had never held
-a single file. With it gone, `agent-river-spool--dir` had one caller and
-now has none, and the two halves share nothing at all.
+a single file. With it gone, the launch half's one call into the spool
+half (`agent-river-spool--dir`) went too, and the two share nothing at all.
 
 **There are no rules here, no gates, no budget and no queue, and the
 deletion is the design.** There was all of that once (`db0aa5c`): a
@@ -1722,42 +1722,40 @@ Four things about the map are load-bearing:
   marking nothing. It is gone with the decay, and the answer to a map that
   has filled up is a gesture rather than a half-life.
 
-- **A party that is gone is not counted** (`agent-river--gone-p`,
-  `agent-river--gone-parties`, read by the header). Its *name* stays on the
-  lines it reached, because the record was still reached and that does not
-  stop being true; what goes is the claim that somebody is there. There was
-  a present-tense reading on the line once -- `:current`, drawn as an eye in
-  the gutter -- and the hard case it kept getting wrong was exactly this
-  one: an agent-shell buffer killed, and the marker stayed pinned to one
-  file for as long as the registry held the state. It went, and so did the
-  row that replaced it (`agent-river--rows-step`, which named the session
-  and the tool): a step is a call open on a *file*, and there are no file
-  lines left for it to land on. Three things to keep:
-  **gone is narrower than not-active** — `agent-river--active-p` falls back to
-  the TTL, which is a guess, and a name is not withdrawn on a guess; the facts
-  are a buffer we saw and that has since been killed (`agent-river--shell-hosted`,
-  which is per session — a hooks-only CLI session never had a buffer here and
-  must not be called gone for it) and a subagent's own `SubagentStop`, plus a
-  subagent whose root is gone. **Gone is folded over
-  the party, not the session** (`agent-river--gone-parties`): two `Explore`
-  children of one root share the label `alpha/Explore`, so one live sibling
-  keeps the party. And **the kill has to say so itself** — a dead session
-  sends no further events, so `agent-river--shell-died` marks the map dirty
-  (`agent-river--map-invalidate`) and lets the timer redraw past the dying
-  buffer; without that the header goes on counting it until someone presses
-  `g`.
-- **The header is a name and a count, not a legend**
-  (`agent-river--map-header`). It carried the frame the numbers were read
-  from — a fact that is true, does not change, and was being redrawn every
-  few seconds onto a line that is read once. A legend belongs where the
-  thing is decided (`agent-river-map-scope`), not in the view. What stays is
-  what *moves*: which domain is being shown — or how many there are, in the
-  overview, since no one of them may stand for the rest — and how many
-  agents are in it. That count is of agents that **still exist**
-  (`agent-river--gone-parties`), not of names on the map — a name outlives
-  its session on purpose, because the record was still reached, so counting
-  names would report an audience that has left as though it were still
-  there.
+- **The header is a name, and nothing else** (`agent-river--map-header`).
+  Two readings have come off this line and both were second accounts. It
+  carried the frame the numbers were read from — a fact that is true, does
+  not change, and was redrawn every few seconds onto a line that is read
+  once; a legend belongs where the thing is decided
+  (`agent-river-map-scope`), not in the view. And it counted the agents in
+  what was being shown, `2 agents` or else `quiet`. That count was the
+  parties again: who is on a record is already on that record's line, in
+  the contention marker the listing is scannable down and in the rows under
+  it, and `>` walks exactly the lines the number was summing — so the header
+  answered with a number what one keystroke answers with point, having lost
+  the only part worth having, which line. `quiet` was also the wrong
+  headline for the case this view exists for: the line nobody has picked up
+  is why the map is open, and the view announced that emptiness as its
+  subject on every redraw. What is left is which domain is being shown, or
+  how many there are in the overview, since no one of them may stand for
+  the rest.
+- **Nothing on the map reads a session as still existing any more**, and the
+  machinery for it went with the count above: `agent-river--gone-parties`,
+  which folded gone-ness over the *party* rather than the session so that
+  one live sibling kept a shared label alive, and `agent-river--gone-p`
+  under it, which was narrower than not-active on purpose — a name was not
+  withdrawn on the TTL's guess, only on a buffer we saw and that has since
+  been killed. Both had had every other reader taken away first: a
+  present-tense marker on the line (`:current`, an eye in the gutter, which
+  stayed pinned to one file for as long as the registry held a killed
+  session's state), the row that replaced it (`agent-river--rows-step` — a
+  step is a call open on a *file*, and there are no file lines left), and
+  the shading. A party's *name* stays on the lines it reached whatever
+  becomes of the session, because it did reach them, so a kill now changes
+  nothing this view draws — which is why `agent-river--shell-died` no longer
+  marks the map dirty and only redraws the block. Bringing any of it back
+  means bringing back a reading first; `agent-river--active-p` is what is
+  left, and it is an estimate wherever the TTL answers it.
 - **A record that is over is struck through, not dropped**
   (`agent-river-gone`, set on `:missing` from `agent-river-artifact-gone`).
   It was worked on and it is over, which is history and stays until somebody
