@@ -58,6 +58,7 @@
 #   AGENT_RIVER_GH_SINCE   first-run lookback, a gh search date (default 1 day)
 #   AGENT_RIVER_GH_RESCAN  non-empty: ignore the watermark for this one run
 #   AGENT_RIVER_GH_KINDS   what to ask for: `issue', `pr', or both (default both)
+#   AGENT_RIVER_GH_SEARCH  extra qualifiers appended to every query (default none)
 
 set -eu
 
@@ -69,6 +70,14 @@ spool=${AGENT_RIVER_SPOOL:-$xdg/agent-river/spool}
 state=${AGENT_RIVER_GH_STATE:-$xdg/agent-river/gh}
 limit=${AGENT_RIVER_GH_LIMIT:-50}
 kinds=${AGENT_RIVER_GH_KINDS:-"issue pr"}
+# Shares the one `since' window rather than opening a query of its own: the
+# qualifier decides *which* objects within the window are worth asking about,
+# `since' decides how far back the window reaches, and asking twice would
+# double the request count per repository per poll -- against a secondary
+# rate limit already tight enough to be worth a comment of its own above.
+# Empty by default, which asks about every object rather than a narrower
+# question nobody posed.
+search=${AGENT_RIVER_GH_SEARCH:-}
 
 # Every step degrades to a no-op.  A poller that fails loudly in a cron job
 # every minute is a poller someone switches off.
@@ -187,7 +196,7 @@ for kind in $kinds; do
   # what *ended* since the last poll rather than every closed thing there is.
   asked=1
   if ! gh "$kind" list --state all --limit "$limit" \
-       --search "updated:>=$since" --json "$fields" \
+       --search "updated:>=$since${search:+ $search}" --json "$fields" \
        --jq '.[]' > "$answer" 2>/dev/null; then
     printf 'river-gh: %s query failed in %s\n' "$kind" "$repo"
     rm -f "$answer"

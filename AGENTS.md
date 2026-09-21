@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (449 tests). -L . is required: the tests require all four .el files.
+# Full suite (452 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1214,6 +1214,27 @@ before the deletion, so that deferring is not the same as forgetting.
   live with. It costs no extra request, where a second query for what has
   closed would, and what arrives is bounded by the window either way: it is
   what *ended* since the last poll, not every closed thing there is.
+- **`agent-river-gh-search` narrows every kind by one shared qualifier,
+  never a second one per kind.** It shares `since` rather than opening a
+  second query for the same window, which would double the request count
+  against the secondary rate limit the file already comments on above; a
+  different question per kind is what `agent-river-gh-kinds` is for, not a
+  second setting answering the one question this already does. Bound into
+  the poller's environment the way `AGENT_RIVER_GH_KINDS` is, and **absent
+  rather than empty when unset** — the script tells the two apart with
+  `${AGENT_RIVER_GH_SEARCH:-}`, and a customisation nobody made must reach
+  it as nobody having made one, not as an empty qualifier that happens to
+  search for everything the same way. Narrowing to `review-requested:@me`
+  costs something the unfiltered default never has to pay: the previous
+  bullet's `:gone` depends on an object still matching the query one more
+  time with a closed or merged state, and a review request is commonly
+  withdrawn the moment you submit a review — which drops the object out of
+  the search without its state ever changing in a delivery this poller
+  sees. A record you have already reviewed then sits on the map exactly as
+  if nobody had, because from here the two read alike.
+  `agent-river-forget-artifacts` is the existing answer for a record that
+  has stopped being news; this setting asks for it more than the
+  unfiltered default ever needed to.
 - **An issue and a pull request are one dialect and two source names**
   (`agent-river-gh--domains`, `AGENT_RIVER_GH_KINDS`). The script names
   which query an answer came out of — `gh` or `gh-pr` — and nests it under
