@@ -82,7 +82,7 @@ ground truth left in it.
 
 | Kind | Example | Where it lives |
 |---|---|---|
-| **Measurement** | 23 steps, 6 touches of `mpv.el` | folded into the state |
+| **Measurement** | 23 steps, 2 failures, 6 touches of `mpv.el` | folded into the state |
 | **Claim** | `agent-river-set-intent` — what the agent says it is doing | its own slots, reports as `:claimed-intent`, **never feeds a signal** |
 | **Current-state** | is this buffer modified, is this file still on disk, is a permission request still open | queried where it is read, **never folded** |
 
@@ -128,7 +128,7 @@ Three calls put it there:
                       :text "INC-444 routed to you")
 
 ;; An agent was dispatched to it.  Folded onto the *session* as a touch, so
-;; the map's parties and listing and `agent-river-touching' see it without
+;; the map's parties and listing and `agent-river-reaching' see it without
 ;; being taught anything — and it counts no step, because no tool ran.
 (agent-river-reach "inc:INC-444" session-id)
 
@@ -331,9 +331,6 @@ to prevent. Note what happened, never what you think about it.
 ;;  :subagents (:running 0 :total 1 :steps 2
 ;;              :each (("Explore" :steps 2 :fail-streak 0 :status "done"))))
 
-(agent-river-touching "supersonic-mpv.el")
-;; (("session-b" :label "worktree-…" :touches 2 :ago "9s"))
-
 (agent-river-reaching "inc:INC-444" 'session)
 ;; (("s1" :label "alpha" :touches 1 :writes 0 :ago "2m"))
 
@@ -360,14 +357,13 @@ still answers for what it cost, which reading `agent-shell--state` cannot do.
 Totals are summed **per currency**, since this is the one place the figure
 itself is shown and two currencies added together are a number true of neither.
 
-`agent-river-touching` is the one that earns its keep: two agents editing the
-same file without knowing about each other is a real hazard in a worktree setup.
-It matches on the **basename**, so one file reached from a worktree and from the
-main checkout counts as one artifact. `agent-river-reaching` matches the **key
-exactly**, which is right for an artifact that has no other spelling.
+`agent-river-reaching` matches the **key exactly**, which is right for an
+artifact that has no other spelling. There was a query beside it,
+`agent-river-touching`, which asked the same question of a *file* and matched
+on the basename so that a worktree and a main checkout counted as one; it went
+with the views that named files, along with `M-x agent-river-who-touches`.
 
-Interactively, `M-x agent-river-status` lists every session in full and
-`M-x agent-river-who-touches` answers the contention question.
+Interactively, `M-x agent-river-status` lists every session in full.
 
 `M-x agent-river-markdown` and `agent-river-copy-report` render the state for an
 issue or a PR. The export is a third derivation beside the panel and the report,
@@ -409,8 +405,8 @@ got, whether it finished — read with `agent-river-children`:
 Three consequences worth knowing if you consume this.
 
 - **A delegated step is the session's step**, and a delegated touch lands in
-  the session's own artifact tables — which is what `agent-river-touching` and
-  the map read. You do not have to range over a family to find it.
+  the session's own artifact tables rather than in a record of the child's.
+  You do not have to range over a family to find it.
 - **A delegated failure does not raise the session's streak.** Three
   subagents failing once each is not one line of work failing three times, and
   the streak is what a signal is built from. It is counted everywhere else: the
@@ -427,15 +423,12 @@ as plain function calls. Nothing advertises this, so: it exists.
 
 ```elisp
 (agent-river-report "<session-id>")     ; own state
-(agent-river-touching "supersonic.el")  ; is another session on this file?
+(agent-river-reaching "inc:INC-444")    ; is another session on this record?
 (agent-river-set-intent "narrowing down why queue position goes stale")
 ```
 
-`agent-river-touching` is the one that carries something the agent does not
-already have — another session, in another worktree, editing the file it is
-about to rewrite leaves no trace in its own transcript. The other two address a
-*session* and cannot reliably tell which one the caller is, so pass the
-`session_id` from the hook payload.
+Both of the first two address a *session* and cannot reliably tell which one
+the caller is, so pass the `session_id` from the hook payload.
 
 `set-intent` records the one thing the hooks cannot derive: `:task` is literally
 the user's prompt, which stays put for twenty minutes while the work moves
@@ -637,7 +630,7 @@ Three ways out, and each answers a different question:
 
 | You are asking | Use |
 |---|---|
-| *which* file is this | match the basename, as `agent-river-touching` does |
+| *which* file is this | match on the basename yourself |
 | *where* is the file the event was about | read `:path` off the raw event |
 | *where* does this key sit in a tree | `agent-river--artifact-absolute`, anchor over cwd |
 
@@ -681,8 +674,8 @@ by any window you have not scrolled away from.
 
 ```
 *agent-river*
-* │⣶⣶⣷⣴⣀⣀│ · supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches)
-* │⠀⠀⣀⣤⣶⣿│ · supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
+* │⣶⣶⣷⣴⣀⣀│ · supersonic.el    · editing · fix the mpv bridge · 4m12s · 23 steps
+* │⠀⠀⣀⣤⣶⣿│ · supersonic.el<2> · editing · seek handler · 51s · 2 steps · 1 failing
 
 *agent-river-log*
 19:06:55 superson ◆ fix the mpv bridge
@@ -699,9 +692,10 @@ window is you saying what you want your screen to be, and a view that comes
 back on the next tool call overrules you several times a minute. Never the log,
 which is written whether or not anybody is looking at it. Either one comes back
 by asking. The keys are shared with the map and the approval queue, but each
-buffer takes only the grains its own content answers: `n`/`p` in both,
-`M-n`/`M-p` over session lines in the block, `>`/`<` over the landmarks
-(`agent-river-notable-kinds`) in the log.
+buffer takes only the grains its own content answers: `n`/`p` in both, and
+`>`/`<` over the landmarks (`agent-river-notable-kinds`) in the log. The block
+takes neither `M-n`/`M-p` nor `>`/`<` — it is one line per live session with
+nothing under it, so the coarse grain would land where `n` does.
 
 One tool call is **one line**: the outcome is written onto the line that opened
 it, so the timestamp stays the one the call began at. Pairing is by
@@ -753,8 +747,8 @@ The single most important line here is the one **nobody has picked up**: an
 unreached record is listed like any other, which is the whole reason this view
 exists. It was a lens over dired for most of its life — one directory listed in
 full, each entry carrying what had been reached beneath it — and that is gone.
-What an agent did to a file has better answers elsewhere: `agent-river-touching`
-for "is anybody else in this file", the block for "what is this session doing".
+What an agent did to a file is counted in the session tables and named by no
+view: the block says what a session is doing, not which files it is in.
 
 Nothing drops out of this view by getting old. `M-x agent-river-drop-artifact`
 forgets one record, `M-x agent-river-artifacts-reset` forgets them all.

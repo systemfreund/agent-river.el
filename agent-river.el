@@ -33,8 +33,8 @@
 ;; costs a few tokens; a wrong instruction derails a correct solution.
 ;;
 ;; State is keyed by session id in `agent-river-registry', so several
-;; sessions can fold side by side.  Nothing here reaches across sessions
-;; yet, but the addressing is in place for it -- see `agent-river-touching'.
+;; sessions can fold side by side.  Nothing here reaches across sessions:
+;; the map aggregates them per artifact record, and that is the whole of it.
 ;;
 ;; Load it in the live session:
 ;;
@@ -237,12 +237,6 @@ tool call does not repaint the panel."
 
 (defcustom agent-river-panel-task-width 34
   "How much of the current task or intent the session line shows."
-  :type 'integer)
-
-(defcustom agent-river-panel-detail-files 8
-  "How many artifacts a session's unfolded `files' heading lists.
-The list is ordered by touch count, so the tail is the least interesting;
-an ellipsis marks the files that were left off."
   :type 'integer)
 
 (defcustom agent-river-phase-blocked-threshold 2
@@ -846,12 +840,18 @@ a name saw."
 (defun agent-river--touch (state path &optional wrote)
   "Record that the session behind STATE touched PATH, writing it with WROTE.
 
-Kept in two frames on purpose.  The session-wide tally is what
-`agent-river-touching' needs to spot two agents on one file, and it must
-survive a change of task.  The per-task tally is what an observer wants:
-\"what is being worked on now\", not \"what has been opened all
-afternoon\".  Reporting one while labelling it the other is how a panel
-starts misleading people."
+Kept in two frames on purpose.  The session-wide tally has to survive a
+change of task; the per-task one answers \"what is being worked on now\"
+rather than \"what has been opened all afternoon\".  Reporting one while
+labelling it the other is how a panel starts misleading people.
+
+Both are counted for every path, and for a file that is now all this does:
+no view names a file any more.  What still reads a *file* entry is
+`agent-river--hottest' (the report and the fail-streak signal, both of
+which go to the agent rather than to a buffer),
+`agent-river--artifact-list' (the approval queue\'s context line, the name
+alone) and `agent-river--gone-artifacts'.  What reads a non-file key is
+the map."
   (when (and path (not (string-empty-p path)))
     (agent-river--touch-1 (agent-river-state-artifacts state) path wrote)
     (agent-river--touch-1 (agent-river-state-task-artifacts state) path wrote)))
@@ -1154,10 +1154,10 @@ replaying a session's events from the start."
 ;; `agent-river-state', every branch writes something true of that session, and
 ;; the artifact tables inside it record which files it reached.  Which means an
 ;; artifact has no existence of its own: it is a key in somebody's table, and
-;; "who is in this file" is reconstructed at every read --
-;; `agent-river--artifact-entries' flattens the registry, `agent-river--map-reach'
-;; inverts it, `agent-river-touching' asks it outright.  The identity is
-;; already there; what it has never had is a home.
+;; who is in it is reconstructed at every read --
+;; `agent-river--artifact-entries' flattens the registry and
+;; `agent-river--domain-parties' inverts it.  The identity is already there;
+;; what it has never had is a home.
 ;;
 ;; That shape is right for a file, which only becomes interesting once an agent
 ;; opens it.  It is wrong for anything that arrives on its own -- an incident
@@ -1492,7 +1492,7 @@ A measurement rather than a claim: whoever calls this performed the
 dispatch and is reporting it -- a measurement made outside the hook
 stream, the way `agent-river-note' is.  It is folded as an event like any
 other and counted in both frames, so everything downstream -- the map's
-parties and listing, `agent-river-touching' -- sees it without being
+parties and listing, `agent-river-reaching' -- sees it without being
 taught anything.
 
 What it deliberately does not do is count a step or move the phase.  No
@@ -1542,11 +1542,11 @@ and there would then be two calls that declare a domain."
 (defun agent-river-reaching (key &optional scope)
   "Return which sessions have reached artifact KEY, as a list of plists.
 
-Matched on the key exactly, where `agent-river-touching' matches on a
-basename.  The difference is deliberate and is the difference between the
-two questions: that one asks \"is anybody in this file\", where a worktree
-and a main checkout are the same file reached two ways, and this one asks
-about an artifact that already *is* a key and has no other spelling.
+Matched on the key exactly.  There was a second query beside this one,
+`agent-river-touching', which matched on a *basename* so that a worktree
+and a main checkout read as one file; it went with the views that named
+files, and an artifact key already *is* its own name and has no other
+spelling.
 
 SCOPE is `session' for the whole session, `task' or nil for this task."
   (let (hits)
@@ -1791,7 +1791,7 @@ supposed to own alone."
     ;; plists, which meant carrying a raw timestamp out in `:last' beside a
     ;; formatted `:appeared' -- one list, two ways of saying when, and the
     ;; only reason for the odd one out was this comparison.  `:ago' is the
-    ;; word `agent-river-touching' and `agent-river-reaching' already use.
+    ;; word `agent-river-reaching' already uses.
     (dolist (artifact (sort records
                             (lambda (a b)
                               (time-less-p (agent-river-artifact-last b)
@@ -4813,32 +4813,12 @@ session that most recently acted."
 
 ;;; Queries -- the meta level
 
-;;;###autoload
-(defun agent-river-touching (path)
-  "Return which sessions have touched PATH, newest first.
-Matches on the file name, so the same file reached through a worktree
-and through the main checkout counts as one artifact."
-  (let ((name (file-name-nondirectory path)) hits)
-    (maphash
-     (lambda (id state)
-       (maphash (lambda (p entry)
-                  (when (equal (file-name-nondirectory p) name)
-                    (push (list id
-                                :label (agent-river-state-label state)
-                                :touches (plist-get entry :touches)
-                                :ago (agent-river--ago (plist-get entry :last)))
-                          hits)))
-                (agent-river-state-artifacts state)))
-     agent-river-registry)
-    hits))
-
 (defun agent-river--child-digest (child)
   "Return a compact summary of CHILD, one entry of `agent-river-children'.
 
 No `:hottest'.  A delegated file lands in the session's own artifact
-tables now, where `agent-river-touching' and the map already find it, and
-a second per-child copy of that reading would be the one that could
-disagree with them."
+tables now, and a second per-child copy of that reading would be the one
+that could disagree with them."
   (list (or (plist-get child :type) "agent")
         :steps (plist-get child :steps)
         :failures (plist-get child :failures)
@@ -4952,21 +4932,6 @@ the line into markup."
           (concat fence text fence)
         (concat fence " " text " " fence)))))
 
-(defun agent-river--md-files (state scope)
-  "Return STATE's artifacts in SCOPE as Markdown, or nil for none.
-
-Capped by `agent-river-panel-detail-files' rather than by a setting of its
-own: it is the same question the HUD's `files' heading asks, and two
-answers would let a snapshot disagree with the view it is a snapshot of."
-  (let* ((files (agent-river--artifact-list state scope))
-         (shown (seq-take files agent-river-panel-detail-files)))
-    (when files
-      (concat (mapconcat (lambda (pair)
-                           (format "%s ×%d"
-                                   (agent-river--md-code (car pair)) (cdr pair)))
-                         shown " · ")
-              (if (> (length files) (length shown)) " · …" "")))))
-
 (defun agent-river--md-child (child)
   "Return one Markdown line for subagent CHILD, indented under its session.
 
@@ -5010,21 +4975,17 @@ two cannot drift."
       (push (format "- **said** — %s" (agent-river--md-escape said)) lines))
     ;; The frame is in the name of the bullet, not left to the reader.  The
     ;; task tally resets with every prompt and the session tally does not.
-    (push (format "- **this task** — %d step%s · %d failure%s%s%s"
+    (push (format "- **this task** — %d step%s · %d failure%s%s"
                   (agent-river-state-steps state)
                   (if (= (agent-river-state-steps state) 1) "" "s")
                   (or (agent-river-state-task-failures state) 0)
                   (if (= (or (agent-river-state-task-failures state) 0) 1) "" "s")
                   (let ((started (agent-river-state-task-started state)))
-                    (if started (concat " · " (agent-river--ago started)) ""))
-                  (let ((files (agent-river--md-files state nil)))
-                    (if files (concat " · " files) "")))
+                    (if started (concat " · " (agent-river--ago started)) "")))
           lines)
-    (push (format "- **this session** — %s%s"
+    (push (format "- **this session** — %s"
                   (let ((started (agent-river-state-started state)))
-                    (if started (agent-river--ago started) "just started"))
-                  (let ((files (agent-river--md-files state 'session)))
-                    (if files (concat " · " files) "")))
+                    (if started (agent-river--ago started) "just started")))
           lines)
     ;; A live failure run is the one thing a reader must not have to infer.
     (when (> streak 0)
@@ -5154,20 +5115,18 @@ the view watching it."
   (setq-local header-line-format nil)
   (buffer-disable-undo))
 
-(defvar-local agent-river--panel-expanded nil
-  "When non-nil, the block unfolds each session's detail headings.
-
-Kept as a buffer-local flag rather than left to outline overlay visibility,
-because the block is erased and rebuilt on every event: an overlay fold
-would spring open on the next tool call.  A flag means the block is simply
-rendered already open, so the fold survives as long as the user wants it.")
-
 (defun agent-river--artifact-list (state &optional scope)
   "Return STATE's artifacts as (NAME . TOUCHES), most-touched first.
 
-NAME is the bare basename, summed the way `agent-river-touching' matches,
-so a file reached from a worktree and from the main checkout counts once.
-SCOPE is `session' for the whole session, nil for the current task."
+NAME is the bare basename, so a file reached from a worktree and from the
+main checkout counts once.  SCOPE is `session' for the whole session, nil
+for the current task.
+
+One caller left: the approval queue's context line, which takes the head
+of this list and shows the name without its count.  The HUD's `files'
+heading and the export's file list are gone, and `agent-river-touching'
+-- which matched basenames the same way, and is where the summing rule
+came from -- with them."
   (let ((totals (make-hash-table :test 'equal)))
     (maphash (lambda (path entry)
                (let ((name (file-name-nondirectory path)))
@@ -5180,24 +5139,6 @@ SCOPE is `session' for the whole session, nil for the current task."
     (let (pairs)
       (maphash (lambda (name n) (push (cons name n) pairs)) totals)
       (sort pairs (lambda (a b) (> (cdr a) (cdr b)))))))
-
-(defun agent-river--panel-details (state)
-  "Return STATE's detail headings, one outline level below its block line.
-
-The header condenses the numbers -- one artifact, and only sometimes, as a
-parenthetical.  The `files' heading unfolds the same measurement at a finer
-grain, never a second tally, so an onlooker can see which files the step
-count is made of.  Most-touched first, so the header's parenthetical is
-simply the head of this list.  Empty while nothing has been touched."
-  (let ((files (agent-river--artifact-list state)))
-    (when files
-      (let* ((limit agent-river-panel-detail-files)
-             (shown (seq-take files limit)))
-        (list (format "** files: %s%s"
-                      (mapconcat (lambda (pair)
-                                   (format "%s %d" (car pair) (cdr pair)))
-                                 shown " · ")
-                      (if (> (length files) limit) " …" "")))))))
 
 (defun agent-river--spinning-since (state)
   "Return when STATE's turn began, which is the phase its marker spins on.
@@ -5317,7 +5258,6 @@ question an onlooker actually has."
                    (agent-river--ago (agent-river-state-task-started state)))
                  (let ((n (agent-river-state-steps state)))
                    (format "%d step%s" n (if (= n 1) "" "s")))
-                 (agent-river--hottest state)
                  ;; A live failure run is the one thing an onlooker must not
                  ;; have to infer from scrollback.
                  (when (> streak 0)
@@ -5343,28 +5283,18 @@ question an onlooker actually has."
     ;; second property rather than `agent-river-session' reused because that
     ;; one is only there when the session turned out to be visitable -- point
     ;; would come home from a redraw for the sessions agent-shell hosts and
-    ;; be dropped at the top for the rest.  A detail line carries its index
-    ;; beside the id: they are all one session's and would otherwise share
-    ;; the header's identity, which is the same mistake `agent-river--map-here'
-    ;; names for rows.
-    (let ((header (propertize
-                   (agent-river--make-visitable
-                    (concat (agent-river--star state)
-                            (mapconcat #'identity parts " · "))
-                    (agent-river-state-id state))
-                   'agent-river-line 'session
-                   'agent-river-block (agent-river-state-id state)))
-          (details (and agent-river--panel-expanded
-                        (seq-map-indexed
-                         (lambda (line n)
-                           (propertize line
-                                       'agent-river-line 'detail
-                                       'agent-river-block
-                                       (cons (agent-river-state-id state) n)))
-                         (agent-river--panel-details state)))))
-      (if details
-          (concat header "\n" (mapconcat #'identity details "\n"))
-        header))))
+    ;; be dropped at the top for the rest.  It used to be a cons of the id
+    ;; and an index, because a session's detail headings would otherwise
+    ;; have shared the header's identity -- the mistake
+    ;; `agent-river--map-here' names for rows.  There are no detail lines
+    ;; any more, so the id is the whole of it.
+    (propertize
+     (agent-river--make-visitable
+      (concat (agent-river--star state)
+              (mapconcat #'identity parts " · "))
+      (agent-river-state-id state))
+     'agent-river-line 'session
+     'agent-river-block (agent-river-state-id state))))
 
 ;;; Moving about the HUD
 ;;
@@ -5401,14 +5331,6 @@ less."
 (defun agent-river--entry-line-p ()
   "Return non-nil on a line any motion may stop on."
   (and (get-text-property (line-beginning-position) 'agent-river-line) t))
-
-(defun agent-river--session-line-p ()
-  "Return non-nil on a session line of the state block.
-
-The coarse grain is the block's own structure, which is one line per live
-session.  The details under a session are what the fine grain is for."
-  (eq (get-text-property (line-beginning-position) 'agent-river-line)
-      'session))
 
 (defun agent-river--notable-line-p ()
   "Return non-nil on a log line worth finding in a long log."
@@ -5461,17 +5383,6 @@ where the text starts."
   "Move to the Nth previous session, detail or event line."
   (interactive "p")
   (agent-river-next-line (- (or n 1))))
-
-(defun agent-river-next-session (&optional n)
-  "Move to the Nth next session line, past details and log."
-  (interactive "p")
-  (or (agent-river--scan (or n 1) #'agent-river--session-line-p)
-      (user-error "No further session")))
-
-(defun agent-river-previous-session (&optional n)
-  "Move to the Nth previous session line."
-  (interactive "p")
-  (agent-river-next-session (- (or n 1))))
 
 (defun agent-river-next-notable (&optional n)
   "Move to the Nth next line of a kind in `agent-river-notable-kinds'."
@@ -5665,10 +5576,9 @@ in it has to be named rather than remembered as a position."
 
 (defun agent-river--block-goto (here)
   "Put point back on the block line HERE names, if the rebuild still has it.
-At `point-min' otherwise: a session that has gone from the block has taken
-its details with it, and the head is where a reader who has lost their
-subject resumes.  Point lands past the outline stars, where a motion would
-have left it."
+At `point-min' otherwise: the head is where a reader whose session has
+gone from the block resumes.  Point lands past the outline stars, where a
+motion would have left it."
   (goto-char (point-min))
   (let ((found nil))
     (while (and (not found) (not (eobp)))
@@ -6157,22 +6067,6 @@ the state out of reach of exactly the onlookers it was built for."
         (goto-char (point-min))))
     (display-buffer out)))
 
-;;;###autoload
-(defun agent-river-who-touches (path)
-  "Report which sessions have touched PATH.
-The contention check, made reachable without writing Lisp."
-  (interactive "sFile name: ")
-  (let ((hits (agent-river-touching path)))
-    (message "%s" (if hits
-                      (mapconcat
-                       (lambda (hit)
-                         (format "%s: %s touches, %s ago"
-                                 (plist-get (cdr hit) :label)
-                                 (plist-get (cdr hit) :touches)
-                                 (plist-get (cdr hit) :ago)))
-                       hits " | ")
-                    (format "No session has touched %s" path)))))
-
 ;;; Refreshing the view
 ;;
 ;; Lifecycle rather than rendering: what keeps the elapsed times honest
@@ -6254,54 +6148,28 @@ on every line that is written about one."
       (when (and agent-river-auto-display (not agent-river--block-shown))
         (agent-river-show)))))
 
-;;;###autoload
-(defun agent-river-toggle-details ()
-  "Fold or unfold every session's detail headings in the HUD.
-
-The fold is remembered in `agent-river--panel-expanded' rather than left to
-outline overlay visibility, because the block is erased and rebuilt on
-every event: an overlay fold would spring open on the next tool call.  A
-flag means the rebuilt block is drawn already open, and stays that way
-until asked to close."
-  (interactive)
-  (let ((buffer (get-buffer agent-river-buffer-name)))
-    (unless (buffer-live-p buffer)
-      (user-error "No agent-river buffer"))
-    (with-current-buffer buffer
-      (setq agent-river--panel-expanded (not agent-river--panel-expanded))
-      (agent-river--redraw-block))))
-
-(defun agent-river-toggle-at-point ()
-  "Toggle the block heading on this line of the HUD.
-
-On a session heading this unfolds that session's detail headings.  TAB is
-for opening or closing the thing under the heading."
-  (interactive)
-  (agent-river-toggle-details))
-
-;; `outline-minor-mode-cycle' binds TAB only when the user opted in, so the
-;; heading navigation has to be on the mode's own map to be there at all.
-(define-key agent-river-mode-map (kbd "TAB") #'agent-river-toggle-at-point)
-
 ;; The map's keys, on the same gestures, because the views are views of one
 ;; state and learning each separately is a cost with nothing bought by it.
 ;; SPC and DEL give up `special-mode's scrolling for line motion, the way
 ;; dired's do.
 ;;
 ;; Which grains each buffer has is decided by what it holds, and the split
-;; is what made that plain: the block has the fine grain and the coarse one
-;; -- session lines and the details under them -- and no landmarks, since
-;; nothing in it is a log line and `>' would have stopped on nothing.  The
-;; log is the other way round.  Neither is missing a key it could have used;
-;; each has the ones its own content answers.
+;; is what made that plain.  The block has the fine grain alone: one line per
+;; live session and nothing under it, so `M-n' would have landed exactly
+;; where `n' does, and no landmarks, since nothing in it is a log line and
+;; `>' would have stopped on nothing.  It did have a coarse grain while
+;; sessions had detail headings under them -- a `files' line, unfolded by
+;; TAB -- and both went when the block stopped showing which files a session
+;; had touched.  The log is the other way round.  A key bound where its
+;; content is not is worse than an unbound one: pressing it answers with an
+;; error about there being no further anything, which reads as the state
+;; being empty rather than as the question being the wrong one to ask here.
 (define-key agent-river-mode-map (kbd "n") #'agent-river-next-line)
 (define-key agent-river-mode-map (kbd "p") #'agent-river-previous-line)
 (define-key agent-river-mode-map (kbd "SPC") #'agent-river-next-line)
 (define-key agent-river-mode-map (kbd "DEL") #'agent-river-previous-line)
 (define-key agent-river-mode-map [remap next-line] #'agent-river-next-line)
 (define-key agent-river-mode-map [remap previous-line] #'agent-river-previous-line)
-(define-key agent-river-mode-map (kbd "M-n") #'agent-river-next-session)
-(define-key agent-river-mode-map (kbd "M-p") #'agent-river-previous-session)
 ;; RET works on a session line through a keymap text property, which leaves
 ;; it doing nothing everywhere else.  Bound here it says why instead.
 (define-key agent-river-mode-map (kbd "RET") #'agent-river-visit-session)
@@ -6658,10 +6526,10 @@ and it wins over the cwd here."
 ;; It was a lens over dired for most of its life -- one directory listed in
 ;; full, each entry carrying what had been reached beneath it, RET descending
 ;; into the next.  That is gone, and what it answered has better answers
-;; elsewhere: what an agent did to a file is the session's own tables, read
-;; by `agent-river-touching' where the question is "is anybody else in this
-;; file" and by the block where it is "what is this session doing".  What
-;; has *no* other answer is the thing that arrived on its own -- an
+;; elsewhere -- or no longer asked at all: `agent-river-touching' answered
+;; "is anybody else in this file" and the block's `files' heading answered
+;; "which files is this session in", and both are gone.  What has *no*
+;; other answer is the thing that arrived on its own -- an
 ;; incident routed to you, a review requested, a build that broke -- which
 ;; matters most when no agent is running at all, and which nothing in the
 ;; event stream could ever have produced.  That is the whole of what this
@@ -6748,8 +6616,8 @@ never been touched is."
 ;; session's cwd, or against the anchor where the cwd cannot.
 ;;
 ;; An artifact declared from outside has no such answer.  `inc:INC-444' is a
-;; perfectly good key -- the session tables count it, the parties aggregate over
-;; it, `agent-river-touching' finds it -- but resolved against a cwd it becomes
+;; perfectly good key -- the session tables count it and the parties
+;; aggregate over it -- but resolved against a cwd it becomes
 ;; `/repo/inc:INC-444', a file that does not exist in a tree it has nothing to
 ;; do with.  That is the same mistake the anchors were folded to stop, one
 ;; domain over, and it is why placement is decided here rather than assumed.
@@ -8245,8 +8113,8 @@ One section per domain of `agent-river-artifacts', one line per record,
 each annotated with whoever has reached it -- and the line this view is
 for is the one nobody has.  It was a lens over dired for most of its life,
 listing a directory and what had been reached beneath each entry; that is
-gone, and what an agent did to a file is `agent-river-touching' and the
-block instead.
+gone: what an agent did to a file is counted in the session tables and
+named by no view.
 
 Opens on every domain that has a record.  RET on a section zooms into it
 and `^' comes back out.

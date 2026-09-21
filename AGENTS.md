@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (396 tests). -L . is required: the tests require all four .el files.
+# Full suite (392 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -91,18 +91,22 @@ it, which is the only reason this section exists — see the README section of
 the same name for what the values mean.
 
 ```elisp
-(agent-river-touching "agent-river.el")  ; which sessions have reached this file
 (agent-river-report)                     ; own state, as a plist
+(agent-river-reaching "inc:INC-444")     ; who else is on this record
 (agent-river-set-intent "chasing why the spinner sticks after a kill")
 ```
 
-`agent-river-touching` is the one that carries something you do not already
-have. Another session, in another worktree, editing the file you are about to
-rewrite leaves no trace in your own transcript; the registry is the only place
-that fact exists. Worth asking before a wide edit, and the answer is advisory
-— there is no lock behind it, and two agents backing off is as likely as one.
+There was a third here, `agent-river-touching`, and it was the one this
+section was written for: another session, in another worktree, editing the
+file you are about to rewrite leaves no trace in your own transcript, and the
+registry was the only place that fact existed. It is gone with the views that
+named files. What it had going for it was that the fact is genuinely
+unavailable elsewhere; what it did not have was a caller — the transcripts
+hold exactly one invocation, which answered `nil` and was not believed. If
+the contention question comes back, that is the measurement to take first:
+why the answer was empty.
 
-The other two address a *session*, and cannot reliably tell which one you
+Both of these address a *session*, and cannot reliably tell which one you
 are. `agent-river-report` only defaults when the registry holds exactly one
 session, and `agent-river-set-intent` defaults to whichever session acted most
 recently — with several running, quite possibly not you, and the
@@ -207,8 +211,7 @@ These are load-bearing; the tests enforce most of them.
   now (`agent-river--delegate`, read by `agent-river-children`): what this
   session set in motion, how far it got, whether it is finished. A delegated
   step is a step the session took, and a delegated touch lands in the
-  session's own artifact tables, which is what `agent-river-touching` and the
-  map already read.
+  session's own artifact tables rather than in a record of the child's.
 - **The one measurement a delegated failure stays out of is the streak**
   (`agent-river--delegated-p`). Three subagents failing once each is not one
   line of work failing three times, and the streak is what a signal is built
@@ -217,8 +220,9 @@ These are load-bearing; the tests enforce most of them.
   tool tally, and the child's own entry, which says whose it was.
 - **Two frames, always labelled.** `artifacts`/session-wide survives a new prompt;
   `task-artifacts`/`steps`/`task-failures`/`said` reset on `prompt`. Report keys say which
-  (`:task-hottest` vs `:session-hottest`). The panel uses the task frame;
-  `agent-river-touching` uses the session frame.
+  (`:task-hottest` vs `:session-hottest`). The panel uses the task frame; the
+  map's parties are read in whichever `agent-river-map-scope` names, and it
+  defaults to the session frame.
 - **Claims are separate from measurements.** `intent*` slots come from
   `agent-river-set-intent` — the agent talking about itself. They must never feed
   a signal (this state is fed back to the agent; a claim later read as an
@@ -302,9 +306,10 @@ These are load-bearing; the tests enforce most of them.
   `default-directory` per event. A view that needs a real path puts the cwd
   and the key back together deliberately (`agent-river--artifact-absolute`). Resolving is strictly
   worse than matching on the name for *identity* questions and strictly better
-  for *placement* ones, so both readings exist and each says which it is:
-  `agent-river-touching` still matches on the basename, directory
-  aggregation resolves.
+  for *placement* ones. Both readings existed and each said which it was;
+  what is left is the placement one, since nothing matches a file by name any
+  more — `agent-river-touching` did, and the map's directory aggregation
+  resolved.
   A file *outside* the cwd is degraded to a bare basename by the same
   normalisation, so the cwd cannot place it either — resolving one against the
   cwd drew a file edited under `~/.claude` inside the project tree. Those keys
@@ -547,7 +552,8 @@ What a consumer must respect:
   a note is being handled is refused and returns nil.
 - **The state cannot address a file on disk** — `agent-river--rel` sees to that,
   and it must keep doing so. Three ways out. Look the file up *from* the
-  consumer's side by basename (what `agent-river-touching` matches on); read an
+  consumer's side by basename (what `agent-river-touching` used to match on,
+  before the views that named files went); read an
   extra event key the fold keeps out of the artifact keys (`:path`, the
   absolute name, carried beside `:file`); or resolve a key against
   `agent-river-state-cwd`, falling back to its `anchors` entry where the cwd
@@ -750,11 +756,16 @@ follows is what is load-bearing.
   the way opening the map is. Killing it turns the mode back off unless it
   was already on, which is `agent-river--responder-before`'s rule one level
   up.
-- **The context line is the panel's reading, one field shorter.** It goes
-  through `agent-river--artifact-list` rather than `agent-river--hottest` so
-  the two cannot disagree about which file it is; the `(N touches)`
-  parenthetical is dropped because it is the longest thing on the line and
-  the least of what a decision turns on.
+- **The context line is the only place a file is still named.** It was the
+  panel's reading one field shorter — through `agent-river--artifact-list`
+  rather than `agent-river--hottest` so the two could not disagree about
+  which file it was, with the `(N touches)` parenthetical dropped as the
+  longest thing on the line and the least of what a decision turns on. The
+  panel's reading is gone and this one is not, because the question differs:
+  the block says what a session is *doing* and this says what it is about to
+  be allowed to do it *to*, which is most of what an allow-or-deny turns on.
+  It is the last caller of `agent-river--artifact-list`, and the summing rule
+  in that function\'s docstring is the one `agent-river-touching` left behind.
 - `agent-river--scan` **grew a SETTLE argument rather than a third copy of
   the loop.** What differs between these buffers is only where the text on a
   line starts.
@@ -765,8 +776,11 @@ Session lines sit at level 1, one per live session, ordered by label. There
 was a grouping here once — a heading per *place*, asked for through
 `agent-river-panel-place-functions` and defaulting to the session cwd, with
 everything under it pushed a level down — and it is gone, so
-`agent-river--star` and `agent-river--panel-details` take no level and
-`agent-river-block` holds a plain session id rather than a tagged key. What
+`agent-river--star` takes no level and `agent-river-block` holds a plain
+session id rather than a tagged key. It held a cons of the id and an index
+for as long as a session had detail headings under it, and those went with
+the file touches they listed: the block is now one line per session and
+nothing else, which is what "flat" had only half meant. What
 the removal took with it is the one thing the label cannot say: two sessions
 in two checkouts of one project read alike. That is a real loss and the
 answer, if it is wanted back, is not the heading again but something on the
@@ -1331,10 +1345,12 @@ same three grains, because they are views of one state and learning each
 separately buys nothing: `n`/`p` (plus `SPC`/`DEL` and the remapped arrows)
 walk every line worth stopping on, `M-n`/`M-p` walk the coarse structure,
 `>`/`<` walk the lines that want attention. A session line is a map entry is a
-question heading; a
-detail heading is a map row is an answer row; a log line has no analogue
-and rides the fine grain. The map's *section* headings have no analogue in
-the block, which is flat. `>` is `agent-river-notable-kinds` in the log —
+question heading; a map row is an answer row; a log line has no analogue
+and rides the fine grain. The block has **only** the fine grain now: a
+session line had detail headings under it — a `files` line — and both went
+when the block stopped naming files, so `M-n` there would land where `n`
+does. The map's *section* headings have no analogue in it either, since it
+is flat. `>` is `agent-river-notable-kinds` in the log —
 which includes `artifact`, because a record arriving is one step further out
 than a note (nobody in the session saw it) and it lands when nothing else is
 happening, which is when a log is worth scanning at all — "some
@@ -1344,15 +1360,18 @@ presses it expecting the next thing that wants them, and getting it is the
 whole point of the keys being shared.
 
 **A view takes only the grains its own content answers**, which the split
-made plain rather than changed. The block has the fine grain and the coarse
-one — session lines and the details under them — and no landmarks, because
-nothing in it is a log line and `>` would have stopped on nothing; the log is
-the other way round, since it has lines and landmarks among them and no
-structure over them. Both were bound in the one buffer they used to share and
-each was dead in half of it. A key bound where its content is not is worse
-than an unbound one: pressing it answers with an error about there being no
-further anything, which reads as the state being empty rather than as the
-question being the wrong one to ask here.
+made plain rather than changed, and which has since taken a key off the
+block. The block has the fine grain alone — one line per live session — and
+no landmarks, because nothing in it is a log line and `>` would have stopped
+on nothing; the log is the other way round, since it has lines and landmarks
+among them and no structure over them. Both were bound in the one buffer they
+used to share and each was dead in half of it. The block kept a coarse grain
+for as long as a session line had detail headings under it, and `M-n` went
+when they did — it would now stop on exactly the lines `n` stops on, which is
+the same fault in a quieter form. A key bound where its content is not is
+worse than an unbound one: pressing it answers with an error about there
+being no further anything, which reads as the state being empty rather than
+as the question being the wrong one to ask here.
 
 Three rules, shared by `agent-river--scan` and `agent-river--map-scan`:
 
@@ -1386,7 +1405,7 @@ wraps its edit in `agent-river--keeping-place` — in the selected window buffer
 point *is* window point, so without it the one window most likely to be the one
 being read was carried along by every tool call regardless. The tail is **the
 last line alone**: it was the *first* line once, with the block underneath it
-in the same buffer, and the block is where `n` and `M-n` did most of their
+in the same buffer, and the block is where the motions did most of their
 walking, so navigating anywhere in it left a reader still counting as
 following. That is exactly the span `agent-river--follow` pins to, so it means
 "nobody has moved this", and a reader who walks back down onto the newest entry
@@ -1624,11 +1643,10 @@ the draw can disagree about what the tables say.
 thing to understand before changing anything here. One directory was listed
 in full, each entry carried what had been reached beneath it, RET descended
 into the next, and a diffstat read off git said what had changed. All of
-that is gone. What it answered has better answers elsewhere: *is anybody
-else in this file* is `agent-river-touching`, asked by the agent about to
-edit it, which needs no view at all and matches on the basename so a
-worktree and its main checkout are one file; *what is this session doing* is
-the block. What has **no** other answer is the thing that arrived on its own
+that is gone, and so is what it answered: *is anybody else in this file* was
+`agent-river-touching` and went with it; *which files is this session in* was
+the block's `files` heading and went too. The counts are still folded and no
+view names a file. What has **no** other answer is the thing that arrived on its own
 — an incident routed to you, a review requested, a build that broke — which
 nothing in the event stream could have produced and which matters most when
 no agent is running. That is what this view is now, and the line it exists

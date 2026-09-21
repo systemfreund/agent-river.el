@@ -160,15 +160,6 @@
       (should-not (plist-get report :task-hottest))
       (should (string-match-p "a\\.el" (plist-get report :session-hottest))))))
 
-(ert-deftest agent-river-test-touching-survives-a-new-task ()
-  (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-auto-display nil))
-    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
-                                 :file "shared.el" :detail "Edit"))
-    (agent-river-observe '(:kind "prompt" :session "s1" :label "repo"
-                                 :text "new" :detail "new"))
-    (should (= 1 (length (agent-river-touching "shared.el"))))))
-
 (ert-deftest agent-river-test-panel-reports-what-matters ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
@@ -183,7 +174,11 @@
       (should (string-match-p "fix the queue bug" panel))
       (should (string-match-p "2 steps" panel))
       (should-not (string-match-p "1 steps" panel))
-      (should (string-match-p "mpv\\.el (2 touches)" panel))
+      ;; And no file: which files a session touched is not what this line
+      ;; is for, and it carried the most-touched one as a parenthetical for
+      ;; a long time.
+      (should-not (string-match-p "mpv" panel))
+      (should-not (string-match-p "touches" panel))
       ;; Nothing is failing, so the panel must not carry a failure clause.
       (should-not (string-match-p "failing" panel)))))
 
@@ -477,10 +472,10 @@
               #'agent-river-next-line))
   (should (eq (lookup-key agent-river-log-mode-map (kbd "n"))
               #'agent-river-next-line))
-  (should (eq (lookup-key agent-river-mode-map (kbd "M-n"))
-              #'agent-river-next-session))
-  (should-not (eq (lookup-key agent-river-log-mode-map (kbd "M-n"))
-                  #'agent-river-next-session))
+  ;; And neither takes the coarse grain: the block is one line per session
+  ;; with nothing under it, so `M-n' would land exactly where `n' does.
+  (should-not (lookup-key agent-river-mode-map (kbd "M-n")))
+  (should-not (lookup-key agent-river-log-mode-map (kbd "M-n")))
   (should (eq (lookup-key agent-river-log-mode-map (kbd ">"))
               #'agent-river-next-notable))
   (should-not (eq (lookup-key agent-river-mode-map (kbd ">"))
@@ -507,46 +502,14 @@
         (agent-river-auto-display nil))
     (agent-river-observe '(:kind "act" :session "s1" :label "repo" :detail "Read"))
     (with-current-buffer (agent-river--buffer)
-      ;; TAB folds each session's details.  The block lines are level-1
-      ;; headings.  The fold lives in overlays, so a later redraw unfolds it
-      ;; again -- that is accepted, not a bug.
+      ;; The block lines are level-1 headings, which is what makes the block
+      ;; a document rather than a rendering.  Nothing folds them any more --
+      ;; TAB unfolded a session's detail headings and there are none.
       (should (bound-and-true-p outline-minor-mode))
-      (should (eq (lookup-key agent-river-mode-map (kbd "TAB"))
-                  #'agent-river-toggle-at-point))
+      (should-not (lookup-key agent-river-mode-map (kbd "TAB")))
       (should (string-prefix-p
                "* repo"
                (buffer-substring-no-properties (point-min) (line-end-position)))))))
-
-(ert-deftest agent-river-test-details-are-folded-until-asked ()
-  (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-auto-display nil))
-    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
-                                 :file "a.el" :detail "Edit"))
-    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
-                                 :file "b.el" :detail "Edit"))
-    (agent-river-observe '(:kind "act" :session "s1" :label "repo"
-                                 :file "b.el" :detail "Edit"))
-    ;; Collapsed by default: the header is the whole session line, and the
-    ;; block is exactly one line per session.
-    (let ((block (substring-no-properties (agent-river--panel-block))))
-      (should-not (string-match-p "hottest" block))
-      (should-not (string-match-p "files:" block))
-      (should (= 1 (length (split-string block "\n" t)))))
-    (with-current-buffer (agent-river--buffer)
-      (agent-river-toggle-details)
-      (let ((block (substring-no-properties (agent-river--panel-block))))
-        ;; Unfolded, the same measurement at a finer grain: the whole list,
-        ;; most-touched first.  The header's parenthetical is its head, so
-        ;; a separate `hottest' heading would only repeat it.
-        (should (string-match-p "\\*\\* files: b\\.el 2 · a\\.el 1" block))
-        (should-not (string-match-p "hottest" block))
-        ;; And it folds back.
-        (agent-river-toggle-details)
-        (should-not (string-match-p "files:"
-                                    (substring-no-properties
-                                     (agent-river--panel-block))))))))
-
-;;; The block -- one line per session
 
 (defmacro agent-river-test--with-block (&rest body)
   "Run BODY over a fresh registry, with nothing displayed."
@@ -1873,17 +1836,6 @@ stubbed here so the tests do not depend on agent-shell being installed."
       (should (= (agent-river-state-fail-streak b) 0))
       (should (= (hash-table-count agent-river-registry) 2)))))
 
-(ert-deftest agent-river-test-touching-matches-across-sessions ()
-  (let ((agent-river-registry (make-hash-table :test 'equal)))
-    (let ((a (agent-river-state "s1" "main"))
-          (b (agent-river-state "s2" "worktree")))
-      ;; Same logical file reached through two checkouts: the query has to
-      ;; see one artifact, or it cannot warn about contention at all.
-      (agent-river-fold a '(:kind "act" :file "supersonic.el"))
-      (agent-river-fold b '(:kind "act" :file "sub/supersonic.el"))
-      (should (= 2 (length (agent-river-touching "supersonic.el"))))
-      (should (null (agent-river-touching "unrelated.el"))))))
-
 (ert-deftest agent-river-test-active-count-honours-ttl ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-session-ttl 300))
@@ -1942,11 +1894,10 @@ stubbed here so the tests do not depend on agent-shell being installed."
       ;; A delegated step is a step this session took -- it asked for it -- so
       ;; the panel says five rather than one and an onlooker sees the work.
       (should (= (agent-river-state-steps state) 5))
-      ;; And the file is in the session's own tables, which is what
-      ;; `agent-river-touching' and the map read.  It used to be in the
-      ;; child's and nowhere else.
+      ;; And the file is in the session's own tables, in both frames.  It
+      ;; used to be in the child's and nowhere else.
       (should (gethash "x.el" (agent-river-state-artifacts state)))
-      (should (agent-river-touching "x.el")))))
+      (should (gethash "x.el" (agent-river-state-task-artifacts state))))))
 
 (ert-deftest agent-river-test-a-session-still-says-what-it-delegated ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -3413,14 +3364,16 @@ first line from a survey."
             seen))
     (nreverse seen)))
 
-(ert-deftest agent-river-test-block-motion-walks-sessions-and-details ()
+(ert-deftest agent-river-test-block-motion-walks-the-sessions ()
   (agent-river-test--with-block
     (let ((lines (agent-river-test--marked-lines #'agent-river--entry-line-p)))
-      ;; Both grains, in buffer order, and nothing from the log: the fine
-      ;; grain here is the details under a session rather than the stream
-      ;; the session was folded from.
+      ;; One line per live session, in buffer order, and nothing from the
+      ;; log: the block holds no line the stream put there.  There is one
+      ;; grain here now -- the detail headings under a session went with the
+      ;; file touches they listed, and `M-n' with them.
       (should (seq-find (lambda (l) (string-prefix-p "* alpha" l)) lines))
-      (should (seq-find (lambda (l) (string-prefix-p "** files:" l)) lines))
+      (should (seq-find (lambda (l) (string-prefix-p "* beta" l)) lines))
+      (should-not (seq-find (lambda (l) (string-prefix-p "** " l)) lines))
       (should-not (seq-find (lambda (l) (string-match-p "Bash exit 1" l)) lines)))))
 
 (ert-deftest agent-river-test-log-motion-walks-every-event-line ()
@@ -3431,15 +3384,6 @@ first line from a survey."
       (should (= (length lines) 4))
       (should (seq-find (lambda (l) (string-match-p "Edit a\\.el" l)) lines))
       (should (seq-find (lambda (l) (string-match-p "Read b\\.el" l)) lines)))))
-
-(ert-deftest agent-river-test-block-session-motion-is-the-selection ()
-  (agent-river-test--with-block
-    (let ((lines (agent-river-test--marked-lines #'agent-river--session-line-p)))
-      ;; The block's own structure and nothing else -- the details under a
-      ;; session are the fine grain's.
-      (should (= (length lines) 2))
-      (should (string-prefix-p "* alpha" (nth 0 lines)))
-      (should (string-prefix-p "* beta" (nth 1 lines))))))
 
 (ert-deftest agent-river-test-log-notable-motion-finds-the-landmarks ()
   (agent-river-test--with-log
@@ -3454,7 +3398,7 @@ first line from a survey."
 (ert-deftest agent-river-test-block-motion-lands-past-the-stars ()
   (agent-river-test--with-block
     ;; Point starts on alpha's line, and a motion moves off it.
-    (should (agent-river--scan 1 #'agent-river--session-line-p))
+    (should (agent-river--scan 1 #'agent-river--entry-line-p))
     ;; A cursor parked on an outline star says nothing about the line.
     (should (looking-at-p "beta"))))
 
@@ -3480,10 +3424,10 @@ first line from a survey."
     ;; visitable -- and the motion still has to stop on both.  Tying the two
     ;; together made `n' skip exactly the sessions RET could not open, which
     ;; is the case where looking is all there is.
-    (let ((lines (agent-river-test--marked-lines #'agent-river--session-line-p)))
+    (let ((lines (agent-river-test--marked-lines #'agent-river--entry-line-p)))
       (should (= 2 (seq-count (lambda (l) (string-prefix-p "* " l)) lines))))
     (goto-char (point-min))
-    (agent-river--scan 1 #'agent-river--session-line-p)
+    (agent-river--scan 1 #'agent-river--entry-line-p)
     (should-not (get-text-property (line-beginning-position) 'agent-river-session))))
 
 (ert-deftest agent-river-test-the-log-follows-only-what-is-at-the-tail ()
@@ -3519,12 +3463,12 @@ first line from a survey."
     ;; inside it collapses to point-min when it goes -- so `save-excursion'
     ;; alone sent whoever had navigated into the block back to the top once
     ;; a second, for as long as an agent was working.
-    ;; Onto a detail line, which is the finer of the two cases: it shares
-    ;; its session's id and is told apart by an index.
+    ;; Onto the second session's line: found by what it names, since a
+    ;; rebuilt block has nothing at the offset point was at.
     (agent-river-next-line 1)
     (let ((line (buffer-substring-no-properties (line-beginning-position)
                                                 (line-end-position))))
-      (should (string-prefix-p "** files:" line))
+      (should (string-prefix-p "* beta" line))
       (agent-river--redraw-block)
       (should (equal (buffer-substring-no-properties (line-beginning-position)
                                                      (line-end-position))
@@ -3541,7 +3485,7 @@ first line from a survey."
 
 (ert-deftest agent-river-test-a-block-line-that-has-gone-sends-point-to-the-head ()
   (agent-river-test--with-block
-    (agent-river--scan 1 #'agent-river--session-line-p)
+    (agent-river--scan 1 #'agent-river--entry-line-p)
     (should (looking-at-p "beta"))
     ;; The session the line named is no longer live, so there is nothing to
     ;; come back to.  The head is where a reader who has lost their subject
@@ -3758,7 +3702,9 @@ first line from a survey."
       ;; And they are genuinely different readings: the task frame was
       ;; cleared by the second prompt, the session frame was not.
       (should (string-match-p "this task\\*\\* — 1 step" markdown))
-      (should (string-match-p "this session.*`a\\.el` ×5" markdown)))))
+      ;; Neither of them names a file: the export is a snapshot of the
+      ;; block, and the block stopped saying which files a session touched.
+      (should-not (string-match-p "a\\.el" markdown)))))
 
 (ert-deftest agent-river-test-the-export-marks-a-claim-as-one ()
   (agent-river-test--with-export
@@ -3838,10 +3784,9 @@ first line from a survey."
       (should-not (string-match-p "^### .*Explore" markdown))
       (should (string-match-p "\\*\\*subagents\\*\\* — 1 of 1 running" markdown))
       (should (string-match-p "    - `Explore` — running · 3 steps" markdown))
-      ;; And no hottest file of its own.  The delegated file is in the
-      ;; session's own tables now and is already named above; a second
-      ;; reading of it here is the one that could disagree.
-      (should (string-match-p "README\\.md" markdown)))))
+      ;; And no file of its own, which is now true of the whole export: it
+      ;; is a snapshot of the block, and the block names no files.
+      (should-not (string-match-p "README\\.md" markdown)))))
 
 (ert-deftest agent-river-test-the-export-mirrors-the-block-not-the-registry ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -4607,7 +4552,8 @@ the text -- which is all the motion reads -- is the same either way."
     ;; the two to disagree.  What belongs here is what the event stream could
     ;; never have produced.
     (should (zerop (hash-table-count agent-river-artifacts)))
-    (should (agent-river-touching "/repo/a.el"))))
+    (should (gethash "a.el" (agent-river-state-artifacts
+                             (gethash "s1" agent-river-registry))))))
 
 (ert-deftest agent-river-test-reaching-counts-in-both-frames-and-costs-no-step ()
   (agent-river-test--with-artifacts
