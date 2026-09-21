@@ -89,40 +89,43 @@ section on the map, which is indistinguishable from a quiet week."
   :type '(set (const issue) (const pr)))
 
 (defcustom agent-river-gh-search nil
-  "Extra GitHub search qualifiers, appended to every kind's query, or nil.
+  "Extra GitHub search qualifiers per kind, or nil for none anywhere.
 
-A GitHub search string such as `\"review-requested:@me\"' or
-`\"author:@me\"' -- anything the qualifiers documented at
+An alist of KIND (`issue' or `pr') to a search string such as
+`\"review-requested:@me\"' or `\"draft:false\"' -- anything the
+qualifiers documented at
 <https://docs.github.com/search-github/searching-on-github/searching-issues-and-pull-requests>
-accept.  Shares `since' rather than opening a query of its own: `since'
-decides how far back the window reaches and this decides which objects
-within it are worth asking about, and a second query for the same window
-would double the request count against a secondary rate limit already
-tight enough to be worth a comment of its own in the script.
+accept.  A kind absent from the alist, or present with nil, asks about
+every object in the window, which is the whole of the default: nil here
+changes nothing for any existing deployment.
 
-Narrows every configured kind alike.  Asking a different question per
-kind -- issues by one qualifier, pull requests by another -- is not what
-this is for; `agent-river-gh-kinds' is where a kind is left out
-entirely, and a per-kind qualifier would be a second setting answering
-a question that one already does.
+Per kind rather than one string shared across them, which is what this
+used to be and was too blunt: `review-requested:@me' and `draft:false'
+are pull-request concepts, and a search naming either does not error
+against `gh issue list' -- it answers with nothing, every poll, silently,
+which is the \"quiet week\" `agent-river-gh-kinds' already worries about
+in its own docstring, reached this time by a configuration nobody
+mistyped rather than one that was. It also costs nothing extra against
+the rate limit either way: each kind already runs its own `gh $kind
+list', so its own qualifier goes into the search string that call
+already builds, sharing `since' rather than opening a further query --
+which was the right reason to refuse a *third* query and, on reflection,
+never a reason to prefer one shared string over two kind-specific ones.
 
-Nil is the whole of the default: every object in the window, which is
-what every existing deployment of this poller already asks for and must
-keep asking for undisturbed.
-
-Filtering to `review-requested:@me' changes what \":gone\" can mean.  The
-poll relies on an object still matching the query one more time, with a
-closed or merged state, to strike its record through -- that is how a
-merged pull request stops sitting in the domain section forever.  A
-review request is commonly withdrawn the moment you submit a review,
-which drops the object out of a `review-requested:@me' search without
-its state ever changing in a delivery this poller sees: the record then
-sits on the map exactly as if nobody had looked at it, because from this
-poller's side nobody-looked-at-it and somebody-reviewed-it-and-moved-on
-now read alike.  `agent-river-forget-artifacts' is the existing answer
-for a record that has stopped being news; a narrowed search asks for it
-more often than the unfiltered default does."
-  :type '(choice (const :tag "Every object" nil) string))
+Filtering `pr' to `review-requested:@me' changes what \":gone\" can
+mean. The poll relies on an object still matching the query one more
+time, with a closed or merged state, to strike its record through --
+that is how a merged pull request stops sitting in the domain section
+forever. A review request is commonly withdrawn the moment you submit a
+review, which drops the object out of a `review-requested:@me' search
+without its state ever changing in a delivery this poller sees: the
+record then sits on the map exactly as if nobody had looked at it,
+because from this poller's side nobody-looked-at-it and somebody-
+reviewed-it-and-moved-on now read alike. `agent-river-forget-artifacts'
+is the existing answer for a record that has stopped being news; a
+narrowed search asks for it more often than the unfiltered default does."
+  :type '(alist :key-type (choice (const issue) (const pr))
+                :value-type (choice (const :tag "Every object" nil) string)))
 
 (defcustom agent-river-gh-interval 300
   "Seconds between polls while `agent-river-gh-mode' is on.
@@ -428,6 +431,24 @@ inside."
   (seq-filter (lambda (kind) (rassq kind agent-river-gh--domains))
               agent-river-gh-kinds))
 
+(defun agent-river-gh--search-env ()
+  "Return one `AGENT_RIVER_GH_SEARCH_ISSUE'/`_PR' string per configured kind.
+
+Reads `agent-river-gh-search', a KIND-to-string alist, and answers with
+nothing for a kind that is absent or nil there -- the same `absent
+rather than empty' rule the setting used to observe as one string is now
+kept per entry: a customisation nobody made for a kind must reach the
+script as nobody having made one for it, not as an empty qualifier that
+happens to search for everything the same way."
+  (let (env)
+    (dolist (kind '(issue pr))
+      (let ((search (alist-get kind agent-river-gh-search)))
+        (when (and search (not (string-empty-p search)))
+          (push (format "AGENT_RIVER_GH_SEARCH_%s=%s"
+                        (upcase (symbol-name kind)) search)
+                env))))
+    (nreverse env)))
+
 (defun agent-river-gh--reporter (dir)
   "Return a process filter logging what the poller of DIR reports.
 
@@ -502,16 +523,7 @@ binding that threw ever completed."
                                  (concat "AGENT_RIVER_GH_KINDS="
                                          (mapconcat #'symbol-name kinds " ")))
                            (when rescan '("AGENT_RIVER_GH_RESCAN=1"))
-                           ;; Absent rather than empty when unset, matching
-                           ;; the script's own `${AGENT_RIVER_GH_SEARCH:-}':
-                           ;; a customisation nobody made must reach the
-                           ;; script as nobody having made one, not as an
-                           ;; empty qualifier that happens to search for
-                           ;; everything the same way.
-                           (when (and agent-river-gh-search
-                                      (not (string-empty-p agent-river-gh-search)))
-                             (list (concat "AGENT_RIVER_GH_SEARCH="
-                                          agent-river-gh-search)))
+                           (agent-river-gh--search-env)
                            process-environment)))
               (make-process
                :name "agent-river-gh"

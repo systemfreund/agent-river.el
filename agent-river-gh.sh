@@ -57,8 +57,9 @@
 #   AGENT_RIVER_GH_LIMIT   how many of each to ask for (default 50)
 #   AGENT_RIVER_GH_SINCE   first-run lookback, a gh search date (default 1 day)
 #   AGENT_RIVER_GH_RESCAN  non-empty: ignore the watermark for this one run
-#   AGENT_RIVER_GH_KINDS   what to ask for: `issue', `pr', or both (default both)
-#   AGENT_RIVER_GH_SEARCH  extra qualifiers appended to every query (default none)
+#   AGENT_RIVER_GH_KINDS       what to ask for: `issue', `pr', or both (default both)
+#   AGENT_RIVER_GH_SEARCH_ISSUE  extra qualifiers for the issue query (default none)
+#   AGENT_RIVER_GH_SEARCH_PR     extra qualifiers for the pull request query (default none)
 
 set -eu
 
@@ -70,14 +71,6 @@ spool=${AGENT_RIVER_SPOOL:-$xdg/agent-river/spool}
 state=${AGENT_RIVER_GH_STATE:-$xdg/agent-river/gh}
 limit=${AGENT_RIVER_GH_LIMIT:-50}
 kinds=${AGENT_RIVER_GH_KINDS:-"issue pr"}
-# Shares the one `since' window rather than opening a query of its own: the
-# qualifier decides *which* objects within the window are worth asking about,
-# `since' decides how far back the window reaches, and asking twice would
-# double the request count per repository per poll -- against a secondary
-# rate limit already tight enough to be worth a comment of its own above.
-# Empty by default, which asks about every object rather than a narrower
-# question nobody posed.
-search=${AGENT_RIVER_GH_SEARCH:-}
 
 # Every step degrades to a no-op.  A poller that fails loudly in a cron job
 # every minute is a poller someone switches off.
@@ -112,6 +105,27 @@ source_for() {
   case $1 in
     issue) printf '%s' 'gh' ;;
     pr) printf '%s' 'gh-pr' ;;
+    *) return 1 ;;
+  esac
+}
+
+# What extra qualifier narrows this kind's query, or none.  A third table
+# beside the two above rather than one setting shared across kinds, which is
+# what this used to be: `review-requested:@me' and `draft:false' are pull
+# request concepts, and handing either to `gh issue list' does not error --
+# it answers `[]', every poll, silently, which is the "quiet week" a kind's
+# own docstring already worries about, arrived at this time from a
+# configuration nobody mistyped rather than one that was.  Per kind rather
+# than shared costs nothing extra against the rate limit either: each kind
+# already runs its own `gh $kind list', so its own qualifier goes into the
+# search string that call already builds, not a further request -- the
+# "shares `since' rather than a second query" reasoning this file used to
+# carry was an argument against a *third* query, and never actually an
+# argument for one shared string over two kind-specific ones.
+search_for() {
+  case $1 in
+    issue) printf '%s' "${AGENT_RIVER_GH_SEARCH_ISSUE:-}" ;;
+    pr) printf '%s' "${AGENT_RIVER_GH_SEARCH_PR:-}" ;;
     *) return 1 ;;
   esac
 }
@@ -175,6 +189,7 @@ for kind in $kinds; do
   # `asked' guard below.
   fields=$(fields_for "$kind") || continue
   src=$(source_for "$kind") || continue
+  search=$(search_for "$kind") || continue
 
   # The answer goes to a file first, rather than straight down a pipe, because
   # the watermark may only move once the query is known to have *worked*.  A

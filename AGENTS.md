@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (452 tests). -L . is required: the tests require all four .el files.
+# Full suite (454 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1214,27 +1214,41 @@ before the deletion, so that deferring is not the same as forgetting.
   live with. It costs no extra request, where a second query for what has
   closed would, and what arrives is bounded by the window either way: it is
   what *ended* since the last poll, not every closed thing there is.
-- **`agent-river-gh-search` narrows every kind by one shared qualifier,
-  never a second one per kind.** It shares `since` rather than opening a
-  second query for the same window, which would double the request count
-  against the secondary rate limit the file already comments on above; a
-  different question per kind is what `agent-river-gh-kinds` is for, not a
-  second setting answering the one question this already does. Bound into
-  the poller's environment the way `AGENT_RIVER_GH_KINDS` is, and **absent
-  rather than empty when unset** — the script tells the two apart with
-  `${AGENT_RIVER_GH_SEARCH:-}`, and a customisation nobody made must reach
-  it as nobody having made one, not as an empty qualifier that happens to
-  search for everything the same way. Narrowing to `review-requested:@me`
-  costs something the unfiltered default never has to pay: the previous
-  bullet's `:gone` depends on an object still matching the query one more
-  time with a closed or merged state, and a review request is commonly
-  withdrawn the moment you submit a review — which drops the object out of
-  the search without its state ever changing in a delivery this poller
-  sees. A record you have already reviewed then sits on the map exactly as
-  if nobody had, because from here the two read alike.
-  `agent-river-forget-artifacts` is the existing answer for a record that
-  has stopped being news; this setting asks for it more than the
-  unfiltered default ever needed to.
+- **`agent-river-gh-search` narrows a kind's own query by that kind's own
+  qualifier** (`agent-river-gh--search-env`, `AGENT_RIVER_GH_SEARCH_ISSUE`,
+  `_PR`). It was one string shared across every configured kind at first,
+  on the reasoning that a second setting would answer a question
+  `agent-river-gh-kinds` already does — which conflates two different
+  questions: `agent-river-gh-kinds` decides *whether* a kind is asked about
+  at all, this decides *which objects within it* are worth asking about,
+  and a shared string cannot answer the second question without smuggling
+  an answer to the first in with it. `review-requested:@me` and
+  `draft:false` are pull-request concepts, and handing either to `gh issue
+  list` does not error — it answers with nothing, every poll, silently,
+  which is the "quiet week" `agent-river-gh-kinds`'s own docstring already
+  worries about, reached this time by a configuration nobody mistyped
+  rather than one that was. **Per kind costs nothing extra either** — the
+  "shares `since` rather than a second query" reasoning that justified
+  sharing was only ever an argument against a *third*, qualifier-only
+  query: each kind already runs its own `gh $kind list`, so its own
+  qualifier goes into the search string that call already builds, not a
+  further request. Bound into the poller's environment the way
+  `AGENT_RIVER_GH_KINDS` is, and **absent rather than empty per kind when
+  unset** — the script tells the two apart with
+  `${AGENT_RIVER_GH_SEARCH_PR:-}`, and a customisation nobody made for a
+  kind must reach it as nobody having made one for it, not as an empty
+  qualifier that happens to search for everything the same way; three ways
+  to say nothing (absent from the alist, present with nil, present with
+  `""`) all answer alike. Narrowing `pr` to `review-requested:@me` costs
+  something the unfiltered default never has to pay: the previous bullet's
+  `:gone` depends on an object still matching the query one more time with
+  a closed or merged state, and a review request is commonly withdrawn the
+  moment you submit a review — which drops the object out of the search
+  without its state ever changing in a delivery this poller sees. A record
+  you have already reviewed then sits on the map exactly as if nobody had,
+  because from here the two read alike. `agent-river-forget-artifacts` is
+  the existing answer for a record that has stopped being news; this
+  setting asks for it more than the unfiltered default ever needed to.
 - **An issue and a pull request are one dialect and two source names**
   (`agent-river-gh--domains`, `AGENT_RIVER_GH_KINDS`). The script names
   which query an answer came out of — `gh` or `gh-pr` — and nests it under

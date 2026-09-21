@@ -954,7 +954,7 @@ behaviour, and note that each kind is one API call per repository per poll.
 | | `AGENT_RIVER_GH_LIMIT` | how many of each to ask for |
 | | `AGENT_RIVER_GH_SINCE` | first-run lookback |
 | | `AGENT_RIVER_GH_RESCAN` | ignore the watermark for one run |
-| `agent-river-gh-search` | `AGENT_RIVER_GH_SEARCH` | extra qualifiers, every kind |
+| `agent-river-gh-search` | `AGENT_RIVER_GH_SEARCH_ISSUE`, `_PR` | extra qualifiers, per kind |
 
 A watermark keeps an object from being delivered twice; the first poll after
 the mode is switched on ignores it and asks wide, because the artifact table
@@ -969,23 +969,28 @@ The poll asks for every state, not only the open ones: something that closes
 or merges is delivered once more on the tick it ended in, so its record is
 struck through rather than sitting in the section for ever.
 
-`agent-river-gh-search` narrows every kind by an extra GitHub search
-qualifier, sharing the one `since` window rather than opening a second query:
+`agent-river-gh-search` narrows a kind's own query by an extra GitHub search
+qualifier, sharing the one `since` window rather than opening a second query.
+It is an alist keyed by kind, because a qualifier is usually a kind's own
+concept — `review-requested:@me` and `draft:false` mean nothing to an issue,
+and asking `gh issue list` for either does not error, it answers with
+nothing, silently, every poll:
 
 ```elisp
-(setq agent-river-gh-search "review-requested:@me")
+(setq agent-river-gh-search '((pr . "review-requested:@me draft:false")))
 ```
 
-only asks about pull requests where you are a requested reviewer (combine
-with `agent-river-gh-kinds '(pr)` to drop issues entirely). It costs
-something the unfiltered default does not: a request is commonly withdrawn
-the moment you submit a review, so the object can drop out of the search
-without ever coming back with a closed or merged state — and a closed or
-merged state landing in one more delivery is the only thing that strikes a
-record through. A record you have already reviewed can therefore sit on the
-map looking exactly like one nobody has touched; `agent-river-forget-artifacts`
-is the existing answer for a record that has stopped being news, used more
-often than the unfiltered default would need it.
+only asks about pull requests that are not drafts and where you are a
+requested reviewer, and leaves the `issue` query — if `agent-river-gh-kinds`
+still asks for one — untouched. It costs something the unfiltered default
+does not: a review request is commonly withdrawn the moment you submit a
+review, so the object can drop out of the search without ever coming back
+with a closed or merged state — and a closed or merged state landing in one
+more delivery is the only thing that strikes a record through. A record you
+have already reviewed can therefore sit on the map looking exactly like one
+nobody has touched; `agent-river-forget-artifacts` is the existing answer for
+a record that has stopped being news, used more often than the unfiltered
+default would need it.
 
 `agent-river-gh-brief` is the worked example of a brief, and handles both
 domains. It shows the one thing a brief for foreign text owes: everything
