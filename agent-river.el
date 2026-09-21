@@ -412,28 +412,21 @@ without the other.  The event carries the text unclipped.")
 (cl-defstruct (agent-river-state (:constructor agent-river--state-create))
   id                ; registry key: "SESSION" or "SESSION/AGENT"
   label             ; human-readable: working directory, or the agent type
-  ;; The absolute working directory the hook reported, which is the anchor
+  ;; The absolute working directory the hook reported; the anchor
   ;; `artifacts' is keyed against.  Kept beside the keys rather than folded
-  ;; into them: a key stays relative, so one file reached from a worktree and
-  ;; from the main checkout is still one artifact, and a view that needs to
-  ;; place a key in a real directory tree combines the two deliberately.
+  ;; into them, so a key stays relative and one file reached from a worktree
+  ;; and from the main checkout is still one artifact.
   cwd
-  ;; hash: artifact key -> the absolute directory it really sits in, for the
-  ;; keys `cwd' cannot place.  `agent-river--rel' degrades a file outside the
-  ;; cwd to a bare basename, so resolving it against the cwd puts it in a
-  ;; directory no agent ever opened -- which is how a file edited under
-  ;; ~/.claude showed up inside the project tree.  Only the strays are
-  ;; recorded: a key that resolves under the cwd is anchored by the cwd
-  ;; already, and storing it twice gives the two a way to disagree.
+  ;; hash: artifact key -> the absolute directory it really sits in, for keys
+  ;; `cwd' cannot place (a file outside the cwd degrades to a bare basename).
+  ;; Only the strays are recorded: a key under the cwd is anchored by the cwd
+  ;; already, and storing it twice would let the two disagree.
   anchors
   ;; hash: agent_id -> (:type TYPE :steps N :failures N :started T :last T
-  ;; :done BOOL), for the work this session delegated.  A dimension of the
-  ;; session rather than a peer beside it in the registry: a subagent has no
-  ;; prompt, no working directory, no user and nothing that can be told to
-  ;; it, and it dies with the turn that spawned it -- it fails the definition
-  ;; of a session in four ways, which is why every consumer of the registry
-  ;; used to begin by sorting it back out again.  What it is is a tally of
-  ;; what this session set in motion, and that is what is kept.
+  ;; :done BOOL), for the work this session delegated.  A tally on the
+  ;; session rather than a peer in the registry: a subagent has no prompt, no
+  ;; working directory and nothing that can be told to it, so it fails the
+  ;; definition of a session.
   subagents
   started last-seen ; last-seen is the liveness clock a registry needs
   task task-started ; the current prompt, and when it arrived
@@ -447,37 +440,29 @@ without the other.  The event carries the text unclipped.")
   task-failures     ; failures during this task, not just the current run
   recent            ; newest-first (TOOL . DETAIL), the window phase reads
   idle              ; the turn ended; nothing is in progress right now
-  ;; Everything above is measured.  The four below are a *claim* the agent
-  ;; made about itself, kept apart on purpose: this state is fed back to the
-  ;; agent, and a claim read later as an observation closes the loop with no
-  ;; ground truth left in it.  They never feed a signal.
+  ;; Everything above is measured; the four below are a *claim* the agent
+  ;; made about itself.  Kept apart so a claim can never be read back as an
+  ;; observation and feed a signal.
   intent intent-at intent-step intent-hottest
   tasks             ; finished tasks, newest first
   signals           ; observations handed back, newest first
   ;; Observations made outside the hook stream, newest first -- see
-  ;; `agent-river-note'.  A third category next to the measurements above and
-  ;; the claims before them: something that was genuinely seen, but not by a
-  ;; hook, so it could never be recomputed from the event stream and has to be
-  ;; carried rather than derived.
+  ;; `agent-river-note'.  Seen, but not by a hook, so it can't be recomputed
+  ;; from the event stream and has to be carried rather than derived.
   notes
   ;; The end of the last turn, clipped to `agent-river-said-width' and stored
-  ;; raw -- escaping is done where it is rendered, the way an intent's is, so
-  ;; that a rendering decision does not end up in the state and the HUD, which
-  ;; is deliberately not Markdown, does not show an escape it never needed.
+  ;; raw; escaped where rendered, like an intent, so the state carries no
+  ;; rendering decision.
   ;;
   ;; In the *task* frame, cleared by `prompt' with the steps and the task
-  ;; artifacts: this is the answer to the prompt above it, which is how the
-  ;; export files it, and once a new prompt has arrived the old answer read as
-  ;; current is an answer filed under a question it never heard.  The words
-  ;; themselves are not lost -- the log keeps every `“' line it drew.
+  ;; artifacts: it is the answer to the prompt above it, and after a new
+  ;; prompt the old answer would be filed under a question it never heard.
+  ;; The words themselves survive in the log.
   ;;
-  ;; A measurement and not a claim, which is worth being exact about since the
-  ;; words are the agent's either way: what is recorded is that the turn ended
-  ;; with this being said, which the stream witnessed.  What must not happen is
-  ;; the *content* being read back as an observation -- nothing derives a
-  ;; signal from it, and anything that did would close the same loop the intent
-  ;; slots are kept apart to prevent, with the agent's own sentence coming back
-  ;; to it as a fact about the world.
+  ;; A measurement, not a claim: the stream witnessed the turn ending with
+  ;; this being said.  Its *content* must never be read back as an
+  ;; observation or feed a signal -- that would close the loop the intent
+  ;; slots are kept apart to prevent.
   said)
 
 
@@ -493,15 +478,11 @@ this needs no locking.")
 
 ;;; agent-shell, when it is hosting the sessions
 ;;
-;; The sessions run as agent-shell buffers in this very Emacs, and
-;; `agent-shell--state' carries the ACP session id -- which is verbatim the
-;; `session_id' the hooks report.  That makes the link exact rather than
-;; inferred, and lets three pieces of guesswork be deleted: liveness stops
-;; being a TTL estimate, labels stop drifting with the working directory,
-;; and uniquifying them stops being our job, since agent-shell already
-;; numbers its buffers.
+;; agent-shell buffers run in this Emacs, and `agent-shell--state' carries
+;; the ACP session id, which is verbatim the hooks' `session_id'.  That makes
+;; liveness, labels and uniquifying exact rather than guessed.
 ;;
-;; All of it degrades to the old behaviour when agent-shell is absent.
+;; Degrades to the old behaviour when agent-shell is absent.
 
 ;; Declared so the byte-compiler sees a special variable rather than a free
 ;; one: agent-shell owns it, and this sets it only while
@@ -515,8 +496,7 @@ this needs no locking.")
 (defun agent-river--shell-buffer-p ()
   "Return non-nil when the current buffer hosts an agent-shell session."
   ;; The mode is the whole test: where agent-shell is not loaded there is no
-  ;; such buffer, so no separate check for the package is needed -- and one
-  ;; on `featurep' would only be a shortcut that is awkward to fake in tests.
+  ;; such buffer, so no separate `featurep' check is needed.
   (derived-mode-p 'agent-shell-mode))
 
 (defconst agent-river--shell-rescan 5
@@ -906,19 +886,11 @@ replaying a session's events from the start."
         (file (plist-get event :file))
         (path (plist-get event :path))
         (ms   (plist-get event :ms)))
-    ;; Folded rather than set where the state is addressed, so it keeps the
-    ;; promise the docstring makes: replay the events and the anchor comes
-    ;; back with them.  Refreshed on every event that carries one rather than
-    ;; kept from the first, though measured on 2026-09-14 that moves nothing
-    ;; on the hook path: a payload's cwd is the directory the agent was
-    ;; started in, repeated identically on every event, and a `cd' inside a
-    ;; Bash call is another process that never reaches it.  Only the
-    ;; agent-shell path can move it -- it reads the buffer's
-    ;; `default-directory' per event, so `M-x cd' there re-anchors the
-    ;; session, and keys folded before that go on resolving against the new
-    ;; cwd.  Left that way deliberately: a second account per key is a lot of
-    ;; bookkeeping for a case only a hand gesture can provoke.  Events made
-    ;; inside Emacs -- a note, a signal -- carry none and leave it alone.
+    ;; Folded rather than set where the state is addressed, so replaying the
+    ;; events reproduces the anchor too.  Refreshed on every event that
+    ;; carries a cwd; only the agent-shell path actually moves it, reading the
+    ;; buffer's `default-directory' per event.  Events made inside Emacs --
+    ;; a note, a signal -- carry none and leave it alone.
     (let ((cwd (plist-get event :cwd)))
       (when (and cwd (not (string-empty-p cwd)))
         (setf (agent-river-state-cwd state) (directory-file-name cwd))))
@@ -938,10 +910,8 @@ replaying a session's events from the start."
       (setf (agent-river-state-task-failures state) 0)
       (setf (agent-river-state-idle state) nil)
       ;; And so does it to the answer that ended the last one: the export
-      ;; sits `said' under the prompt because the two are one exchange, and a
-      ;; new prompt has not been answered yet.  Which frame it is in is the
-      ;; whole question here, and this is the answer -- the task frame, with
-      ;; the steps and the task artifacts beside it.
+      ;; sits `said' under the prompt as one exchange, and a new prompt has
+      ;; not been answered yet.
       (setf (agent-river-state-said state) nil)
       ;; A new task makes any previous claim about the work meaningless.
       (setf (agent-river-state-intent state) nil
@@ -968,10 +938,9 @@ replaying a session's events from the start."
         (when window (setcdr window nil)))
       (agent-river--touch state file (agent-river--writing-p tool))
       (agent-river--anchor state file path)
-      ;; Counted on the session, not beside it.  A delegated step is a step
-      ;; this session took -- it asked for it -- and the file it touched lands
-      ;; in the session's own frames, which a separate function used to have
-      ;; to reach across the registry to find.
+      ;; Counted on the session, not beside it: a delegated step is a step
+      ;; this session took, and the file it touched lands in the session's
+      ;; own frames.
       (agent-river--delegate state (plist-get event :agent)
                              (plist-get event :agent-type) t))
 
@@ -990,20 +959,15 @@ replaying a session's events from the start."
       (agent-river--delegate state (plist-get event :agent)
                              (plist-get event :agent-type) nil t)
       ;; The streak is the one measurement a delegated failure stays out of,
-      ;; and it is the one a signal is built from.  Three subagents failing
-      ;; once each is not one line of work failing three times, and a signal
-      ;; saying so would put a false statement into the session's own
-      ;; context.  Everything else about the failure is counted above: the
-      ;; task tally has it, the tool tally has it, and the child's own tally
-      ;; says whose it was.
+      ;; since it's what a signal is built from: three subagents failing once
+      ;; each is not one line of work failing three times.  Everything else
+      ;; about the failure is still counted: task tally, tool tally, and the
+      ;; child's own tally.
       (unless (agent-river--delegated-p event)
-        ;; A failure that follows a success opens a new run.  Counted because
-        ;; the streak value alone cannot tell two runs apart: a session that
-        ;; recovers and then fails three times again is in a new predicament,
-        ;; not still in the old one, and an observation about it must not be
-        ;; suppressed as a repeat of the first.  Never reset, so the id built
-        ;; from it stays unique for the life of the session -- a new prompt
-        ;; clears the streak but must not make old ids collide with new ones.
+        ;; A failure that follows a success opens a new run: the streak value
+        ;; alone can't tell two runs apart, and an observation about the new
+        ;; one must not be suppressed as a repeat of the first.  Never reset,
+        ;; so the run id stays unique even after a prompt clears the streak.
         (when (zerop (agent-river-state-fail-streak state))
           (setf (agent-river-state-fail-runs state)
                 (1+ (or (agent-river-state-fail-runs state) 0))))
@@ -1015,49 +979,29 @@ replaying a session's events from the start."
             (push (cons tool 1) (agent-river-state-fail-tools state))))))
 
      ;; The edge on its own: a session reached something without a tool call
-     ;; this package could see -- see `agent-river-reach'.  Deliberately as
-     ;; narrow as it looks: both artifact frames and the anchor, and nothing
-     ;; else.  A step is a thing the agent did and this is not one, so
-     ;; counting one here would be wrong in every reading taken from the step
-     ;; count, to exactly the extent this is used.
+     ;; this package could see -- see `agent-river-reach'.  Updates both
+     ;; artifact frames and the anchor, nothing else.  No tool ran, so this
+     ;; counts no step.
      ((equal kind "touch")
       (agent-river--touch state file (plist-get event :wrote))
       (agent-river--anchor state file path))
 
      ;; What the agent said, once the turn it said it in was over.  As narrow
-     ;; as `touch' above and for the same reason: no tool ran, so no step is
-     ;; counted and no artifact table is warmed -- a step count inflated here
-     ;; would be wrong in every reading taken from it, and a file named in a
-     ;; sentence is not a file the agent reached.
+     ;; as `touch' above: no tool ran, so no step is counted and no artifact
+     ;; table is warmed.
      ;;
-     ;; The event carries the whole text, for whoever is listening on
-     ;; `agent-river-observers'; the slot keeps an excerpt, because this is the
-     ;; one value here whose length the agent chooses.  Every reader of the
-     ;; slot is a bounded one -- a bullet in the export, a value in the report,
-     ;; a line -- and the export's claim that only three values are the agent's
-     ;; is tractable only because this one arrives already clipped.  Squished
-     ;; as well: a turn's output is paragraphs, and a newline in a line-based
-     ;; reader makes one entry and a stray.
+     ;; The event carries the whole text, for `agent-river-observers'; the
+     ;; slot keeps an excerpt clipped to `agent-river-said-width', since
+     ;; every reader of the slot is bounded (export, report, log line).
      ;;
-     ;; Which end it keeps is `agent-river--excerpt's business rather than
-     ;; this branch's, and it is not the first WIDTH characters: the opening
-     ;; of an answer restates the question and the close says what was
-     ;; concluded or what is wanted, while the middle narrates the tool calls
-     ;; this state has already counted.
+     ;; `agent-river--excerpt' keeps both ends rather than the first WIDTH
+     ;; characters: an answer opens by restating the question and closes
+     ;; with the conclusion, while the middle narrates tool calls already
+     ;; counted elsewhere.
      ;;
-     ;; Not a form the caller gets to choose, and the alternative is written
-     ;; down rather than merely not built.  A setting deciding what lands here
-     ;; would put a policy inside the fold, which is the one place this package
-     ;; keeps its extension points out of: an observer, a place function, a map
-     ;; contributor and a signal function all run outside it, each with its own
-     ;; guard and retiring on its first error, because an error in here is
-     ;; reported as `fold failed' and sends the user to `agent-river-reset'.
-     ;; It would also make the replay promise in this function's docstring
-     ;; depend on what a variable held at the time of the replay.  And it buys
-     ;; nothing that is not already there: a consumer that wants the whole text
-     ;; is handed it on the event, the same way `:path' is handed over, and
-     ;; keeps it in a table of its own rather than in the one table this
-     ;; package promises to own and every view reads.
+     ;; Not configurable -- a setting here would put policy inside the fold,
+     ;; which this package keeps free of extension points, and would make
+     ;; the replay promise depend on a variable's value at replay time.
      ((equal kind "say")
       (setf (agent-river-state-said state)
             (agent-river--excerpt (plist-get event :text)
@@ -1080,23 +1024,16 @@ replaying a session's events from the start."
             (agent-river-state-notes state)))
 
      ((equal kind "forget")
-      ;; The artifact tables emptied, and nothing else: the session goes on,
-      ;; its steps and failures still count, and only the record of which
-      ;; files it has been in is dropped.  Folded rather than cleared where
-      ;; the command is written, because the fold owns the state -- a
-      ;; `clrhash' from outside would be a transition no event accounts for,
-      ;; and the replay promise in `agent-river-fold's docstring would stop
-      ;; being true without anything failing.
+      ;; The artifact tables emptied, nothing else: steps and failures still
+      ;; count.  Folded rather than cleared where the command is written,
+      ;; since the fold owns the state.
       ;;
-      ;; The anchors go with them.  They are keyed on artifact keys, so
-      ;; without the artifacts they address nothing, and a later touch of
-      ;; the same file re-folds the anchor from its `:path' anyway.
+      ;; The anchors go with them -- keyed on artifact keys, so without the
+      ;; artifacts they address nothing.
       ;;
-      ;; `:files' narrows the same transition to the keys it names, which is
-      ;; what `agent-river-forget-gone-files' folds.  One branch rather than
-      ;; two: the state change is identical and only its subject differs, and
-      ;; a second kind would be a second place for "what forgetting means"
-      ;; to be decided.
+      ;; `:files' narrows the same transition to the keys it names, for
+      ;; `agent-river-forget-gone-files': one branch rather than two, since
+      ;; the state change is identical and only its subject differs.
       (let ((files (plist-get event :files)))
         (if files
             (dolist (file files)
@@ -1119,11 +1056,9 @@ replaying a session's events from the start."
 
      ((equal kind "done")
       (setf (agent-river-state-step state) nil)
-      ;; `SubagentStop' carries an agent_id -- measured on 2026-09-13 by
-      ;; tracing the argv against the folded event -- so this retires the
-      ;; child it names and never the session.  An event that named no child
-      ;; would otherwise mark a live session finished, which poisons every
-      ;; reading taken from it.
+      ;; `SubagentStop' carries an agent_id, so this retires the child it
+      ;; names and never the session -- an event naming no child would
+      ;; otherwise mark a live session finished.
       (agent-river--delegate state (plist-get event :agent)
                              (plist-get event :agent-type) nil nil t)))
     state))
@@ -1131,47 +1066,34 @@ replaying a session's events from the start."
 
 ;;; Artifacts -- the things worked on, as subjects of their own
 ;;
-;; Everything above folds events onto a *session*.  `agent-river-fold' takes an
-;; `agent-river-state', every branch writes something true of that session, and
-;; the artifact tables inside it record which files it reached.  Which means an
-;; artifact has no existence of its own: it is a key in somebody's table, and
-;; who is in it is reconstructed at every read --
-;; `agent-river--artifact-entries' flattens the registry and
-;; `agent-river--domain-parties' inverts it.  The identity is already there;
-;; what it has never had is a home.
+;; Everything above folds events onto a *session*.  `agent-river-fold' takes
+;; an `agent-river-state', and the artifact tables inside it record which
+;; files that session reached -- an artifact has no existence of its own,
+;; just a key in somebody's table.
 ;;
-;; That shape is right for a file, which only becomes interesting once an agent
-;; opens it.  It is wrong for anything that arrives on its own -- an incident
-;; routed to you, a review requested, a build that broke -- and the wrongness
-;; is not cosmetic: such a thing matters most when *no* agent is running, which
-;; is exactly when there is no session to fold it onto.  Hanging it on the one
-;; that acted last would be a guess, and it is the same guess
-;; `agent-river-set-intent' already warns about one level up.
+;; That shape is right for a file, which only becomes interesting once an
+;; agent opens it.  It is wrong for anything that arrives on its own -- an
+;; incident routed to you, a review requested, a build that broke -- since
+;; such a thing matters most when *no* agent is running, and there is no
+;; session to fold it onto.
 ;;
-;; So the implicit identity gets a table.  What is true of the artifact itself
-;; lives here; what is true of the *relationship* between a session and an
-;; artifact stays where it was, in the session's two tables, and is still
-;; aggregated at read time.  That split is the whole design, and it is what
-;; keeps the frames out of here: `artifacts' versus `task-artifacts' is a
-;; property of the reaching, not of the thing reached.
+;; So the implicit identity gets a table of its own.  What is true of the
+;; artifact lives here; what is true of the *relationship* between a session
+;; and an artifact stays in the session's two tables and is aggregated at
+;; read time.  That split keeps the frames out of here: `artifacts' versus
+;; `task-artifacts' is a property of the reaching, not of the thing reached.
 ;;
-;; This table is deliberately not a mirror of those.  A file an agent touched
-;; needs no record here -- the session's table already says everything true of
-;; it, and a second copy is only a way for the two to disagree.  What belongs
-;; here is what the event stream could never produce: something declared in
-;; from outside.  The same rule `agent-river-note' follows, one subject over.
+;; Deliberately not a mirror of those tables: a file an agent touched needs
+;; no record here, since the session's table already says everything true
+;; of it.  What belongs here is what the event stream could never produce --
+;; something declared in from outside, the same rule `agent-river-note'
+;; follows one subject over.
 ;;
-;; Widening `agent-river-registry' to hold non-session keys was the obvious
-;; move and is the one to keep resisting.  The registry key is already a
-;; composite ("SESSION" or "SESSION/AGENT"), so one more kind of key looks
-;; free -- but every walker of that table would then have to begin by asking
-;; which kind it had, and there are more of them than it seems:
-;; `agent-river--artifact-entries', `agent-river--active-count',
-;; `agent-river--spinning-p', the block draw, every report.  A struct serving two meanings is a union type whichever way
-;; it is spelled, and the walker that forgets to test is wrong only for the
-;; records it sees least often -- which here is the ones that arrived with no
-;; agent on them, the whole case this exists for.  Two tables and two folds
-;; cost a second `clrhash' in `agent-river-reset' and nothing else.
+;; A second table rather than widening `agent-river-registry' to hold
+;; non-session keys: every walker of that registry would then have to ask
+;; which kind of key it had, and a struct serving two meanings is a union
+;; type either way it is spelled.  Two tables cost a second `clrhash' in
+;; `agent-river-reset' and nothing else.
 
 (cl-defstruct (agent-river-artifact
                (:constructor agent-river--artifact-create))
@@ -1183,19 +1105,17 @@ replaying a session's events from the start."
   domain            ; symbol: who understands `key'.  Required; see the fold
   name              ; what a human calls it; `key' when nothing better was given
   ;; Whatever the producer carried in, an alist, opaque here.  This package
-  ;; never reads a value out of it -- it is passed to the views that asked for
-  ;; the artifact and to nobody else, which is what lets it hold a ticket body,
-  ;; a severity or a URL without this file having to learn about any of them.
+  ;; never reads a value out of it, which lets it hold a ticket body, a
+  ;; severity or a URL without this file learning about any of them.
   context
   ;; When the key first entered this table.  The fact a dedup asks about, and
   ;; the reason it is a slot rather than derived: "have I seen this one" is not
   ;; answerable from an event stream that only carries the events you kept.
   appeared
   last              ; when something last happened *to* it
-  ;; Closed, resolved, deleted.  Kept rather than removed, for the reason the
-  ;; map strikes a vanished file through instead of dropping its line: the
-  ;; ending is itself a thing that happened.  `agent-river-drop-artifact' is
-  ;; the gesture for when it has stopped being news.
+  ;; Closed, resolved, deleted.  Kept rather than removed: the ending is
+  ;; itself a thing that happened.  `agent-river-drop-artifact' is the
+  ;; gesture for when it has stopped being news.
   gone gone-at
   ;; Observations about the artifact itself, newest first -- not about any
   ;; session that reached it.  Same shape and same rule as the state's own
@@ -1288,10 +1208,9 @@ second account this table exists to avoid."
     (setf (agent-river-artifact-last artifact) (current-time))
     (cond
      ((equal kind "appear")
-      ;; Idempotent, and that is the point rather than a convenience: a
-      ;; producer that polls sees the same ticket on every pass, and the
-      ;; appearance is the *key* entering the table, not this event arriving.
-      ;; `agent-river-observe-artifact' is where that distinction is reported.
+      ;; Idempotent on purpose: a producer that polls sees the same ticket
+      ;; every pass, and the appearance is the *key* entering the table, not
+      ;; this event arriving -- see `agent-river-observe-artifact'.
       (let ((name (plist-get event :name))
             (context (plist-get event :context)))
         (when name (setf (agent-river-artifact-name artifact) name))
@@ -1299,18 +1218,15 @@ second account this table exists to avoid."
           (setf (agent-river-artifact-context artifact)
                 (agent-river--artifact-merge
                  (agent-river-artifact-context artifact) context))))
-      ;; Reappearing undoes an ending, the way `agent-river--anchor' drops a
-      ;; stale anchor rather than keeping it: a ticket that was resolved and
-      ;; has been reopened is open, and a record that went on saying otherwise
-      ;; would be wrong in the direction that matters.
+      ;; Reappearing undoes an ending: a ticket resolved and then reopened is
+      ;; open, and a record that kept saying otherwise would be wrong in the
+      ;; direction that matters.
       (setf (agent-river-artifact-gone artifact) nil
             (agent-river-artifact-gone-at artifact) nil))
 
      ((equal kind "context")
-      ;; Merged per key, not replaced wholesale: a producer that has learned
-      ;; one new thing should not have to resend everything it knew before,
-      ;; and made to, it would eventually send a shorter list by accident and
-      ;; silently drop the rest.
+      ;; Merged per key, not replaced wholesale: a producer that learned one
+      ;; new thing shouldn't have to resend everything it knew before.
       (setf (agent-river-artifact-context artifact)
             (agent-river--artifact-merge
              (agent-river-artifact-context artifact)
@@ -1414,10 +1330,9 @@ nothing -- so the producer\='s mistake is better said than kept."
          (artifact (agent-river-artifact key
                                          (plist-get event :domain)
                                          (plist-get event :name))))
-    ;; Guarded like the session fold, and for the same failure: reloading this
-    ;; file after changing the struct leaves older records short a slot, and an
-    ;; error here used to be an error in whatever producer called it -- which
-    ;; on a webhook is a dropped ticket rather than a visible mistake.
+    ;; Guarded like the session fold: an error here must not become an error
+    ;; in whatever producer called it -- on a webhook that's a dropped
+    ;; ticket rather than a visible mistake.
     (condition-case err
         (agent-river-fold-artifact artifact event)
       (error
@@ -1568,16 +1483,15 @@ SCOPE is `session' for the whole session, `task' or nil for this task."
 
 ;; Linking by hand -- the user as the producer
 ;;
-;; `agent-river-reach' has had no shipping caller: the edge between a session
-;; and an artifact can only be reported by whoever performed the dispatch, and
-;; nothing in this package performs one.  A user does, all the time, and knows
-;; it -- so the gesture below is that report, made where the answer to "which
-;; session" is not a guess.
+;; `agent-river-reach' has had no shipping caller: the edge between a
+;; session and an artifact can only be reported by whoever performed the
+;; dispatch, and nothing in this package performs one.  A user does -- so
+;; the gesture below is that report, made where "which session" is not a
+;; guess.
 ;;
 ;; It is the first caller of `agent-river-appeared' and `agent-river-reach'
-;; together, which makes it the first place the order between them can be got
-;; wrong.  It cannot be got wrong here: both halves are one function, and the
-;; session is checked before either runs.
+;; together, and cannot get the order wrong: both halves are one function,
+;; and the session is checked before either runs.
 
 (defun agent-river--read-session ()
   "Return the session a gesture is about, asked only where it is in doubt.
@@ -1596,10 +1510,9 @@ a right one."
   (or (agent-river--shell-session)
       (let (cands)
         (maphash (lambda (id state)
-                   ;; The id rides along in the candidate because a label need
-                   ;; not be unique -- agent-shell uniquifies the ones it
-                   ;; hosts, and nothing uniquifies the rest.  Two candidates
-                   ;; spelled alike would make the choice unanswerable.
+                   ;; The id rides along because a label need not be
+                   ;; unique -- agent-shell uniquifies the ones it hosts,
+                   ;; nothing uniquifies the rest.
                    (push (cons (format "%s [%s]"
                                        (or (agent-river-state-label state) "?")
                                        id)
@@ -1783,11 +1696,8 @@ supposed to own alone."
                          (eq (agent-river-artifact-domain artifact) domain))
                  (push artifact records)))
              agent-river-artifacts)
-    ;; Sorted on the records and rendered afterwards.  It used to sort the
-    ;; plists, which meant carrying a raw timestamp out in `:last' beside a
-    ;; formatted `:appeared' -- one list, two ways of saying when, and the
-    ;; only reason for the odd one out was this comparison.  `:ago' is the
-    ;; word `agent-river-reaching' already uses.
+    ;; Sorted on the records and rendered afterwards, so the plist doesn't
+    ;; need to carry a raw timestamp beside its formatted `:ago'.
     (dolist (artifact (sort records
                             (lambda (a b)
                               (time-less-p (agent-river-artifact-last b)
@@ -1820,10 +1730,8 @@ this apart from `agent-river-artifacts-reset\=' below."
            (unless keys (user-error "No artifact records to forget"))
            (completing-read "Forget artifact: " keys nil t))))
   (if (not (gethash key agent-river-artifacts))
-      ;; Nothing was removed, so there is nothing to log and nothing to
-      ;; redraw.  Saying `forgotten\=' anyway would put a line in the log for
-      ;; a thing that did not happen, and the log is where this package
-      ;; answers how often things did.
+      ;; Nothing was removed, so nothing to log or redraw: a `forgotten\='
+      ;; line here would record a thing that did not happen.
       (progn (message "agent-river: %s is not on record" key) nil)
     (remhash key agent-river-artifacts)
     (agent-river--forget-reported
@@ -2009,9 +1917,8 @@ to prevent.
 The two do different jobs and both are needed: the throttle decides which
 streaks are worth a word, the id decides that each of them gets one."
   (let* ((streak (agent-river-state-fail-streak state))
-         ;; Which run, and how deep into it.  The run number is what keeps a
-         ;; later stretch of three failures from being mistaken for the
-         ;; earlier one; the streak is what earns each of 3, 6, 9 its own word
+         ;; Which run, and how deep into it: the run number distinguishes
+         ;; separate streaks, the streak earns each of 3, 6, 9 its own word
          ;; within a run.
          (id (list 'streak (or (agent-river-state-fail-runs state) 0) streak)))
     (when (and (>= streak agent-river-fail-streak-threshold)
@@ -2047,12 +1954,9 @@ streaks are worth a word, the id decides that each of them gets one."
 
 ;;; Reading the hook payload
 ;;
-;; This used to be 200 lines of shell and jq that parsed the payload and
-;; assembled Elisp *as text*, which meant tool arguments were interpolated
-;; into a form this Emacs then evaluated -- safe only for as long as the
-;; escaping held.  The payload now arrives as a file and is parsed here, so
-;; nothing from a tool call is ever read as code, and the derivation is
-;; under test instead of in a shell script nobody exercises.
+;; The payload arrives as a file and is parsed here rather than assembled
+;; as Elisp text by a shell script, so a tool argument is never read as
+;; code and the derivation stays under test.
 
 (defconst agent-river-detail-width 72
   "How much of a tool argument a log line shows.")
@@ -2089,9 +1993,8 @@ is what a path, a URL or a base64 blob is."
       text
     (let ((cut (substring text 0 width)))
       (string-trim-right
-       ;; Only where the cut landed inside a word.  Backing off from one
-       ;; that fell exactly on a boundary throws away the last whole word
-       ;; the budget paid for, which on a short budget is most of it.
+       ;; Only where the cut landed inside a word -- backing off from one
+       ;; on a boundary would throw away a whole word the budget paid for.
        (if (eq (aref text width) ?\s)
            cut
          (let ((space (string-match " [^ ]*\\'" cut)))
@@ -2131,12 +2034,10 @@ first went wrong, and the case it exists for."
                                 (agent-river--sentence-stops one)))
              (sentence (when opens
                          (string-trim (substring one (car (last opens))))))
-             ;; What to cut into where nothing whole fits.  A closing that is
-             ;; the whole message is not a closing -- a run-on with no line
-             ;; and no sentence inside it has no end distinguishable from its
-             ;; body, and taking its last words would be the middle of it
-             ;; wearing an ellipsis.  This is the case where head alone is
-             ;; the honest answer.
+             ;; What to cut into where nothing whole fits.  A closing that
+             ;; is the whole message isn't a closing -- a run-on with no end
+             ;; distinguishable from its body -- so the head alone is the
+             ;; honest answer there.
              (closing (or sentence (when (cdr lines) one)))
              (whole (seq-find (lambda (candidate)
                                 (and candidate
@@ -2147,13 +2048,10 @@ first went wrong, and the case it exists for."
                                      (string-match-p "[[:alpha:]]" candidate)))
                               (list one sentence))))
         (or whole
-            ;; Nothing whole fits.  Cut into the closing from the left rather
-            ;; than give it up: an answer that ends in one long paragraph --
-            ;; which is most of them -- would otherwise fall back to the head
-            ;; alone, which is the prefix cut this function exists to stop,
-            ;; arrived at by a longer road.  The gap is marked either way, so
-            ;; a tail that starts mid-clause cannot be read as a quotation of
-            ;; how the message began.
+            ;; Nothing whole fits.  Cut into the closing from the left
+            ;; rather than give it up, since most answers end in one long
+            ;; paragraph.  The gap is marked either way, so a tail starting
+            ;; mid-clause can't be read as a quotation of the opening.
             (when (and closing (string-match-p "[[:alpha:]]" closing))
               (let ((cut (agent-river--clip-words-left closing width)))
                 (and (string-match-p "[[:alpha:]]" cut) cut))))))))
@@ -2233,11 +2131,8 @@ the view renders a collision as two unrelated files."
   (let ((dir (and cwd (not (string-empty-p cwd)) (file-name-as-directory cwd))))
     (if (and dir (string-prefix-p dir path))
         ;; Measured off the slash-terminated form, not off CWD plus one: a
-        ;; cwd that already ends in a slash then had a character too many
-        ;; cut, which silently ate the first letter of the top component --
-        ;; `common/Foo.java' arriving as `ommon/Foo.java'.  Harmless while
-        ;; only a basename was ever read back; not once the key has to place
-        ;; the file in a directory tree.
+        ;; cwd already ending in a slash would otherwise cut one character
+        ;; too many and eat the first letter of the top component.
         (substring path (length dir))
       (file-name-nondirectory path))))
 
@@ -2371,18 +2266,15 @@ next reader of the state would be matching against a glyph."
       (agent-river--clip
        (agent-river--squish (or (alist-get 'prompt payload) "new task")) 100))
      ((equal kind "idle") "waiting for you")
-     ;; Through the path that owns one-line-ness rather than the clip beside
-     ;; it: this is the longest text that reaches the log, it is the agent's
-     ;; own prose, and a newline in it would make one entry and a remainder
-     ;; carrying none of the properties the motions read.
+     ;; Through `agent-river--excerpt' rather than the clip beside it: this
+     ;; is the agent's own prose, and a newline in it would make one entry
+     ;; and a remainder carrying none of the properties the motions read.
      ;;
      ;; Marked where the turn did not finish, the way a `think' marks an
      ;; interrupted call: `turn-complete' fires whatever the stop reason, so
-     ;; a turn that was cancelled, refused or cut off at the token limit
-     ;; arrives here as an ordinary one and its fragment would read as the
-     ;; answer.  Only a reason we were given and that is not `end_turn'
-     ;; marks -- no reason at all is a host that does not report one, and
-     ;; unset is "do not know" rather than "interrupted".
+     ;; a cancelled or cut-off turn would otherwise read as an ordinary
+     ;; answer.  Only a reason given and not `end_turn' marks; no reason at
+     ;; all means "do not know" rather than "interrupted".
      ((equal kind "say")
       (concat (agent-river--excerpt (alist-get 'message payload)
                                     agent-river-detail-width)
@@ -2430,47 +2322,42 @@ what keeps that from folding as a success."
           :session (or (alist-get 'session_id payload) "unknown")
           :label (file-name-nondirectory (directory-file-name cwd))
           ;; The directory `:file' is relative to, folded so the state can
-          ;; say where its keys are anchored.  The label is only the last
-          ;; component of it and cannot stand in: two checkouts of one
-          ;; project are labelled alike on purpose.
+          ;; say where its keys are anchored -- the label is only its last
+          ;; component and two checkouts of one project are labelled alike.
           :cwd cwd
           :agent (alist-get 'agent_id payload)
           :agent-type (alist-get 'agent_type payload)
           :tool (alist-get 'tool_name payload)
           :file (and file (agent-river--rel file cwd))
-          ;; The absolute name, for the views that have to reach the file on
-          ;; disk.  Carried beside `:file' rather than replacing it, and never
-          ;; folded *into a key*: the artifact tables are keyed on the
-          ;; normalised form, and an absolute path in them would make one file
-          ;; reached from a worktree and from the main checkout count as two
-          ;; again.  Its directory alone is folded, and only for the keys the
-          ;; cwd cannot place -- see `agent-river--anchor'.
+          ;; The absolute name, for views that have to reach the file on
+          ;; disk.  Carried beside `:file' and never folded *into a key*:
+          ;; the artifact tables key on the normalised form, so an absolute
+          ;; path there would make a worktree and main-checkout file count
+          ;; as two again -- see `agent-river--anchor'.
           :path file
-          ;; Which tool call this is, so the line a call opened can be
-          ;; completed in place rather than answered by a second line.  Paired
-          ;; with the session because the hosts do not agree on how wide a
-          ;; call id is unique: Claude Code's `tool_use_id' is unique
-          ;; everywhere, ACP's is unique only within its session.
+          ;; Which tool call this is, so the line it opened can be completed
+          ;; in place.  Paired with the session because call-id uniqueness
+          ;; differs by host: Claude Code's `tool_use_id' is global, ACP's
+          ;; only within its session.
           :call (let ((id (alist-get 'tool_use_id payload)))
                   (when (and id (not (string-empty-p (format "%s" id))))
                     (format "%s\0%s"
                             (or (alist-get 'session_id payload) "unknown") id)))
           :outcome (agent-river--outcome kind payload)
           :ms (alist-get 'duration_ms payload)
-          ;; Why the turn ended, as the host said it.  On the event and not in
-          ;; the fold, exactly as `:path' is: nothing here reads it, and the
-          ;; consumer that wants to tell a finished answer from an interrupted
-          ;; one is handed the raw event.
+          ;; Why the turn ended, as the host said it.  On the event, not the
+          ;; fold, like `:path': nothing here reads it, and a consumer that
+          ;; wants to tell a finished answer from an interrupted one gets
+          ;; the raw event.
           :stop-reason (alist-get 'stop_reason payload)
           :text (cond
                  ((equal kind "prompt")
                   (agent-river--clip
                    (agent-river--squish (or (alist-get 'prompt payload) "")) 200))
-                 ;; Whole, where the prompt is clipped.  A `◇' line shows the
-                 ;; first sentence of a thought because a thought is an aside;
-                 ;; what the agent said is the answer, and the fold clips its
-                 ;; own excerpt out of this rather than being handed one --
-                 ;; an observer reading the event gets what was actually said.
+                 ;; Whole, where the prompt is clipped: a `◇' line shows only
+                 ;; a thought's first sentence, but what the agent said is
+                 ;; the answer, so the fold clips its own excerpt from this
+                 ;; rather than being handed one already cut.
                  ((equal kind "say") (or (alist-get 'message payload) "")))
           :detail (agent-river--detail kind payload))))
 
@@ -2478,22 +2365,16 @@ what keeps that from folding as a success."
 
 ;;; Live reasoning, from the ACP stream
 ;;
-;; The reasoning rides the same ACP stream that drives the shell:
-;; `agent_thought_chunk' notifications carry it, and the client is reachable
-;; from the buffer this file already locates by session id.
+;; The reasoning rides the ACP stream that drives the shell:
+;; `agent_thought_chunk' notifications carry it, read off the client
+;; reachable from the buffer this file already locates by session id.
+;; The one thing here agent-shell is required for rather than merely
+;; better with -- the hooks carry no thinking text.
 ;;
-;; This is the one thing here that agent-shell is required for rather than
-;; merely better with.  It replaced lifting the reasoning out of the session
-;; transcript, which could only ever yield the *previous* step's thinking --
-;; the record for the current tool call is still unflushed when the hook
-;; fires -- and so had to compensate by where it placed its line.  A thought
-;; chunk arrives when the agent thinks it, which is before the tool call it
-;; explains, so the order is now chronological rather than staged.
-;;
-;; What gets harder: a thought arrives in chunks rather than whole.  Only the
-;; first sentence is shown, so a run is emitted the moment one is complete
-;; and the rest of that run is dropped; a run that ends without a sentence
-;; boundary is flushed by the next notification that is not a thought.
+;; A thought arrives in chunks rather than whole.  Only the first sentence
+;; is shown, so a run is emitted the moment one is complete and the rest
+;; is dropped; a run that ends without a sentence boundary is flushed by
+;; the next non-thought notification.
 
 (defconst agent-river-thought-width 110
   "How much of a thought's first sentence the HUD shows.")
@@ -2642,22 +2523,19 @@ on its first one."
 ;;; A second way in, for sessions no hook reaches
 ;;
 ;; Claude Code, Codex and Gemini CLI report themselves through hooks.  The
-;; other agents agent-shell hosts do not -- but agent-shell already reads
-;; their ACP stream, and publishes what it learns through
-;; `agent-shell-subscribe-to', which is a documented API rather than
-;; something read over its shoulder.  Three of its events carry what the
-;; fold wants: `input-submitted' the prompt, `tool-call-update' a step with
-;; its status and its raw arguments, `turn-complete' the end of the turn.
+;; other agents agent-shell hosts do not, but agent-shell already reads
+;; their ACP stream and publishes it through `agent-shell-subscribe-to'.
+;; Three of its events carry what the fold wants: `input-submitted' the
+;; prompt, `tool-call-update' a step with its status, `turn-complete' the
+;; end of the turn.
 ;;
-;; So this path translates them into the payload shape the hooks report and
-;; hands that to `agent-river--event' -- the same adapter, not a second one.
-;; A file argument that path learns to count is then counted here too, and
-;; nothing downstream ever learns that a second source exists.
+;; This path translates them into the payload shape the hooks report and
+;; hands that to `agent-river--event' -- the same adapter, not a second
+;; one -- so nothing downstream ever learns a second source exists.
 ;;
-;; Two things it cannot do.  It cannot talk back: a signal still reaches the
-;; buffer, but there is no `additionalContext' on a stream we only listen
-;; to.  And ACP has no notion of a subagent, so a delegated task folds as
-;; one step of its parent rather than as a session of its own.
+;; Two things it cannot do: talk back (no `additionalContext' on a stream
+;; we only listen to), and represent a subagent (ACP has no such notion, so
+;; a delegated task folds as one step of its parent).
 
 (defvar agent-river--source (make-hash-table :test 'equal)
   "Session id -> the way in that owns it, `hooks' or `shell'.")
@@ -2877,50 +2755,35 @@ ever supplies the sessions the first way in cannot reach."
 
 ;;; What the agent said -- the other half of a turn
 ;;
-;; The fold knows what a session *did* and, where the ACP stream is readable,
-;; the first sentence of what it *thought*.  It has never known what it
-;; *said*: the whole of a turn's output reached the log as a `done' line, and
-;; the HUD could answer "what is it doing" and not "what did it tell me".
+;; The fold knows what a session *did* and what it *thought*, but never
+;; what it *said*: a turn's output reached the log only as a `done' line.
 ;;
-;; The hooks cannot close that.  None of them carries the message text --
-;; `Stop' carries a transcript path, and that transcript lags by one record,
-;; which is why reading it was removed.  So this follows the *thought* path
-;; rather than the watch path: stream only, and a session with no agent-shell
-;; buffer gets no `say' lines at all, the same price the `◇' lines pay.
+;; The hooks can't close that -- none carries the message text -- so this
+;; follows the stream, like the thought path: a session with no agent-shell
+;; buffer gets no `say' lines at all.
 ;;
-;; Which is why it is deliberately *not* gated on `agent-river--claim'.  That
-;; gate decides who folds a session's steps, so that one tool call is not
-;; counted twice; the hooks and the stream both report steps, and only one of
-;; them may.  Neither reports a message but this one, so there is nothing to
-;; double -- and a Claude Code session that agent-shell hosts is precisely the
-;; common case, which the gate would have made silent here.  The rule holds
-;; per *kind*, not per session, and `agent-river--attending' has the same
-;; standing for the same reason.
+;; Not gated on `agent-river--claim': that gate is about who counts a
+;; session's steps once, and no hook reports a message, so there is
+;; nothing here to double.  The rule holds per *kind*, not per session, and
+;; `agent-river--attending' has the same standing.
 ;;
-;; Two chunks of mechanism.  The text arrives as `agent-message-chunk', once
-;; per streamed chunk, which the shell "neither renders nor accumulates" --
-;; so the accumulating is ours.  And the end of it is `turn-complete', which
-;; exists on agent-shell's event stream and *not* on the ACP notification
-;; stream the thought handler hangs off: it is derived from the `session/prompt'
-;; response rather than sent as a notification.  So this is a buffer-local
-;; subscription of its own beside `agent-river--watching' and
-;; `agent-river--attending', taking `:event' nil and filtering in the handler,
-;; because `:event' names a single symbol and two events are wanted.
+;; Two chunks of mechanism.  The text arrives as `agent-message-chunk',
+;; accumulated here since the shell does not.  The end of it is
+;; `turn-complete', which exists on agent-shell's event stream and not on
+;; the ACP notification stream the thought handler uses -- so this is a
+;; subscription of its own, taking `:event' nil and filtering in the
+;; handler since two events are wanted.
 ;;
-;; Installed when the buffer appears rather than on the session's first folded
-;; event, which is where `agent-river--ensure-subscribed' runs: a session that
-;; has folded nothing has no handler yet, and its first turn is exactly the
-;; one worth hearing.
+;; Installed when the buffer appears, not on the session's first folded
+;; event: a session that has folded nothing has no handler yet, and its
+;; first turn is exactly the one worth hearing.
 ;;
-;; One thing this cannot order.  For a session `agent-river-watch-mode' also
-;; folds, `turn-complete' reaches two subscriptions -- `idle' from one and
-;; `say' from the other -- and which goes first is the order the modes were
-;; turned on in, so the log may show the `“' above the `■' and read as having
-;; spoken after going quiet.  Left alone: for a hooked session the `idle'
-;; comes from an async `Stop' hook in another process and no ordering is
-;; available to have, and buying it for the other case would mean one
-;; subscription folding both, which is the shape #24 rejected for good
-;; reasons.  The timestamps are a second apart at most and both are true.
+;; One thing this cannot order: when `agent-river-watch-mode' also folds a
+;; session, `turn-complete' reaches two subscriptions and which runs first
+;; depends on which mode was turned on first, so the log may show the `“'
+;; line above the `■' one.  Left alone -- for a hooked session `idle' comes
+;; from an async hook in another process with no ordering available at
+;; all, and the timestamps are a second apart at most, both true.
 
 (defvar agent-river--say-runs (make-hash-table :test 'equal)
   "Session id -> the chunks of the message in flight, newest first.
@@ -2986,25 +2849,19 @@ is about who counts a session's steps, and nothing here counts one."
          (agent-river--say-arrived session (alist-get :text-chunk data)))
         ('turn-complete
          (agent-river--say-ended session (alist-get :stop-reason data)))
-        ;; The three ways a run ends without being said, all dropped, and
-        ;; each one of them is the hazard `agent-river--say-runs' names:
-        ;; chunks left in the table are flushed by a turn that is not
-        ;; theirs, glued onto the front of its text with no separator.
+        ;; Three ways a run ends without being said, all dropped: chunks
+        ;; left in the table would otherwise be flushed by a later turn,
+        ;; glued onto the front of its text.
         ;;
-        ;; `clean-up' is the buffer going, mid-sentence.  `error' is the
-        ;; `session/prompt' failing: agent-shell answers that through its
-        ;; error handler and never emits `turn-complete', and its own
-        ;; comment there says the turn may have stopped mid message chunk.
-        ;; And `session-restored' is the one that says nothing was wrong:
-        ;; a restore replays the stored turns through the ordinary
-        ;; notification path, so yesterday's chunks arrive here exactly as
-        ;; live ones do -- with no prompt response behind them, hence no
-        ;; `turn-complete' -- and this is the event that marks the replay
-        ;; settled.  What a session said last week is not something it said
+        ;; `clean-up' is the buffer going mid-sentence.  `error' is the
+        ;; `session/prompt' failing, which never emits `turn-complete'.
+        ;; `session-restored' replays yesterday's chunks through the same
+        ;; notification path live ones use, with no `turn-complete' behind
+        ;; them -- what a session said last week is not something it said
         ;; today.
         ;;
         ;; An *interrupted* turn is not among them: cancelling resolves the
-        ;; pending `session/prompt' with a stop reason, so it arrives as a
+        ;; pending prompt with a stop reason, so it arrives as
         ;; `turn-complete' and is said, marked.
         ((or 'clean-up 'error 'session-restored)
          (remhash session agent-river--say-runs))))))
@@ -3070,36 +2927,29 @@ something anyone can be told later."
 
 ;;; Approvals -- the one place this speaks, and whose words it uses
 ;;
-;; agent-shell asks before a tool call the agent may not make on its own, and
-;; renders the question in the session buffer.  With five sessions, which of
-;; them is waiting and what for is exactly the question the HUD exists to
-;; answer, and today it cannot see the question at all: the `waiting' phase
-;; is `idle', the end of a turn, not "is holding a door open for you".
-;;
-;; Three things shape what follows.
+;; agent-shell asks before a tool call the agent may not make on its own,
+;; and renders the question in the session buffer.  With several sessions,
+;; which is waiting and for what is exactly the question the HUD exists to
+;; answer, and today it cannot: the `waiting' phase is just `idle'.
 ;;
 ;; The offer is read through `agent-shell-permission-responder-function', a
 ;; documented variable carrying the tool call, the options and a function
 ;; that answers.  It is a *slot* rather than a hook: returning non-nil means
-;; "handled, skip the UI".  So this chains to whatever was there and hands
-;; back that function's answer -- agent-river never claims the request, it
-;; watches one go past, and a responder somebody else installed goes on
-;; deciding.
+;; "handled, skip the UI".  So this chains to whatever was there -- it
+;; never claims the request, only watches one go past.
 ;;
-;; A pending approval is a *current-state* fact, in the sense the producers
-;; below are careful about: true now, false the moment it is answered.  So
-;; it is not folded and there is no slot for it -- it lives in a side table
-;; and the panel queries it where it is read, the way `buffer-modified-p' is
-;; asked rather than noted.  What *is* point-in-time is that the question
-;; was put, and that gets a log line.
+;; A pending approval is a *current-state* fact: true now, false the
+;; moment it is answered.  So it is not folded and there is no slot for
+;; it -- it lives in a side table, queried where read, the way
+;; `buffer-modified-p' is asked rather than noted.  The question being put
+;; is point-in-time, though, and that gets a log line.
 ;;
-;; And answering is this package speaking on a stream it otherwise only
-;; listens to.  The rule that says it must not is about agent-river's own
-;; observations reaching the agent's context; a permission answer is not
-;; ours, it is a keystroke of the user's relayed to the session it names.
-;; It stays behind its own gesture all the same: a global mode that is off
-;; by default, because installing yourself in another package's decision
-;; path is not something a HUD does unasked.
+;; Answering is this package speaking on a stream it otherwise only
+;; listens to.  The rule against that is about agent-river's own
+;; observations reaching the agent's context; a permission answer is the
+;; user's own keystroke, relayed.  It still stays behind its own gesture: a
+;; global mode, off by default, since installing yourself in another
+;; package's decision path is not something a HUD does unasked.
 
 (defvar agent-river--offers (make-hash-table :test 'equal)
   "Permission request id -> the choice a session is waiting to be given.
@@ -3189,13 +3039,11 @@ request must not be able to stop one being asked."
                             :title (alist-get :title call)
                             :kind (alist-get :kind call)
                             ;; The arguments the agent proposes to run with.
-                            ;; The title is agent-shell's summary of them and
-                            ;; is all the panel has room for; deciding takes
-                            ;; the words themselves, which is what the queue
-                            ;; shows and the one place they can be had --
-                            ;; the `permission-request' event carries the
-                            ;; session and no input, this carries the input
-                            ;; and no session.
+                            ;; The title is agent-shell's summary, all the
+                            ;; panel has room for; deciding needs the words
+                            ;; themselves, which only this side carries --
+                            ;; `permission-request' carries the session and
+                            ;; no input.
                             :raw-input (alist-get :raw-input call)
                             :options (alist-get :options permission)
                             :respond (alist-get :respond permission)
@@ -3246,11 +3094,10 @@ most sessions in it."
            ;; measured on the line, so it has to be redrawn for one -- the
            ;; log line used to do that on its way past and no longer does.
            (agent-river--redraw-block)
-           ;; Drawn rather than marked dirty, which is the opposite of what
-           ;; the map does and for the opposite reason: that observer fires
-           ;; on every tool call, this fires when somebody is asked a
-           ;; question, and a queue that shows it a second or two later is a
-           ;; queue somebody is sitting in front of, waiting.
+           ;; Drawn rather than marked dirty, unlike the map: that observer
+           ;; fires on every tool call, this fires when somebody is asked a
+           ;; question, and showing it a second or two late is a queue
+           ;; somebody is sitting in front of, waiting.
            (agent-river--approval-refresh))))
       ('permission-response
        (when-let* ((id (alist-get :request-id data)))
@@ -3389,44 +3236,33 @@ buffer never reaches it."
 
 ;;; The approval queue -- the questions, on whatever screen is to hand
 ;;
-;; The panel says which session is holding a door open.  This is the buffer
-;; the door is opened from, and it exists because of where that often has to
-;; happen: a phone, over emacsclient in a terminal emulator, held in one hand
-;; in portrait.  Nothing about the HUD survives that trip.  It is a
-;; 56-column side window whose bulk is the agent's prose, the questions are
-;; one clause on a line among many, and answering one is a `completing-read'
-;; behind a soft keyboard that covers the text you are reading to decide.
+;; The panel says which session is holding a door open; this is the buffer
+;; the door is opened from, built for a phone in one hand, over
+;; emacsclient in a terminal, in portrait.  Nothing about the HUD survives
+;; that trip.
 ;;
 ;; So the shape is decided by the screen rather than by the state:
 ;;
-;; - One question is a block, not a line.  Columns are what a narrow screen
-;;   does not have and lines are what it does: who is asking, what they are
-;;   asking, the agent's own words for what it wants to do, one line of
-;;   context out of the fold, then the answers.
-;; - Every answer is a line of its own, and the line is the target.  RET or
-;;   a tap on it answers -- which is exactly what `agent-river-answer'
-;;   refuses to do, and the reason does not survive the trip either: there a
-;;   prompt costs one keystroke and stops a typo granting `allow_always',
-;;   here it costs the screen.  The friction is kept where it still earns
-;;   its place -- the two `_always' kinds ask first, the ones that decide a
-;;   single call do not.
-;; - Wrapped, never measured.  The width is whatever the window is, so a
-;;   phone turned on its side is a window resized and nothing here has to
-;;   notice.  Counting columns would mean redrawing on every rotation to
-;;   arrive at what `word-wrap' does for free.
-;; - A row is propertised through its newline, so the whole width of the row
-;;   answers a tap and not just the glyphs on it.  A thumb is about as wide
-;;   as three characters of the text it is aiming at.
+;; - One question is a block, not a line: who is asking, what, the agent's
+;;   own words, one line of context, then the answers.
+;; - Every answer is a line of its own and the line is the target -- RET or
+;;   a tap answers, which `agent-river-answer' deliberately does not: a
+;;   prompt at a desk costs one keystroke, here it costs the screen.
+;;   Friction stays only where it earns its place: the two `_always' kinds
+;;   ask first, the rest do not.
+;; - Wrapped, never measured: the width is the window's, so a rotation is
+;;   just a resize.
+;; - A row is propertised through its newline, so the whole row answers a
+;;   tap, not just its glyphs.
 ;;
-;; Not Markdown, for the reason the HUD is not: the title and the raw input
-;; are the agent's words and a tool's arguments, and a view that renders
-;; them as structure hands that text the power to restructure the view.
+;; Not Markdown, for the reason the HUD is not: the title and raw input are
+;; the agent's words and a tool's arguments, and rendering them as
+;; structure hands that text the power to restructure the view.
 ;;
-;; It is a view of `agent-river--offers', which is deliberately not folded,
-;; so it is not an observer either: it is drawn when a question arrives or
-;; is answered, and on a slow timer of its own for the two things that move
-;; while nothing happens -- how long a question has been waiting, and what
-;; the session has been doing since it asked.
+;; A view of `agent-river--offers', not folded and not an observer: drawn
+;; when a question arrives or is answered, and on a slow timer of its own
+;; for what moves with no event -- how long a question has waited, and
+;; what the session has done since.
 
 (defcustom agent-river-approval-queue-buffer-name "*agent-river-approvals*"
   "Name of the buffer `agent-river-approval-queue' draws into."
@@ -3601,14 +3437,12 @@ several screens up."
                          (when (> streak 0)
                            (propertize (format "%d failing" streak)
                                        'face 'agent-river-fail))
-                         ;; The name without its count, which is the one
-                         ;; place this differs from the panel's reading of
-                         ;; the same table: there the parenthetical fits a
-                         ;; 56-column window, here it is the longest thing
-                         ;; on the line and the least of what a decision
-                         ;; turns on.  Read through `agent-river--artifact-list'
-                         ;; all the same, so the two cannot come to
-                         ;; different conclusions about which file it is.
+                         ;; The name without its count -- the one place
+                         ;; this differs from the panel's reading of the
+                         ;; same table, since the count is the least of
+                         ;; what a decision turns on.  Still read through
+                         ;; `agent-river--artifact-list' so the two can't
+                         ;; disagree about which file it is.
                          (when-let* ((hot (car (agent-river--artifact-list state))))
                            (propertize (car hot) 'face 'agent-river-time))))))
       (when parts (mapconcat #'identity parts " · ")))))
@@ -3647,11 +3481,10 @@ properties, which is where a row becomes a button."
          (hidden (- (length body) (length shown)))
          (options (plist-get offer :options))
          (rows nil))
-    ;; Who, and for how long.  The heading is also the one row that visits
-    ;; the session, for the question this view cannot answer: what led here.
-    ;; Made visitable *around* the row rather than inside it, so the
-    ;; keymap reaches the newline as well and a tap past the end of a short
-    ;; heading opens the session like a tap on it.
+    ;; Who, and for how long.  The heading also visits the session, for
+    ;; the question this view cannot answer: what led here.  Made
+    ;; visitable *around* the row so the keymap reaches the newline too,
+    ;; and a tap past a short heading still opens the session.
     (push (agent-river--make-visitable
            (agent-river--approval-row
             (concat (propertize "? " 'face 'agent-river-ask)
@@ -3809,11 +3642,10 @@ fires when somebody has been asked a question and is waiting."
 ;;; Moving about the queue
 ;;
 ;; The same keys as the HUD and the map, for the same three grains -- but
-;; here the coarse grain and the attention grain are the same motion, because
+;; here the coarse grain and the attention grain are the same motion, since
 ;; every block in this buffer is a question waiting on somebody.  Bound all
-;; the same rather than left out: a reader arriving from either of the other
-;; two buffers presses `>' expecting the next thing that wants them, and
-;; getting it is the point of the keys being shared at all.
+;; the same so a reader arriving from either other buffer can press `>' and
+;; get the next thing that wants them.
 
 (defun agent-river--approval-line-p ()
   "Return non-nil on a row any motion may stop on."
@@ -3893,9 +3725,9 @@ EVENT is the mouse event, when invoked from one."
      ((null offer) (user-error "No question on this line"))
      ((null option)
       (user-error "Nothing to answer here; RET on one of the → rows"))
-     ;; `y-or-n-p', not `yes-or-no-p': the point of asking is that a standing
-     ;; permission should not come of one slip, and that is served by a
-     ;; second gesture -- spelling out "yes" on a soft keyboard is a third.
+     ;; `y-or-n-p', not `yes-or-no-p': a standing permission shouldn't come
+     ;; of one slip, and a second gesture serves that -- spelling out "yes"
+     ;; on a soft keyboard would be a third.
      ((and (agent-river--approval-confirm-p option)
            (not (y-or-n-p (format "%s — %s? "
                                   (plist-get offer :title)
@@ -3949,10 +3781,9 @@ and the arguments are the thing being read."
   (define-key map [remap previous-line] #'agent-river-approval-queue-previous-line)
   (define-key map (kbd "M-n") #'agent-river-approval-queue-next-offer)
   (define-key map (kbd "M-p") #'agent-river-approval-queue-previous-offer)
-  ;; The same motion as M-n/M-p here, and bound anyway: in the other two
-  ;; buffers this is "the next line that wants you", and in this one every
-  ;; block is one.  A reader who arrives pressing it should not have to
-  ;; learn that this is the buffer where it does nothing.
+  ;; The same motion as M-n/M-p here, bound anyway: every block in this
+  ;; buffer is a line that wants you, and a reader arriving from elsewhere
+  ;; shouldn't have to learn this buffer is where `>' does nothing.
   (define-key map (kbd ">") #'agent-river-approval-queue-next-offer)
   (define-key map (kbd "<") #'agent-river-approval-queue-previous-offer))
 
@@ -4041,66 +3872,41 @@ it back off again, unless it was already on when this was opened."
 
 ;;; What a session is using -- two meters read from outside, one drawn
 ;;
-;; agent-shell keeps two figures for every session it hosts: how full the
-;; context window is (`:context-used') and what the session has cost
-;; (`:cost-amount').  They arrive together, by one road -- both are written
-;; by `agent-shell--update-usage-from-notification' off the one
-;; `usage_update' notification -- and what decides which of them the graph
-;; is made of is not the road but which of them the server bothers to
-;; *move*.
+;; agent-shell keeps two figures per session: how full the context window
+;; is (`:context-used') and what it has cost (`:cost-amount'), both written
+;; off the one `usage_update' notification.  What decides which of them the
+;; graph is made of is which one the server actually *moves*: the context
+;; fill climbs continuously, the cost moves once per turn.  A graph of cost
+;; would draw a whole turn as one spike in the bar it happened to end in.
 ;;
-;; Measured on 2026-09-19: four readings over two and a half minutes, the
-;; context fill climbing through all four while the cost stood still and
-;; then moved exactly once, on the turn boundary.  So a graph of cost is a
-;; graph with one point per turn, and a twenty-minute turn lands as a
-;; single spike in the bar it ended in, saying the work happened at the
-;; moment it was reported.
+;; A third figure, `:total-tokens', is not a way out either -- it exists
+;; once a turn, on the `session/prompt' response, and the graph never
+;; reads it.
 ;;
-;; There is a third figure and it is not a way out: `:total-tokens' and the
-;; input/output counts beside it come back on the *response* to
-;; `session/prompt' (`agent-shell--save-usage'), so they exist once a turn
-;; by construction rather than by habit.  The graph never reads them.
+;; So the bars are the context: a bar holds how many tokens the window grew
+;; by while it ran.  The cost is still read, totalled, and what
+;; `agent-river-spend' answers with -- it just doesn't decide the shape.
 ;;
-;; So the bars are the context: what a bar holds is how many tokens the
-;; window grew by while that bar ran, which is the work arriving as it
-;; arrives rather than an account of it filed afterwards.  The cost is
-;; still read, still totalled and still what `agent-river-spend' answers
-;; with -- it simply no longer decides the shape.
-;;
-;; The two figures are then kept under opposite rules, because a fall means
+;; The two figures are kept under opposite rules, since a fall means
 ;; something different in each.  A context that drops has been compacted,
-;; which is ordinary and true, so the reading is taken as it comes and
-;; growth is measured from the new floor -- and since the deltas are
-;; between successive *samples* rather than between bar edges, work done
-;; after a compaction inside the same bar is still counted.  A cost that
-;; drops is somebody else's arithmetic -- a server reconnecting, an agent
-;; whose `usage_update' reports the turn rather than the session -- so
-;; `:cost' is a high-water mark.  Storing the dip would understate the
-;; session in `agent-river-spend', which presents the number as a fact.
+;; which is ordinary, so the reading is taken as it comes and growth is
+;; measured from the new floor.  A cost that drops is somebody else's
+;; arithmetic (a reconnect, a turn-scoped report), so `:cost' is a
+;; high-water mark -- storing the dip would understate the session.
 ;;
-;; Sampled on every event rather than on a timer.  A timer would have to
-;; run through the quiet, which is most of the time and is precisely when
-;; there is nothing to measure: a session that is not working is not using
-;; anything.  Events arrive thickly exactly while an agent works, so the
-;; resolution lands where the movement is and there is no timer to keep
-;; alive, retire, or explain.
+;; Sampled on every event, never on a timer: a timer would run through the
+;; quiet, which is when there is nothing to measure, where events arrive
+;; thickly exactly while an agent works.
 ;;
-;; Not a struct slot, and this is the exception to the rule rather than an
-;; instance of it: `agent-river--offers' is a side table because a pending
-;; question stops being true, where this is a history of point-in-time
-;; facts, which is what the fold is for.  Two things buy the exception.
-;; The fold's promise is that a state can be rebuilt by replaying its
-;; events, and no event carries either figure -- no hook payload has one --
-;; so a slot here would hold transitions the event stream could never
-;; account for.  And a slot cannot be added without `agent-river-reset',
-;; which throws away every session's folded state; paying that for a
-;; decoration, in a package that is reloaded into a live Emacs several
-;; times an hour, is the wrong way round.  What a reload costs is the shape
-;; of the last hour.  It does not cost the totals: those are agent-shell's
-;; figures and are re-read on the next event.
+;; Not a struct slot -- the exception to that rule, not an instance of it.
+;; No hook payload carries either figure, so a slot would hold transitions
+;; the event stream could never account for, and adding one would demand
+;; `agent-river-reset' for a mere decoration.  A reload costs the shape of
+;; the last hour, never the totals, which are re-read from agent-shell on
+;; the next event.
 ;;
 ;; The hooks carry none of this, so a session run from a terminal has no
-;; graph -- the same price the `◇' and `“' lines pay, and paid the same way.
+;; graph -- the same price the `◇' and `“' lines pay.
 
 (defcustom agent-river-tokens-width 6
   "Characters of token graph drawn on a session line, or nil for none.
@@ -4381,10 +4187,9 @@ session with a blank column rather than a made-up one."
   (when-let* ((width agent-river-tokens-width)
               ((> width 0))
               (entry (gethash session agent-river--usage))
-              ;; An entry is not yet a meter.  A session whose server
-              ;; reports a cost and no context has one of these with no
-              ;; `:since', and drawing it would answer "nothing arrived"
-              ;; where the truth is that nobody said.
+              ;; An entry is not yet a meter: one with a cost and no
+              ;; context has no `:since', and drawing it would wrongly
+              ;; say "nothing arrived" instead of "nobody said".
               (since (plist-get entry :since)))
     (let* ((window (* 2 width))
            (bar (agent-river--usage-bar now))
@@ -4494,12 +4299,10 @@ own, and this view has spent one of those before and taken it back."
   (interactive)
   (let (rows totals)
     (maphash (lambda (session entry)
-               ;; Only what somebody reported.  A session with no `:cost' is
-               ;; one whose server never sent a figure, and a row of 0.00
-               ;; for it is this command inventing the one thing it exists
-               ;; to state -- while an unnamed zero in the totals is neither
-               ;; named nor unnamed, which is the rule here in so many
-               ;; words.  A reported zero is kept: that is a free run.
+               ;; Only what somebody reported: a session with no `:cost'
+               ;; has a server that never sent a figure, and a 0.00 row for
+               ;; it would be this command inventing the thing it exists to
+               ;; state.  A reported zero is kept -- that's a free run.
                (when-let* ((cost (plist-get entry :cost)))
                  (let* ((currency (plist-get entry :currency))
                         (state (gethash session agent-river-registry))
@@ -4516,10 +4319,9 @@ own, and this view has spent one of those before and taken it back."
                                            (plist-get b :cost)))))
     (message "%s"
              (if rows
-                 ;; The word leads the sums rather than trailing them: after
-                 ;; a list of sessions it attached to whichever currency
-                 ;; happened to be last, and read as that one being the
-                 ;; total of the others.
+                 ;; "total" leads the sums rather than trails them: after a
+                 ;; list of sessions it would read as attached to whichever
+                 ;; currency happened to be last.
                  (format "%s · total %s"
                          (mapconcat #'agent-river--usage-money rows " · ")
                          (mapconcat (lambda (sum)
@@ -4532,25 +4334,21 @@ own, and this view has spent one of those before and taken it back."
 
 ;;; Entry points -- how state gets in
 ;;
-;; Two ways: the hooks report what happened, and the agent can state what it
-;; believes it is doing.  The second is a claim rather than a measurement,
-;; which is why it is kept apart everywhere downstream.
+;; Two ways: the hooks report what happened, and the agent can state what
+;; it believes it is doing.  The second is a claim rather than a
+;; measurement, kept apart everywhere downstream.
 
-;; Side effects hang off `agent-river-observers' rather than being called from
-;; `agent-river-observe' by name.  The point is not extensibility for its own
-;; sake: every consumer that reaches outside this package needs the same three
-;; things, and each one is a mistake that has already been made here.
+;; Side effects hang off `agent-river-observers' rather than being called
+;; from `agent-river-observe' by name, since every consumer that reaches
+;; outside this package needs the same three things:
 ;;
-;; It must not run inside the fold -- the fold is pure, and the tests depend on
-;; being able to drive it with no frame, no buffers and no live session.  It
-;; must not share the fold's guard, because an error reported as a fold failure
-;; sends the user to `agent-river-reset', throwing away every session's state
-;; over what may be one overlay.  And it must retire on its first error rather
-;; than repeat it, because this path runs on every single tool call, so a
-;; consumer that is broken is broken thousands of times.
+;; It must not run inside the fold, which is pure and driven by tests with
+;; no frame, no buffers, no live session.  It must not share the fold's
+;; guard, since an error there sends the user to `agent-river-reset' and
+;; throws away every session's state over what may be one overlay.  And it
+;; must retire on its first error, since this path runs on every tool call.
 ;;
-;; Getting those three right is most of the work of adding a consumer, so the
-;; runner owns them and a consumer is left with only its own job.
+;; The runner owns those three so a consumer is left with only its own job.
 
 (defvar agent-river-observers nil
   "Functions called with (STATE EVENT) after each event is folded.
@@ -4605,35 +4403,28 @@ An emitted observation is folded back in as a `signal' event, so how
 often the agent had to be told something is itself part of the state."
   (let* ((session (or (plist-get event :session) "unknown"))
          ;; The session, whoever acted within it.  A subagent's hook call
-         ;; carries its parent's session id and an agent_id of its own, and
-         ;; the agent_id used to make a registry entry beside the parent --
-         ;; which every reader then had to sort back out, because a subagent
-         ;; has no prompt, no directory, no place and nothing that can be
-         ;; told to it.  It is a tally on the session now, folded by
+         ;; carries its parent's session id and an agent_id of its own; a
+         ;; subagent has no prompt, no directory and nothing that can be
+         ;; told to it, so it is a tally on the session, folded by
          ;; `agent-river--delegate'.
          (id session)
          (state (agent-river-state id (plist-get event :label)))
          (kind (or (plist-get event :kind) "act"))
          (detail (or (plist-get event :detail) "")))
-    ;; Before anything that can fail: where agent-shell hosts this session the
-    ;; reasoning arrives on its ACP stream rather than through us, and the
-    ;; subscription has to exist before the first thought is streamed.  Its
-    ;; buffer dying is likewise how a restart reaches us, and no hook event
-    ;; says so.
+    ;; Before anything that can fail: where agent-shell hosts this session
+    ;; the reasoning arrives on its ACP stream, so the subscription has to
+    ;; exist before the first thought streams.  Its buffer dying is
+    ;; likewise how a restart reaches us, with no hook event to say so.
     (agent-river--ensure-subscribed session)
     (agent-river--ensure-shell-teardown session)
     ;; The meters, read before the fold and outside its guard: a figure
-    ;; that cannot be read must not be able to report itself as the fold
-    ;; having broken, which is what sends somebody to `agent-river-reset'.
-    ;; It carries a guard of its own instead, which says so once and stops
-    ;; sampling -- the observers' idiom, for the observers' reasons.
+    ;; that can't be read must not report itself as the fold having
+    ;; broken, which sends somebody to `agent-river-reset'.  It carries its
+    ;; own guard instead, and stops sampling once it has said so.
     (agent-river--usage-sample session)
-    ;; The fold must not be able to take the HUD dark without saying so.
-    ;; Reloading this file after changing the struct leaves older states
-    ;; short a slot, and the resulting error used to abort `observe' before
-    ;; it rendered anything -- the display simply stopped, silently, which
-    ;; is the worst way for a stream tool to fail.  Surface it and carry on;
-    ;; `agent-river-reset' is the fix when it says so.
+    ;; The fold must not be able to take the HUD dark without saying so:
+    ;; an error here must not abort `observe' before it renders anything.
+    ;; Surface it and carry on; `agent-river-reset' is the fix.
     (condition-case err
         (progn (agent-river-fold state event)
                (agent-river--update-panel state))
@@ -4643,39 +4434,30 @@ often the agent had to be told something is itself part of the state."
     (agent-river--run-observers 'agent-river-observers state event)
     (let ((label (agent-river-state-label state))
           (call (plist-get event :call)))
-      ;; A call that ends is written onto the line that began it, so one tool
-      ;; call reads as one line and the log holds twice as much history at the
-      ;; same `agent-river-max-entries'.  Where that line is gone -- trimmed,
-      ;; or never written because this Emacs started mid-run -- the outcome
-      ;; falls back to a line of its own rather than vanishing.
+      ;; A call that ends is written onto the line that began it, so one
+      ;; tool call reads as one line.  Where that line is gone (trimmed, or
+      ;; never written) the outcome falls back to a line of its own.
       (cond
        ((agent-river--log-outcome call (plist-get event :outcome) kind))
        ((not (string-empty-p detail))
         (agent-river-log kind detail label call)))
-      ;; And the block, which the log line used to bring with it.  Before
-      ;; the timers, because both of them read what this draws: the refresh
-      ;; timer to leave the elapsed times honest, the animation because the
-      ;; marks it paints are made here.
+      ;; And the block.  Before the timers, since both read what this
+      ;; draws: the refresh timer for the elapsed times, the animation for
+      ;; the marks it paints here.
       (agent-river--update-block)
       (agent-river--ensure-timer)
       (agent-river--ensure-spinner)
       ;; Only ask for an observation on an event that can actually deliver
-      ;; one.  Computing it regardless meant a fail streak still standing when
-      ;; the turn ended produced a signal on `idle' -- whose hook is async, so
-      ;; its stdout is never read.  It was logged and folded all the same, and
-      ;; the `signals' count then claimed the agent had been told twice what
-      ;; it had been told once.  A tally that exists to make "how often was
-      ;; the agent told something" observable must not be the thing that
-      ;; misreports it.
+      ;; one: computing it regardless meant a streak still standing at
+      ;; `idle' (whose hook is async) produced a signal that was logged and
+      ;; folded but never read, overcounting `signals'.
       (let ((signal (and (member kind agent-river-answering-kinds)
                          (agent-river--answerable-p event)
                          (agent-river--signal state))))
         (when signal
-          ;; Through the fold, not around it.  This used to push straight onto
-          ;; the slot, which made `agent-river-observe' a second writer to a
-          ;; state the fold is supposed to own alone -- and left the fold's
-          ;; promise that a state can be rebuilt by replaying its events true
-          ;; only by accident, because a signal happens to be derivable.
+          ;; Through the fold, not around it: a direct push onto the slot
+          ;; would make `agent-river-observe' a second writer to a state
+          ;; the fold is supposed to own alone.
           (agent-river-fold state (list :kind "signal"
                                         :text (plist-get signal :text)
                                         :id (plist-get signal :id)))
@@ -4711,11 +4493,10 @@ IN-FILE is deleted afterwards, whatever happens."
                    (name (alist-get 'hook_event_name payload)))
               (when (and signal name)
                 (with-temp-file out-file
-                  ;; Explicit, because the answer is JSON for another process
-                  ;; and the locale this runs under is not ours to assume.  A
-                  ;; signal naming a file with a non-ASCII character used to
-                  ;; stop here asking which coding system to use, which in a
-                  ;; hook is an answer nobody is there to give.
+                  ;; Explicit, since the answer is JSON for another process
+                  ;; and the locale here isn't ours to assume -- a signal
+                  ;; naming a non-ASCII file must not prompt for a coding
+                  ;; system nobody is there to answer.
                   (set-buffer-file-coding-system 'utf-8-unix)
                   (insert (json-serialize
                            `((hookSpecificOutput
@@ -4832,10 +4613,9 @@ that could disagree with them."
     (when state
       (let ((kids (agent-river-children id)))
         (append
-         ;; Keys say which frame they are measured in.  steps and the task
-         ;; tally reset with every prompt; the session tally does not, and
-         ;; two numbers on different clocks sitting side by side unlabelled
-         ;; read as if they were comparable.
+         ;; Keys say which frame they are measured in: steps and the task
+         ;; tally reset with every prompt, the session tally does not, and
+         ;; unlabelled they'd read as comparable when they are not.
          (list :label (agent-river-state-label state)
                :phase (agent-river--phase state)
                ;; Named to say it is self-reported, so a reader never takes
@@ -4860,13 +4640,11 @@ that could disagree with them."
                :fail-runs (or (agent-river-state-fail-runs state) 0)
                :signals (length (agent-river-state-signals state))
                :notes (length (agent-river-state-notes state))
-               ;; The end of this task's last turn, on the same clock as
-               ;; the `task-' keys above it and cleared by a prompt with
-               ;; them.  Unprefixed like `:claimed-intent', which is also
-               ;; task-framed: the prefixes are there for the values that
-               ;; exist in both frames, where two numbers side by side
-               ;; would read as comparable, and there is no session-wide
-               ;; reading of this to be confused with.
+               ;; The end of this task's last turn, cleared by a prompt
+               ;; with the `task-' keys above it.  Unprefixed like
+               ;; `:claimed-intent': the prefix is only for values that
+               ;; exist in both frames, and this has no session-wide
+               ;; reading to be confused with.
                :said (agent-river-state-said state))
          ;; Subagents fold separately so their failures stay theirs, but the
          ;; parent still has to be able to see what it set in motion.
@@ -4882,22 +4660,19 @@ that could disagree with them."
 
 ;;; Handing the state out -- Markdown, for where it is going to be read
 ;;
-;; The one place Markdown belongs in this package.  The HUD is deliberately
-;; not rendered as Markdown and should stay that way: its log carries
-;; prompts, reasoning and tool arguments -- text the package does not
-;; control -- and Markdown would hand that text the power to restructure the
-;; view that is watching it.  Here the state is *leaving*, and where it
-;; lands -- an issue, a pull request, a message -- Markdown is what gets
-;; read.
+;; The one place Markdown belongs in this package.  The HUD stays plain
+;; text since its log carries prompts, reasoning and tool arguments the
+;; package does not control, and Markdown would hand that text the power
+;; to restructure the view watching it.  Here the state is *leaving*, to
+;; an issue, a pull request, a message, where Markdown is what gets read.
 ;;
-;; A third derivation of the state, beside the panel and the report, and not
-;; built on either.  The report's values are already formatted for a human
+;; A third derivation of the state, beside the panel and the report, built
+;; on neither: the report's values are already formatted for a human
 ;; reading a plist, and re-formatting a formatted string is the
-;; second-account problem wearing a different hat.  What the report gets for
-;; free from its key names -- `:task-hottest' against `:session-hottest' --
-;; has to be done by hand here, so it is, and tested: two numbers on
-;; different clocks sitting side by side unlabelled read as if they were
-;; comparable.
+;; second-account problem in a different hat.  What the report gets free
+;; from its key names -- `:task-hottest' against `:session-hottest' -- has
+;; to be done by hand here, and tested, so the two frames don't read as
+;; comparable when unlabelled.
 
 (defun agent-river--md-escape (text)
   "Return TEXT with its Markdown-active punctuation neutralised.
@@ -4961,12 +4736,10 @@ two cannot drift."
           lines)
     (when (and task (not (string-empty-p task)))
       (push (format "- **prompt** — %s" (agent-river--md-escape task)) lines))
-    ;; Directly under the prompt, because the two are one exchange: an export
-    ;; carrying the tool calls and not the words is a tool log, and the answer
-    ;; filed below the tallies reads as another measurement rather than as the
-    ;; end of the thing above it.  Escaped here and not in the slot, so the
-    ;; HUD -- which is not Markdown -- is not shown backslashes it never
-    ;; needed.
+    ;; Directly under the prompt: the two are one exchange, and the answer
+    ;; filed below the tallies would read as another measurement rather
+    ;; than the end of the thing above it.  Escaped here, not in the slot,
+    ;; so the HUD (not Markdown) is never shown backslashes it never needed.
     (when (and said (not (string-empty-p said)))
       (push (format "- **said** — %s" (agent-river--md-escape said)) lines))
     ;; The frame is in the name of the bullet, not left to the reader.  The
@@ -4986,9 +4759,9 @@ two cannot drift."
     ;; A live failure run is the one thing a reader must not have to infer.
     (when (> streak 0)
       (push (format "- **failing** — %d in a row" streak) lines))
-    ;; Last, and marked twice.  This is the agent talking about itself, and a
-    ;; claim that a later reader takes for one of the measurements above it
-    ;; is exactly the confusion the `intent' slots are kept apart to prevent.
+    ;; Last, and marked twice: the agent talking about itself, and a claim
+    ;; taken for one of the measurements above it is exactly the confusion
+    ;; the `intent' slots are kept apart to prevent.
     (when intent
       (push (format "- **claims** — %s *(self-reported%s)*"
                     (agent-river--md-escape intent)
@@ -5084,10 +4857,8 @@ grows, so nothing here scrolls."
   ;; so the next event naturally unfolds it again.
   (setq-local outline-regexp "^\\*+ ")
   (outline-minor-mode 1)
-  ;; Explicitly none: the state used to live here, and a value left behind
-  ;; by an older version of this file would sit frozen at the top of the
-  ;; buffer, showing a step count and an elapsed time from whenever it was
-  ;; last written.
+  ;; Explicitly none: a value left behind by an older version of this file
+  ;; would otherwise sit frozen at the top of the buffer.
   (setq-local header-line-format nil)
   (buffer-disable-undo))
 
@@ -5197,31 +4968,27 @@ question an onlooker actually has."
          (parts
           (delq nil
                 (list
-                 ;; First on the line, ahead of the name, and that is what
-                 ;; makes it a column at all: only the outline marker comes
-                 ;; before it, so every graph in the block starts in the
-                 ;; same place and they stack into a strip that can be read
-                 ;; straight down.  Comparing them is the whole reason they
-                 ;; share one scale, and anywhere further right they sat
-                 ;; behind a label and a task of whatever width the session
-                 ;; happened to have.  It squares up its neighbour too: the
-                 ;; name now starts at a fixed place, which is the one
-                 ;; field after it that does.
+                 ;; First on the line, ahead of the name: only the outline
+                 ;; marker comes before it, so every graph starts in the
+                 ;; same place and stacks into a strip read straight down,
+                 ;; which is what sharing one scale is for.  It also
+                 ;; squares up the name, the one field after it that now
+                 ;; starts at a fixed place.
                  ;;
-                 ;; It is in neither frame -- everything after it is this
+                 ;; It is in neither frame: everything after it is this
                  ;; task's and resets on a prompt, where this covers a
-                 ;; fixed window that runs straight through one.  Reading
-                 ;; the shape before the name is the honest order for that:
-                 ;; it is about the session, not about the turn.
+                 ;; fixed window running straight through one -- reading it
+                 ;; before the name says it is about the session, not the
+                 ;; turn.
                  (agent-river--usage-column (agent-river-state-id state))
                  (propertize (or (agent-river-state-label state) "?")
                              'face 'agent-river-session)
-                 ;; An open question outranks everything measured below it,
-                 ;; and comes first because it is the only thing on this
-                 ;; line that is waiting on the reader rather than
-                 ;; describing the agent.  Queried, never folded: it stops
-                 ;; being true the moment somebody answers it, including in
-                 ;; the session buffer, where nothing here would hear.
+                 ;; An open question outranks everything below it and
+                 ;; comes first: it's the only thing on this line waiting
+                 ;; on the reader rather than describing the agent.
+                 ;; Queried, never folded, since it stops being true the
+                 ;; moment it's answered -- including in the session
+                 ;; buffer, where nothing here would hear.
                  (when-let* ((offer (agent-river--offer
                                      (agent-river-state-id state))))
                    (propertize (agent-river--offer-text offer)
@@ -5231,12 +4998,12 @@ question an onlooker actually has."
                                (cond ((equal phase "blocked") 'agent-river-fail)
                                      ((equal phase "waiting") 'agent-river-idle)
                                      (t 'agent-river-act))))
-                 ;; The stated intent replaces the prompt when it is fresh:
-                 ;; a long task moves through several sub-goals while the
-                 ;; prompt that started it stays the same, and the finer
-                 ;; one is what an onlooker wants.  Stale, it is shown
-                 ;; greyed and marked rather than quietly dropped -- that
-                 ;; the agent stopped narrating is itself worth seeing.
+                 ;; The stated intent replaces the prompt when it is
+                 ;; fresh: a long task moves through several sub-goals
+                 ;; while the prompt stays the same, and the finer one is
+                 ;; what an onlooker wants.  Stale, it is shown greyed and
+                 ;; marked rather than dropped -- the agent going quiet is
+                 ;; itself worth seeing.
                  (cond
                   ((agent-river-state-intent state)
                    (let ((stale (agent-river--intent-stale-p state)))
@@ -5261,29 +5028,20 @@ question an onlooker actually has."
                                'face 'agent-river-fail))
                  (when (> running 0)
                    (format "%d subagent%s" running (if (= running 1) "" "s")))))))
-    ;; The `* ' at column zero makes the line an outline heading, so outline
-    ;; navigation and `outline-cycle' (TAB) can treat the block as a
-    ;; document.  It stays inside the make-visitable call so the whole line,
-    ;; star included, is the visitable region: pressing RET on the star must
-    ;; still jump to the session.
+    ;; The `* ' at column zero makes the line an outline heading, so
+    ;; outline navigation and `outline-cycle' (TAB) treat the block as a
+    ;; document.  It stays inside the make-visitable call so the whole
+    ;; line, star included, is the visitable region.
     ;;
-    ;; Only the header is made visitable: the detail headings below it are a
-    ;; finer reading of the same state, and RET on one of them jumping to the
-    ;; session would be a link nobody asked for.
-    ;; `agent-river-line' is marked on both kinds regardless of whether the
-    ;; session turned out to be visitable: a line the motion can stop on and
-    ;; a line RET can act on are different questions, and tying them together
-    ;; made `n' skip every session agent-shell does not host.
+    ;; `agent-river-line' is marked whether or not the session turned out
+    ;; to be visitable: a line the motion can stop on and a line RET can
+    ;; act on are different questions, and tying them together made `n'
+    ;; skip every session agent-shell does not host.
     ;;
-    ;; `agent-river-block' is what a redraw finds the line by, and it is a
-    ;; second property rather than `agent-river-session' reused because that
-    ;; one is only there when the session turned out to be visitable -- point
-    ;; would come home from a redraw for the sessions agent-shell hosts and
-    ;; be dropped at the top for the rest.  It used to be a cons of the id
-    ;; and an index, because a session's detail headings would otherwise
-    ;; have shared the header's identity -- the mistake
-    ;; `agent-river--map-here' names for rows.  There are no detail lines
-    ;; any more, so the id is the whole of it.
+    ;; `agent-river-block' is what a redraw finds the line by, a second
+    ;; property rather than `agent-river-session' reused, since that one
+    ;; is only set when the session is visitable -- point would come home
+    ;; for hosted sessions and be dropped at the top for the rest.
     (propertize
      (agent-river--make-visitable
       (concat (agent-river--star state)
@@ -5294,17 +5052,15 @@ question an onlooker actually has."
 
 ;;; Moving about the HUD
 ;;
-;; The same three grains as the map, on the same keys, because they are the
-;; same question asked of different content: every line worth stopping on,
-;; the coarse structure alone, and the lines that want attention.  A session
-;; line here is a map entry; a detail heading is a map file line; a log line
-;; is what neither view has an analogue for and so takes the fine grain with
-;; the entries.
+;; The same three grains as the map, on the same keys: every line worth
+;; stopping on, the coarse structure alone, and the lines that want
+;; attention.  A session line here is a map entry; a log line is what
+;; neither view has an analogue for and takes the fine grain with the
+;; entries.
 ;;
 ;; Which lines those are is read off `agent-river-line', marked where the
-;; line is built.  Matching a regexp over the rendered text instead would
-;; mean that changing how a line looks quietly changes what `n' stops on --
-;; and the rendering here is customisable, so it would change under people.
+;; line is built -- not matched by a regexp over the rendered text, which
+;; is customisable and would let a rendering change what `n' stops on.
 
 (defcustom agent-river-notable-kinds '("fail" "signal" "note" "artifact")
   "Event kinds `agent-river-next-notable\=' stops on.
@@ -5763,10 +5519,9 @@ second verdict to a line that already carries its own."
     (when buffer
       (with-current-buffer buffer
         (save-excursion
-          ;; Backwards from the end, which is where the newest line is: the
-          ;; call being answered is nearly always one of the last few, so
-          ;; the walk stops on it rather than reading a hundred lines of
-          ;; history to reach it.
+          ;; Backwards from the end: the call being answered is nearly
+          ;; always one of the last few lines, so the walk stops quickly
+          ;; rather than reading a hundred lines of history.
           (goto-char (point-max))
           (let (found)
             (while (and (not found) (not (bobp)))
@@ -5802,22 +5557,17 @@ longer happens here because the two are no longer one buffer."
          (following (agent-river--following-windows buffer)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
-        ;; Oldest to newest, which is what a log is and what everything
-        ;; that reads one expects: the new line goes on at the bottom and
-        ;; the oldest come off the top.  It was the other way round while
-        ;; the state block sat pinned above the log in this same buffer --
-        ;; newest first put the two things worth seeing together at the top
-        ;; and left nothing to tail -- and that reason went with the block.
-        ;; `agent-river--keeping-place' is what lets a reader keep theirs.
+        ;; Oldest to newest: the new line goes on at the bottom, the
+        ;; oldest come off the top, and a reader keeps their place via
+        ;; `agent-river--keeping-place'.
         (agent-river--keeping-place
           (goto-char (point-max))
           (insert (agent-river--render kind detail label call) "\n")
           (agent-river--trim))))
-    ;; No window is opened here, whatever `agent-river-auto-display' says:
-    ;; that is the block's, and a log that appeared on an event appeared on
-    ;; every event, including the one after a reader closed it.  The buffer
-    ;; is still written and still created -- being there to be opened is the
-    ;; whole of what it owes.
+    ;; No window is opened here, whatever `agent-river-auto-display' says
+    ;; -- that's the block's.  A log opening on every event would reopen
+    ;; on the one right after a reader closed it.  The buffer is still
+    ;; written and created; being there to be opened is all it owes.
     (agent-river--follow buffer following)
     kind))
 
@@ -5896,27 +5646,22 @@ from."
   "Forget all folded state.  The buffer is left alone."
   (interactive)
   (clrhash agent-river-registry)
-  ;; The second folded table goes with the first.  This is the command for
-  ;; when a struct change has left every record short a slot, and an artifact
-  ;; record can be as short of one as a session's is.  Kept out of
-  ;; `agent-river-forget-artifacts', which is the opposite gesture: that one
-  ;; drops the record of *where the work was* and keeps the subjects.
+  ;; The second folded table goes with the first, for the same reason: a
+  ;; struct change can leave an artifact record short a slot too.  Kept
+  ;; apart from `agent-river-forget-artifacts', which drops only where the
+  ;; work was and keeps the subjects.
   (clrhash agent-river-artifacts)
   ;; Which way in owns a session, and which tool calls are in flight, are
-  ;; state about the same sessions: left behind, they would have the fold
-  ;; start again while ownership and half-timed calls referred to states
-  ;; that no longer exist.  The subscriptions themselves survive -- they
-  ;; belong to buffers, not to what was folded out of them.
+  ;; state about the same sessions: left behind, they'd refer to states
+  ;; that no longer exist.  The subscriptions themselves survive, since
+  ;; they belong to buffers, not to what was folded out of them.
   (clrhash agent-river--source)
   (clrhash agent-river--tool-calls)
   (clrhash agent-river--shell-sessions)
-  ;; The usage table goes too, by the same argument: it is keyed by the
-  ;; sessions being forgotten.  What it loses is the shape of the last
-  ;; hour, not the totals -- those are agent-shell's figures and come back
-  ;; with each session's next event.  Which is also why this is where a
-  ;; retired sampler is given another go: the reading it failed at is one
-  ;; a reload may well have fixed, and there is nothing left to be
-  ;; inconsistent with.
+  ;; The usage table goes too, keyed by the sessions being forgotten.
+  ;; What it loses is the shape of the last hour, not the totals, which
+  ;; come back with each session's next event.  A retired sampler is also
+  ;; given another go here, since a reload may well have fixed it.
   (clrhash agent-river--usage)
   (setq agent-river--usage-broken nil)
   (agent-river--stop-timer)
@@ -6173,30 +5918,24 @@ on every line that is written about one."
     (agent-river--redraw-block)
     (if shown
         ;; Finding it on screen is the offer having been made as surely as
-        ;; making it is, and recording that is what stops a reload -- which
-        ;; is how this package is worked on, several times an hour, and
-        ;; which arms the flag again -- from reopening a window the reader
-        ;; closes an hour later.
+        ;; making it is; recording that stops a reload -- which happens
+        ;; several times an hour and re-arms the flag -- from reopening a
+        ;; window the reader closes an hour later.
         (setq agent-river--block-shown t)
       (when (and agent-river-auto-display (not agent-river--block-shown))
         (agent-river-show)))))
 
-;; The map's keys, on the same gestures, because the views are views of one
-;; state and learning each separately is a cost with nothing bought by it.
-;; SPC and DEL give up `special-mode's scrolling for line motion, the way
-;; dired's do.
+;; The map's keys, on the same gestures, since the views are views of one
+;; state and learning each separately buys nothing.  SPC and DEL give up
+;; `special-mode's scrolling for line motion, the way dired's do.
 ;;
-;; Which grains each buffer has is decided by what it holds, and the split
-;; is what made that plain.  The block has the fine grain alone: one line per
-;; live session and nothing under it, so `M-n' would have landed exactly
-;; where `n' does, and no landmarks, since nothing in it is a log line and
-;; `>' would have stopped on nothing.  It did have a coarse grain while
-;; sessions had detail headings under them -- a `files' line, unfolded by
-;; TAB -- and both went when the block stopped showing which files a session
-;; had touched.  The log is the other way round.  A key bound where its
-;; content is not is worse than an unbound one: pressing it answers with an
-;; error about there being no further anything, which reads as the state
-;; being empty rather than as the question being the wrong one to ask here.
+;; Which grains each buffer has is decided by what it holds.  The block has
+;; the fine grain alone -- one line per live session and nothing under it,
+;; no landmarks since nothing in it is a log line.  The log is the other
+;; way round.  A key bound where its content is not is worse than an
+;; unbound one: pressing it answers with an error about there being no
+;; further anything, which reads as the state being empty rather than as
+;; the question being the wrong one to ask here.
 (define-key agent-river-mode-map (kbd "n") #'agent-river-next-line)
 (define-key agent-river-mode-map (kbd "p") #'agent-river-previous-line)
 (define-key agent-river-mode-map (kbd "SPC") #'agent-river-next-line)
@@ -6208,12 +5947,11 @@ on every line that is written about one."
 (define-key agent-river-mode-map (kbd "RET") #'agent-river-visit-session)
 ;; `special-mode' puts `revert-buffer' on g, which has nothing to revert to.
 (define-key agent-river-mode-map (kbd "g") #'agent-river-refresh)
-;; The one key here that writes to a session rather than reading one, and it
-;; still asks which option before it does: the block is a view, so a
-;; keystroke that granted an agent `allow_always' outright would be the
-;; wrong place for a typo.  Bound whether or not `agent-river-approvals-mode'
-;; is on, so the answer to pressing it is a sentence rather than nothing
-;; happening.
+;; The one key here that writes to a session rather than reading one, and
+;; it still asks which option: the block is a view, so a keystroke that
+;; granted `allow_always' outright would be the wrong place for a typo.
+;; Bound whether or not `agent-river-approvals-mode' is on, so pressing it
+;; answers with a sentence rather than nothing happening.
 (define-key agent-river-mode-map (kbd "a") #'agent-river-answer)
 ;; The log hangs off the block rather than the other way about: this is the
 ;; buffer that is opened first and the one a reader comes back to, so the
@@ -6231,9 +5969,8 @@ on every line that is written about one."
 (define-key agent-river-log-mode-map (kbd ">") #'agent-river-next-notable)
 (define-key agent-river-log-mode-map (kbd "<") #'agent-river-previous-notable)
 ;; Nothing here can be behind -- the log is written as it happens -- so `g'
-;; redraws the other buffer, which is the only thing either of them has that
-;; can be.  It is still better than `special-mode's `revert-buffer', which
-;; would answer a reader with an error about a file this buffer has not got.
+;; redraws the other buffer instead, still better than `special-mode's
+;; `revert-buffer', which would error about a file this buffer has not got.
 (define-key agent-river-log-mode-map (kbd "g") #'agent-river-refresh)
 
 (defun agent-river--stop-timer ()
@@ -6272,22 +6009,17 @@ than at whatever the previous tick drew."
 
 ;; The marker animation is a second timer rather than a faster first one.
 ;; A frame has to land often enough to read as motion, and rebuilding the
-;; whole block that often would both cost far more than the animation is
-;; worth and drag the block out from under anybody reading it.  So this one
-;; writes a `display' property onto the stars the panel already marked and
-;; touches nothing else; it derives nothing, which is what would make it
-;; safe to run many times a second.
+;; whole block that often would cost far more than the animation is worth
+;; and drag it out from under anybody reading it.  So this one writes a
+;; `display' property onto the stars the panel already marked and derives
+;; nothing else, which is what makes it safe to run several times a second.
 ;;
-;; Nothing includes the question of whether to keep running.  Asking the
-;; registry looked cheap and was not: `agent-river--active-p' used to find a
-;; hosted session's buffer by walking every buffer in Emacs, which in a
-;; long-lived one measured ~3 ms a tick, most of it consing a buffer list
-;; for the garbage collector.  That lookup is indexed now, but the gate
-;; stays where it was put: the panel has already decided the same question
-;; when it marked the stars, so the marks are the gate and this loop
-;; derives nothing at all.  What that costs is a redraw from the refresh
-;; timer before it retires, since the marks are also what has to be taken
-;; away when a turn ends with no event to announce it.
+;; Whether to keep running is read off those marks rather than the
+;; registry: the panel has already decided the same question when it drew
+;; the stars, so asking again would only be an indexed lookup answering
+;; what is already known.  The cost is a redraw from the refresh timer
+;; before it retires, since the marks are also what has to be taken away
+;; when a turn ends with no event to announce it.
 
 (defvar agent-river--spinner-timer nil
   "Repeating timer animating the session markers, or nil while none runs.")
@@ -6384,20 +6116,18 @@ is drawn before this is called, so the marks are already the answer."
 
 ;;; Reading the artifact tables
 ;;
-;; One derivation, and every view of those tables is built on it rather than
-;; walking the registry for itself: the map's roots, its listing, its parties
-;; and its domain sections all have to answer from the same walk, and a
-;; second walk is a second place for them to fall out of step.
+;; One derivation, and every view of those tables is built on it rather
+;; than walking the registry for itself: the map's roots, listing,
+;; parties and domain sections all answer from the same walk.
 ;;
-;; Nothing here folds.  The readings are taken from the tables on every draw,
-;; exactly as the panel's are, so the two cannot drift -- and the fold stays
-;; pure, which is what lets the tests run with no frame in sight.
+;; Nothing here folds.  Readings are taken from the tables on every draw,
+;; like the panel's, so the two cannot drift and the fold stays pure.
 ;;
 ;; The keys deliberately cannot address a file on disk: `agent-river--rel'
-;; normalises them relative to the session cwd, a bare basename outside it,
-;; which is what makes one file reached from two checkouts one key.
-;; `agent-river--artifact-absolute' is the one place a key and its anchor are
-;; put back together, and it answers nil for a key nothing can place.
+;; normalises them relative to the session cwd, a bare basename outside
+;; it, so one file reached from two checkouts is one key.
+;; `agent-river--artifact-absolute' puts a key and its anchor back
+;; together, and answers nil for a key nothing can place.
 
 (defun agent-river--party-label (state)
   "Return the name STATE goes by in a view that shows several of them.
@@ -6467,16 +6197,11 @@ each caller sorts a list of its own instead."
              (cwd (agent-river-state-cwd state))
              (anchors (agent-river-state-anchors state)))
          (maphash (lambda (path entry)
-                    ;; The key placed on disk used to be derived here as
-                    ;; `:abs', because the map resolved every key several
-                    ;; times per draw and `expand-file-name' is not cheap --
-                    ;; measured on 2026-09-17 at 5000 artifacts, 60 ms of one
-                    ;; draw was the same answer computed twice too often.  The
-                    ;; map lists artifact records now and resolves nothing, so
-                    ;; the derivation went with the readers that wanted it:
-                    ;; what is left asks `agent-river--artifact-absolute' for
-                    ;; one key at a time (`agent-river--artifact-gone-p'), and
-                    ;; a cache for that is a cache nobody reads.
+                    ;; Nothing resolves a key to an absolute path here any
+                    ;; more: the map lists artifact records without
+                    ;; resolving them, and what still needs a resolved
+                    ;; path asks `agent-river--artifact-absolute' for one
+                    ;; key at a time (`agent-river--artifact-gone-p').
                     (push (list :party party
                                 :cwd cwd
                                 :anchor (and anchors (gethash path anchors))
@@ -6508,46 +6233,37 @@ and it wins over the cwd here."
   (let ((cwd (or (plist-get entry :anchor) (plist-get entry :cwd)))
         (file (plist-get entry :file)))
     (and cwd (not (string-empty-p cwd)) file (not (string-empty-p file))
-         ;; A key somebody declared is not a path, and resolving it here is how
-         ;; `inc:INC-444' became `/repo/inc:INC-444' -- a name in a tree it has
-         ;; nothing to do with, which every view downstream would then draw and
-         ;; eventually offer to delete.  Answering nil is what the caller does
-         ;; the right thing with: a key that cannot be placed is left alone
-         ;; rather than guessed at.  Undeclared is the *only* kind that gets
-         ;; resolved, which is what `agent-river--key-domain' answering nil
-         ;; means.
+         ;; A key somebody declared is not a path: resolving it here would
+         ;; turn `inc:INC-444' into `/repo/inc:INC-444', a name in a tree
+         ;; it has nothing to do with.  Nil is what the caller does the
+         ;; right thing with -- a key that cannot be placed is left alone.
+         ;; Undeclared is the only kind resolved, per
+         ;; `agent-river--key-domain' answering nil.
          (null (agent-river--key-domain file))
          (expand-file-name file (file-name-as-directory cwd)))))
 
 ;;; The map -- what has arrived, and who is on it
 ;;
-;; The view of `agent-river-artifacts': one section per domain, one line per
-;; record, each annotated with whoever has reached it.  Derived from the
-;; tables on every redraw, like everything else here, so it accumulates
-;; nothing of its own and cannot drift from the panel.
+;; The view of `agent-river-artifacts': one section per domain, one line
+;; per record, each annotated with whoever has reached it.  Derived from
+;; the tables on every redraw, so it accumulates nothing of its own and
+;; cannot drift from the panel.
 ;;
 ;; **The listing is the artifact table.** There is no listing function to
-;; write and nothing is read off the disk: a record carries its own name,
-;; whether it is over, and whatever context its producer put on it, and the
-;; sessions' tables say who has reached it.
+;; write and nothing is read off disk: a record carries its own name,
+;; whether it is over, and whatever context its producer put on it, and
+;; the sessions' tables say who has reached it.
 ;;
-;; It was a lens over dired for most of its life -- one directory listed in
-;; full, each entry carrying what had been reached beneath it, RET descending
-;; into the next.  That is gone, and what it answered has better answers
-;; elsewhere -- or no longer asked at all: `agent-river-touching' answered
-;; "is anybody else in this file" and the block's `files' heading answered
-;; "which files is this session in", and both are gone.  What has *no*
-;; other answer is the thing that arrived on its own -- an
-;; incident routed to you, a review requested, a build that broke -- which
-;; matters most when no agent is running at all, and which nothing in the
-;; event stream could ever have produced.  That is the whole of what this
-;; view is now, and the queue of what nobody has picked up is the line it
-;; exists to carry.
+;; What has *no* other answer is the thing that arrived on its own -- an
+;; incident routed to you, a review requested, a build that broke --
+;; which matters most when no agent is running, and which nothing in the
+;; event stream could ever produce.  That is what this view is for, and
+;; the queue of what nobody has picked up is the line it exists to carry.
 ;;
-;; Nothing here is a path.  A section root is `inc:', an identity built from
-;; the domain, and a line is the artifact key itself -- so there is no
-;; placing, no anchor and no cwd on this side any more.  Zooming is by
-;; section (RET on a heading, `^' back out) rather than by directory.
+;; Nothing here is a path.  A section root is `inc:', an identity built
+;; from the domain, and a line is the artifact key itself -- so there is
+;; no placing, no anchor and no cwd on this side.  Zooming is by section
+;; (RET on a heading, `^' back out) rather than by directory.
 
 (defcustom agent-river-map-scope 'session
   "Which artifact frame the parties on a map line are read from.
@@ -6622,30 +6338,25 @@ never been touched is."
 ;; the session cwd, and `agent-river--artifact-absolute' puts the two back
 ;; together -- against the anchor where the cwd cannot.
 ;;
-;; An artifact declared from outside has no such answer.  `inc:INC-444' is a
-;; perfectly good key -- the session tables count it and the parties
-;; aggregate over it -- but resolved against a cwd it becomes
-;; `/repo/inc:INC-444', a file that does not exist in a tree it has nothing to
-;; do with.  That is the same mistake the anchors were folded to stop, one
-;; domain over, and it is why placement is decided here rather than assumed.
+;; An artifact declared from outside has no such answer.  `inc:INC-444' is
+;; a perfectly good key, but resolved against a cwd it becomes
+;; `/repo/inc:INC-444', a file that does not exist in a tree it has
+;; nothing to do with -- the same mistake the anchors were folded to
+;; stop, one domain over.
 ;;
 ;; So: a key is either **declared** -- it has a record, and therefore a
-;; domain, read off the artifact table (`agent-river--key-domain') and never
-;; parsed out of the key -- or it is not, and then it is a path and nothing
-;; else.  That was three states until recently rather than two: `file' was a
-;; domain meaning "nobody declared this", and it could itself be declared, at
-;; which point a record meant exactly what no record meant.  A domain heads a
-;; section of its own, and the section's
-;; listing is the artifact table itself -- which is the whole reason there is
-;; no per-domain listing function to write.  A record already carries its name,
-;; whether it has ended, and whatever context its producer put on it; asking a
-;; domain to answer those again would be the second account this table exists
-;; to avoid.
+;; domain, read off the artifact table (`agent-river--key-domain') and
+;; never parsed out of the key -- or it is not, and then it is a path and
+;; nothing else.  A domain heads a section of its own, and the section's
+;; listing is the artifact table itself, which is the whole reason there
+;; is no per-domain listing function to write: a record already carries
+;; its name, whether it has ended, and whatever context its producer put
+;; on it.
 ;;
 ;; Registering a domain is therefore optional, and is only ever about
-;; presentation: a producer that passes `:domain' gets a section whether or not
-;; anybody registered one, because a thing that has arrived must not need
-;; configuration before it can be seen.
+;; presentation: a producer that passes `:domain' gets a section whether
+;; or not anybody registered one, because a thing that has arrived must
+;; not need configuration before it can be seen.
 
 (defun agent-river--key-domain (key)
   "Return the domain KEY was declared with, or nil when nobody declared it.
@@ -6954,13 +6665,12 @@ unless one has just been drawn anyway.")
 (defvar agent-river--map-dirty nil
   "Non-nil when an event has landed that the map has not yet drawn.")
 
-;; The buffer is Markdown, and tree-sitter owns the `face' property in it: it
-;; refontifies on redisplay and appends or removes faces as the structure
-;; changes, so a face written as a text property is drawn once and then
-;; quietly gone.  Every face this view wants is therefore marked with a
-;; property of its own and turned into an overlay after the text is in
-;; (`agent-river--map-shade'), because an overlay sits above the
-;; fontification rather than competing with it.
+;; The buffer is Markdown, and tree-sitter owns the `face' property: it
+;; refontifies on redisplay, so a face written as a text property is
+;; drawn once and then quietly gone.  Every face this view wants is
+;; therefore marked with a property of its own and turned into an
+;; overlay after the text is in (`agent-river--map-shade'), which sits
+;; above the fontification rather than competing with it.
 
 (defun agent-river--map-mark (text face)
   "Return TEXT marked to be drawn in FACE once it is in the buffer.
@@ -7013,15 +6723,13 @@ has more to say than a node can hold."
 ;; Rows under a node, and who may contribute them
 ;;
 ;; A map line carries what can be read straight down the listing --
-;; contention as a marker, existence as a strike-through -- and that is the
-;; whole of it.  Everything else is a row under the node.  The party names
-;; used to be on the line and were the one ragged thing there, which is why
-;; nothing scannable could ever follow them.
+;; contention as a marker, existence as a strike-through -- and that is
+;; the whole of it.  Everything else is a row under the node.
 ;;
 ;; A row is detail and waits to be asked for: a node draws closed, with a
 ;; twisty saying there is something under it, and TAB opens it.  One
-;; mechanism rather than two, reusing the folds that already survive a
-;; redraw because they are data rather than overlays.
+;; mechanism rather than two, reusing folds that already survive a redraw
+;; because they are data rather than overlays.
 
 (defvar agent-river-map-contributors
   (list (list :name 'parties :read #'agent-river--rows-parties)
@@ -7270,11 +6978,10 @@ under it, which made the fold a way of losing things quietly."
          ;; and the rows' to say.
          (face (and missing 'agent-river-gone))
          (shown (agent-river--map-name name))
-         ;; The gutter: everything that is about this line rather than about
-         ;; the tree, in one fixed-width place before the name.  At the end
-         ;; of the line these were held away from what they mark by however
-         ;; wide the name happened to be, which is the opposite of what a
-         ;; marker is for.
+         ;; The gutter: everything about this line, in one fixed-width
+         ;; place before the name.  At the end of the line these were
+         ;; held away from what they mark by the name's own width, the
+         ;; opposite of what a marker is for.
          (gutter
           (concat (pcase rows ('open agent-river-map-open-marker)
                          ('closed agent-river-map-closed-marker)
@@ -7397,11 +7104,9 @@ one were the subject and the others were somewhere inside it."
           (agent-river--map-mark (if root
                                      ;; Through `agent-river--map-name' like
                                      ;; the lines below it: a label is a
-                                     ;; name, and the header is the one
-                                     ;; place one was going in bare, which
-                                     ;; both rendered it differently from
-                                     ;; every other heading and left the one
-                                     ;; name here that nothing had fenced.
+                                     ;; name too, and rendering it
+                                     ;; differently would leave the one
+                                     ;; name here that nothing else fences.
                                      (agent-river--map-name
                                       (agent-river--domain-label
                                        (agent-river--map-domain root)))
@@ -7460,11 +7165,10 @@ nothing."
       (with-current-buffer buffer
         (let* ((here (agent-river--map-here))
                (inhibit-read-only t)
-               ;; One walk of the registry for the whole draw.  Every section
-               ;; is a reading of one set of artifacts, and taking that set
-               ;; per section is as many chances for them to disagree as it is
-               ;; times the work: measured on 2026-09-17 at 5000 artifacts, a
-               ;; draw spent about 30 ms re-walking.
+               ;; One walk of the registry for the whole draw.  Every
+               ;; section is a reading of one set of artifacts; walking it
+               ;; again per section would be as many chances for them to
+               ;; disagree as it is extra work.
                (agent-river--artifact-memo (cons 'none nil))
                ;; And the reading taken *of* the artifact table on the same
                ;; terms: which domains are in play at all.
@@ -7488,11 +7192,10 @@ nothing."
                       (agent-river--map-header nil (length sections))
                     (agent-river--map-header (car (car sections))))
                   "\n")
-          ;; Nothing has been declared.  Said outright rather than left as a
-          ;; blank buffer, because the two read alike and only one of them is
-          ;; this view working: what it is waiting for is a producer, and a
-          ;; reader who has not wired one up needs to be told that rather than
-          ;; shown an empty listing.
+          ;; Nothing has been declared.  Said outright rather than left as
+          ;; a blank buffer, since the two read alike and only one of them
+          ;; is this view working -- a reader with no producer wired up
+          ;; needs to be told that, not shown an empty listing.
           (unless sections
             (insert (propertize
                      (concat (agent-river--map-marker 'leaf)
@@ -7512,18 +7215,17 @@ nothing."
                                      (mapcar (lambda (entry)
                                                (list :parties (plist-get entry :parties)))
                                              entries))
-                                    ;; No twisty: a contributor is asked about
-                                    ;; the nodes a section lists and never
-                                    ;; about the section, so a root has no
-                                    ;; rows -- and nothing here would insert
-                                    ;; them if it had.
+                                    ;; No twisty: a contributor is asked
+                                    ;; about the nodes a section lists,
+                                    ;; never about the section, so a root
+                                    ;; has no rows to insert.
                                     )
                                    "\n")
                            ;; A section is a place like any other line's, so
                            ;; RET zooms into it and the motions stop on it.
-                           ;; Through a thunk of its own because a domain is
-                           ;; not a path: what the zoom stores is the section
-                           ;; root, which is an identity.
+                           ;; A thunk of its own since a domain is not a
+                           ;; path: what the zoom stores is the section
+                           ;; root, an identity.
                            'agent-river-map-name label
                            'agent-river-map-path root
                            'agent-river-map-visit
@@ -7535,9 +7237,9 @@ nothing."
               (dolist (entry entries)
                 (let* ((key (plist-get entry :name))
                        ;; What the line reads.  The key is machinery --
-                       ;; `inc:INC-444' -- and the record carries what to call
-                       ;; it; a record declared without a name is read by its
-                       ;; key, which is the whole of what is known about it.
+                       ;; `inc:INC-444' -- and the record carries what to
+                       ;; call it; a record with no name is read by its
+                       ;; key.
                        (label (or (plist-get entry :shown) key))
                        (shown (agent-river--map-shown-rows (gethash key rows)))
                        ;; Rows are detail and wait to be asked for, so a node
@@ -7572,17 +7274,15 @@ nothing."
 
 ;;; Moving about the map
 ;;
-;; Dired's gestures, because the map is answering dired's question over a
-;; wider area.  Point belongs on the name rather than in column zero: column
-;; zero is the Markdown marker, which is not what the line is about, and a
-;; cursor sitting on `#' reads as though the markup were the content.
+;; Dired's gestures, since the map answers dired's question over a wider
+;; area.  Point belongs on the name, not column zero: that's the Markdown
+;; marker, and a cursor on `#' reads as though the markup were the content.
 ;;
-;; Three motions, because the map has three grains of "next thing" and
-;; collapsing them would lose the one a reader actually wants.  Every entry
-;; is the fine one; the top-level entries alone skip past an unfolded
-;; directory's files; and the entries with agents on them are why the map was
-;; opened at all -- in a thirty-module repository that last one is the
-;; difference between reading the view and searching it.
+;; Three motions, since the map has three grains of "next thing": every
+;; entry is the fine one; the top-level entries alone skip an unfolded
+;; node's rows; and the entries with agents on them are why the map was
+;; opened at all -- the difference between reading the view and searching
+;; it.
 
 (defun agent-river--map-line-path ()
   "Return what this line names, or nil when it names nothing.
@@ -7745,29 +7445,23 @@ is what a refresh by hand means."
 
 ;;; What RET may do -- the actions a line offers
 ;;
-;; Opening a thing is one of the things that can be done to it, and it used to
-;; be the only one a line could offer: a file was opened, and a domain named a
-;; single `:visit' of its own that RET called.  What that
-;; cannot express is the ordinary case -- an issue on the map is something to
-;; read *and* something to start an agent on, and which of the two is wanted is
-;; not a property of the domain, it is a question for the person looking at the
-;; line.
+;; Opening a thing is one of the things that can be done to it, not the
+;; only one: an issue on the map is something to read *and* something to
+;; start an agent on, and which is wanted is not a property of the
+;; domain, it is a question for the person looking at the line.
 ;;
 ;; So a line is *asked* what it offers, by every function in
-;; `agent-river-artifact-action-functions', and the answers are collected.
-;; Applicability is asked rather than declared, which is the rule the domain
-;; sections already live by: a function that has nothing to do with this
-;; subject answers nil, and a producer that invents a domain gets whatever the
-;; registered functions offer without registering anything itself.
+;; `agent-river-artifact-action-functions', and the answers are
+;; collected.  Applicability is asked rather than declared: a function
+;; with nothing to do with this subject answers nil, and a producer that
+;; invents a domain gets whatever the registered functions offer without
+;; registering anything itself.
 ;;
-;; Two consequences worth naming.  A domain declares nothing at all now --
-;; the table that held that `:visit' is gone with the label beside it -- so one
-;; mechanism answers "what may RET do here" and it is this one.  And opening a
-;; file is an action like any other
-;; (`agent-river--actions-file') rather than a branch of the command, because a
-;; file line answering that question somewhere else is exactly the second
-;; mechanism this collapses.  With one offer nothing is asked, so a plain file
-;; still opens on RET with one keystroke.
+;; A domain declares nothing at all: one mechanism answers "what may RET
+;; do here", and opening a file is an action like any other
+;; (`agent-river--actions-file') rather than a branch of the command.
+;; With one offer nothing is asked, so a plain file still opens on RET
+;; with one keystroke.
 
 (defun agent-river--actions-file (subject)
   "Offer to open the file SUBJECT names, when there is one on disk.
@@ -7965,13 +7659,11 @@ then quietly stay in the fallback for the whole session."
   ;; see `agent-river--map-marker' -- and this must not depend on what the
   ;; user set the Markdown default to.
   (setq-local markdown-ts-hide-markup nil)
-  ;; Outline's own cycling has to go, and not only because it puts a `keymap'
-  ;; text property on every heading that wins over the mode map and swallows
-  ;; TAB.  Its fold lives in overlays, and this buffer is erased and rebuilt
-  ;; every few seconds -- so a heading folded that way springs open on the
-  ;; next redraw.  `agent-river-map-toggle' folds the same headings by
-  ;; deciding what gets drawn, which is the only kind of fold that survives
-  ;; here.
+  ;; Outline's own cycling has to go: it puts a `keymap' property on every
+  ;; heading that wins over the mode map and swallows TAB, and its fold
+  ;; lives in overlays that spring open on the next redraw.
+  ;; `agent-river-map-toggle' folds by deciding what gets drawn instead,
+  ;; the only kind that survives here.
   (setq-local outline-minor-mode-cycle nil)
   ;; Navigating by keyboard with nothing marking where you are is navigating
   ;; blind, and this view is read by eye far more than it is acted on.  A
@@ -8158,12 +7850,10 @@ takes the map off the event stream."
             agent-river--map-folds nil)
       (add-hook 'kill-buffer-hook #'agent-river--map-teardown nil t))
     (add-hook 'agent-river-observers #'agent-river--map-observe)
-    ;; And the artifact stream, which is the half with no session behind it --
-    ;; and now the half the whole listing comes from.  A session hook alone
-    ;; kept a tree listing current, because a tree changes when an agent does
-    ;; something; an incident arriving changes this map with no event on that
-    ;; hook at all, and the redraw timer retires as soon as nothing is dirty
-    ;; -- so the record sat in the table, drawn by nobody, until somebody
+    ;; And the artifact stream, the half with no session behind it and now
+    ;; the half the whole listing comes from: an incident arriving changes
+    ;; this map with no session event at all, and without this hook the
+    ;; record would sit in the table, drawn by nobody, until somebody
     ;; pressed `g'.  Quiet is exactly when this view has the most to say.
     (add-hook 'agent-river-artifact-observers #'agent-river--map-observe)
     (agent-river--map-draw)

@@ -427,10 +427,8 @@
     (should (string-match-p "repo" (agent-river-test--block-text)))))
 
 (ert-deftest agent-river-test-an-event-that-writes-no-line-still-draws-the-block ()
-  ;; The block used to be redrawn by the log line going past it.  An outcome
-  ;; landing on the line that opened its call writes no line of its own, so
-  ;; with the two halves apart that event would have left the block saying
-  ;; what it said before -- here, that nothing had failed.
+  ;; An outcome lands on the line that opened its call rather than writing
+  ;; a line of its own, so the block must still be redrawn to reflect it.
   (let ((agent-river-registry (make-hash-table :test 'equal))
         (agent-river-auto-display nil))
     (agent-river-clear)
@@ -1827,11 +1825,8 @@ stubbed here so the tests do not depend on agent-shell being installed."
 ;;; Subagents
 ;;
 ;; A subagent is a dimension of the session that spawned it, not a peer beside
-;; it in the registry.  It has no prompt, no working directory, no place and
-;; nothing that can be told to it -- it failed the definition of a session in
-;; four ways, and every reader of the registry used to begin by sorting it back
-;; out again.  What it is is a tally of what a session set in motion, and these
-;; hold what that tally still owes.
+;; it in the registry -- it has no prompt, no working directory, no place of
+;; its own.  These tests hold what the tally on the parent session owes.
 
 (ert-deftest agent-river-test-a-subagent-folds-onto-its-session ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -1842,15 +1837,13 @@ stubbed here so the tests do not depend on agent-shell being installed."
       (agent-river-observe '(:kind "act" :session "s1" :agent "a9"
                                    :agent-type "Explore"
                                    :tool "Read" :file "x.el" :detail "Read x.el")))
-    ;; One registry entry, because there is one session.  The agent_id used to
-    ;; make a second one beside it.
+    ;; One registry entry, because there is one session.
     (should (= (hash-table-count agent-river-registry) 1))
     (let ((state (gethash "s1" agent-river-registry)))
       ;; A delegated step is a step this session took -- it asked for it -- so
       ;; the panel says five rather than one and an onlooker sees the work.
       (should (= (agent-river-state-steps state) 5))
-      ;; And the file is in the session's own tables, in both frames.  It
-      ;; used to be in the child's and nowhere else.
+      ;; And the file is in the session's own tables, in both frames.
       (should (gethash "x.el" (agent-river-state-artifacts state)))
       (should (gethash "x.el" (agent-river-state-task-artifacts state))))))
 
@@ -1890,8 +1883,7 @@ stubbed here so the tests do not depend on agent-shell being installed."
       ;; make the tally report a conversation that never happened.
       (should-not answer)
       (should-not (agent-river-state-signals (gethash "s1" agent-river-registry))))
-    ;; The gate reads the event now.  It used to read a registry entry that
-    ;; existed so that this question had something to ask.
+    ;; The gate reads the event directly, not a registry entry.
     (should (agent-river--answerable-p '(:kind "fail" :session "s1")))
     (should-not (agent-river--answerable-p '(:kind "fail" :session "s1" :agent "a9")))
     (should (agent-river--answerable-p '(:kind "fail" :session "s1" :agent "")))))
@@ -3124,9 +3116,8 @@ AT is when it arrived, RAW the tool's own arguments, TITLE the summary."
 (ert-deftest agent-river-test-a-signal-goes-through-the-fold ()
   (agent-river-test--with-session state
     (agent-river-fold state '(:kind "signal" :text "told the agent something"))
-    ;; It used to be pushed onto the slot from `agent-river-observe', which
-    ;; made observe a second writer to a state the fold is supposed to own
-    ;; alone.  Folding it is what keeps that ownership true.
+    ;; Folded rather than pushed onto the slot directly, so the fold stays
+    ;; the state's only writer.
     (should (= (length (agent-river-state-signals state)) 1))
     (should (equal (plist-get (car (agent-river-state-signals state)) :text)
                    "told the agent something"))))
@@ -3323,9 +3314,7 @@ first line from a survey."
   (agent-river-test--with-block
     (let ((lines (agent-river-test--marked-lines #'agent-river--entry-line-p)))
       ;; One line per live session, in buffer order, and nothing from the
-      ;; log: the block holds no line the stream put there.  There is one
-      ;; grain here now -- the detail headings under a session went with the
-      ;; file touches they listed, and `M-n' with them.
+      ;; log: the block holds no line the stream put there.
       (should (seq-find (lambda (l) (string-prefix-p "* alpha" l)) lines))
       (should (seq-find (lambda (l) (string-prefix-p "* beta" l)) lines))
       (should-not (seq-find (lambda (l) (string-prefix-p "** " l)) lines))
@@ -3891,12 +3880,8 @@ first line from a survey."
   (agent-river-test--with-session state
     (agent-river-fold state '(:kind "act" :cwd "/repo" :agent "a1"
                                     :agent-type "Explore" :file "src/a.el"))
-    ;; This used to read `alpha/Explore', because the file was in the
-    ;; child's artifact tables and never in the parent's -- so naming the
-    ;; parent would have claimed it worked in a file it never opened.  The
-    ;; touch lands on the session now, so the party is the session and the
-    ;; map shows one name per agent rather than one per agent plus one per
-    ;; thing it delegated to.
+    ;; The touch lands on the session, so the party is the session -- the
+    ;; map shows one name per agent, not one per agent plus its delegates.
     (should (equal (agent-river--party-label state) "alpha"))))
 
 ;;; Files on disk, as the state records them
@@ -5776,11 +5761,7 @@ file the moment it appears, and a half-written one reads as malformed."
       (set-file-times file (time-subtract (current-time) 60)))
     (agent-river-spool-scan)
     ;; Refused in the reader, so the message names the field the delivery is
-    ;; missing rather than arriving from the addressing two layers down.  It
-    ;; used to be optional and made a record in the `file' domain -- this
-    ;; package's word for a key nobody declared -- so the record was
-    ;; indistinguishable from no record: listed by no section, drawn on no
-    ;; line, and counted in `agent-river-domains' all the same.
+    ;; missing rather than arriving from the addressing two layers down.
     (should (null (agent-river-spool-test--keys)))
     (should (equal '("a.json") (agent-river-spool-test--files "failed")))))
 
@@ -6067,10 +6048,8 @@ headless launcher issue #37 wants could not be dropped in beside it."
                                 (baseRefName . "main")))))))
 
 (ert-deftest agent-river-gh-test-the-key-names-the-object ()
-  ;; Not the occasion.  An artifact is a thing, and an issue that moves
-  ;; twice is one thing that moved twice -- which is the whole of what the
-  ;; old occasion-shaped key was for, and it went with the launcher that
-  ;; needed it.
+  ;; Not the occasion: an artifact is a thing, and an issue that moves
+  ;; twice is one thing that moved twice.
   (let ((spec (agent-river-gh--read "gh" (agent-river-gh-test--delivery))))
     (should (equal "issue:o/r#42" (plist-get spec :key)))
     (should (eq 'issue (plist-get spec :domain)))

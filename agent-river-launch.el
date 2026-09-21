@@ -52,19 +52,12 @@
 
 ;;; Quoting producer text -- a mechanism every brief needs, not a GitHub one
 ;;
-;; A brief that names an artifact's own text -- a body, a title, a branch a
-;; fork spelled however it liked -- is embedding text an operator did not
-;; write into a prompt an agent will read as instructions.  That is one
-;; question regardless of what kind of thing wrote it: a GitHub issue today,
-;; and the tracker, mailbox or build log the commentary above expects to
-;; follow it are all the identical case with different producer text.  A
-;; mechanism answering the identical question in every source's own copy is
-;; exactly the second account this package's merge rule refuses -- and here
-;; the stakes are sharper than usual, since the copy that drifts is the one
-;; guarding against a prompt injection, not a rendering that merely looks
-;; different.  It lived beside `agent-river-gh-brief' first and moved once a
-;; second brief needed it, so `agent-river-gh.el' calls this rather than
-;; keeping its own.
+;; A brief that embeds an artifact's own text -- a body, a title, a branch --
+;; is putting text an operator did not write into a prompt an agent will read
+;; as instructions.  Every source faces the identical question, so the
+;; quoting lives here rather than being copied per source: a copy that drifts
+;; is a prompt-injection defence quietly not applied.  `agent-river-gh.el'
+;; calls this rather than keeping its own.
 
 (defun agent-river-launch-quote (parts)
   "Return PARTS as one blockquote, every line of each of them inside it.
@@ -111,13 +104,10 @@ and is the brief's."
 ;;   :resolve      (HANDLE) -> the agent-river session id, once there is one,
 ;;                 or nil.  Nil for a launcher that assigns the id itself.
 ;;
-;; `:launch' and `:resolve' are split by a real asymmetry.  agent-shell's ACP
-;; session id appears after the process is up, so a launch hands back a handle
-;; and the key is resolved afterwards; a headless CLI can be *told* its
-;; session id, so it is known before the process starts and `:resolve' is nil.
-;; Where we control the invocation we assign identity, where we do not we
-;; resolve it after -- and resolving is what lets the session be linked to the
-;; artifact it was started for.
+;; `:launch' and `:resolve' are split because agent-shell's session id only
+;; appears after the process is up, so it is resolved afterwards; a headless
+;; CLI can be told its id up front, so `:resolve' is nil there.  Resolving is
+;; what lets the session be linked back to the artifact it was started for.
 
 (declare-function agent-shell--start "agent-shell")
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
@@ -242,8 +232,7 @@ in the log rather than leaving a started agent sitting with nothing to do."
        (fboundp 'agent-shell--insert-to-shell-buffer)
        (functionp agent-river-launch-shell-config)
        ;; Built, not merely nameable: the config reaches for authentication,
-       ;; and a launcher that reports itself available and then fails on its
-       ;; first artifact has said something untrue.
+       ;; so a launcher must not claim availability it can't back up.
        (condition-case nil
            (and (funcall agent-river-launch-shell-config) t)
          (error nil))))
@@ -436,24 +425,15 @@ nothing afterwards contradicts it."
                                (funcall resolve (plist-get record :handle))
                              (error nil)))))
         (cond
-         ;; Named *and* heard from.  Both halves are needed: agent-shell
-         ;; sets the session id at the handshake and the hooks fold that
-         ;; session's first event some moments later, so there is a window
-         ;; where the session has a name and no state -- and
+         ;; Named *and* heard from: agent-shell sets the session id at the
+         ;; handshake, but the hooks fold its first event slightly later, and
          ;; `agent-river-reach' refuses to attach an edge to a state that
-         ;; is not there, rightly, because for its other caller that means
-         ;; a person named the wrong session.  Waiting is the whole answer
-         ;; and the window below is what stops it waiting forever.
+         ;; isn't there yet.  Wait for both, bounded by the window below.
          ((and session (gethash session agent-river-registry))
-          ;; Guarded like every other call out of this file, and this one
-          ;; has the sharpest reason: it is the only one with no user in
-          ;; front of it.  A reach folds, redraws the panel and writes the
-          ;; HUD, and if it throws here the `setq' below never runs -- so
-          ;; the record is not dropped, the timer is not retired, and a
-          ;; repeating timer is re-armed before its function runs, which
-          ;; means the same error every second for the life of the Emacs.
-          ;; A reach that fails is reported and the record goes: a launch
-          ;; that cannot be linked is still a launch that happened.
+          ;; Guarded, and more strictly than the rest of this file: this
+          ;; runs on a repeating timer with no user in front of it, so a
+          ;; throw here would skip the `setq' below and repeat forever.  A
+          ;; reach that fails is reported and the record dropped anyway.
           (condition-case err
               (agent-river-reach (plist-get record :key) session)
             (error
@@ -463,8 +443,7 @@ nothing afterwards contradicts it."
                               (plist-get record :key) session
                               (error-message-string err)))))))
          ;; Nothing to ask: a launcher with no `:resolve' assigned the id
-         ;; before the process started, and one that has since been
-         ;; unconfigured cannot answer either.  Settled, not failed.
+         ;; up front, so there's nothing to wait for.  Settled, not failed.
          ((null resolve) nil)
          ((> (float-time (time-subtract (current-time)
                                         (plist-get record :at)))
@@ -607,11 +586,9 @@ would run -- see `agent-river-launch--confirm-p'."
       (if (not (agent-river-launch--confirm-p record key chosen))
           (message "agent-river: not started")
         (let ((launcher (agent-river-launch--launcher))
-              ;; What the brief said, plus what it had no business repeating.
-              ;; Ours first, so the record's own identity is the one a
-              ;; launcher sees: a headless launcher names its session after
-              ;; the key, and a brief is in no position to rename the thing
-              ;; it was asked about.
+              ;; Ours first, so the record's own identity wins: a headless
+              ;; launcher names its session after the key, and a brief has
+              ;; no business renaming the thing it was asked about.
               (brief (append (list :key key :name (plist-get record :name))
                              (cdr offer))))
           (condition-case err
@@ -663,13 +640,10 @@ have been written about."
                                (agent-river-launch-artifact key name)))))
               (agent-river-launch--offers record)))))
 
-;; Appended rather than pushed, so opening a file stays the first thing a line
-;; that is one offers.  The cookie on the function above it is what makes this
-;; work at all: extracted into the autoloads file, this form runs before
-;; anything here is defined, and without one the list would hold a symbol with
-;; an empty function cell -- which `agent-river--artifact-actions' would catch,
-;; report and skip, leaving every launch quietly unofferable.  The same silence
-;; `agent-river-gh--read' is autoloaded against, one file over.
+;; Appended rather than pushed, so opening a file stays the first offer on a
+;; line that is one.  The autoload cookie above is required: this form runs
+;; before the function is defined, and without it the list holds a symbol
+;; with an empty function cell, silently disabling every launch.
 ;;;###autoload
 (with-eval-after-load 'agent-river
   (add-to-list 'agent-river-artifact-action-functions

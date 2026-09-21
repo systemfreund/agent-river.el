@@ -2377,9 +2377,10 @@ together:
 
 - `agent-river-` is public, `agent-river--` is internal; the split is meaningful —
   `;;;###autoload` marks the entry points and interactive commands.
-- Comments here explain *why*, at paragraph length, usually naming the failure the
-  code prevents. Match that density; a change that removes a guard should remove
-  its comment, and a new guard should say what went wrong without it.
+- Comments here explain *why* a non-obvious choice was made, in a sentence or
+  two. Skip incident records, measurements, and rejected alternatives — state
+  the current rule and reason, not its history. A change that removes a guard
+  should remove its comment.
 - Tests are named as sentences (`agent-river-test-waiting-outranks-blocked`) and
   assert the reason, not just the value. Helpers: `agent-river-test--with-session`,
   `--fail`, `--acts`, `--payload`, `--with-shell`.

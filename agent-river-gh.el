@@ -202,23 +202,14 @@ brief needs to decide whether a pull request is worth a session at all,
 and `fork' is the one that says whether the text above it really came
 from a stranger."
   (append
-   ;; The repository, which the key already holds -- and that is why it is a
-   ;; cell rather than something downstream digs back out.  A key is either
-   ;; declared or it is a path, and which of the two is read off the table
-   ;; rather than parsed out of the key; a brief taking `o/r' back out of
-   ;; `issue:o/r#42' would be the prefix rule this package refuses one
-   ;; subject over, and it would be a second account of a name this file
-   ;; already has in its hand.  The two cannot disagree, because the key and
-   ;; this cell are one `repo' read once.  It is also the fact a line most
-   ;; wants and least has: with several entries in `agent-river-gh-repos' a
-   ;; record reading `#42 The map forgets a worktree' does not say which of
-   ;; them it came from, so this is the first row under it.
+   ;; The repository, as a cell -- not parsed back out of the key, which
+   ;; would be the prefix rule this package refuses elsewhere.  With several
+   ;; entries in `agent-river-gh-repos' a title alone doesn't say which repo
+   ;; it came from, so this is worth having as its own row.
    (when-let* ((repo (agent-river-spool--string (alist-get 'repo data))))
      `((repo . ,repo)))
-   ;; Guarded like every sibling, and it is the guard rather than the cell
-   ;; that matters: unguarded, a record with no url carried `(url . nil)'
-   ;; into the table, where `agent-river--rows-artifact' draws every cell it
-   ;; finds -- a row saying `url: nil' about a thing that has none.
+   ;; Guarded: unguarded, a record with no url would carry `(url . nil)'
+   ;; into the table and draw as a row saying `url: nil'.
    (when-let* ((url (agent-river-spool--string (alist-get 'url object))))
      `((url . ,url)))
    (when-let* ((author (alist-get 'login (alist-get 'author object))))
@@ -236,12 +227,9 @@ from a stranger."
    (when-let* ((review (agent-river-spool--string
                         (alist-get 'reviewDecision object))))
      `((review . ,review)))
-   ;; Consed rather than quoted.  `append' copies all but its last argument,
-   ;; so a record with no body would hand the table a cell shared with a
-   ;; constant in this file.  `agent-river--artifact-merge' builds every cell
-   ;; fresh and says in as many words that a producer's list may be a quoted
-   ;; literal, so nothing is broken by it -- but the safety is then one file
-   ;; away from the mistake, and this is the file that knows it made one.
+   ;; Consed rather than quoted: `append' copies all but its last argument,
+   ;; so a quoted literal here would hand the table a cell shared with a
+   ;; constant in this file.
    (when (alist-get 'isDraft object) (list (cons 'draft t)))
    (when (alist-get 'isCrossRepository object) (list (cons 'fork t)))
    (when-let* ((body (agent-river-spool--string (alist-get 'body object))))
@@ -275,32 +263,20 @@ not a reason to spend it."
       (list :key (format "%s:%s#%s" domain repo number)
             :domain domain
             :name name
-            ;; Reached by the ordinary poll, which asks `--state all': a
-            ;; thing that ends is delivered once more, on the tick it ended
-            ;; in, and the record is struck through rather than removed.
-            ;; Asked for the open ones alone this arm was unreachable, and a
-            ;; merged pull request sat in the domain section for ever -- the
-            ;; queue of what nobody has picked up, showing what nobody needs
-            ;; to.
+            ;; The poll asks `--state all', so a thing that ends is
+            ;; delivered once more and struck through rather than removed.
             :gone (and state (member (downcase state) '("closed" "merged")) t)
             :text name
             :context (agent-river-gh--context data object)))))
 
-;; Both cookies are load-bearing, and the second is the one that is easy to
-;; leave off.  The form registers the reader as soon as `agent-river-spool'
-;; loads, which in an installed package is at startup and long before anything
-;; requires this file -- so without an autoload on the reader itself the alist
-;; holds a symbol with an empty function cell.  That failure is not one anybody
-;; sees: the reader runs inside `agent-river-spool--take-in's guard, so every
-;; `gh' delivery is read as malformed, filed under `failed/', and never looked
-;; at again.  Nothing re-reads `failed/', so a load-order slip becomes silent,
-;; permanent loss.
+;; Both cookies are load-bearing.  This form registers the reader as soon as
+;; `agent-river-spool' loads, before this file is required, so without an
+;; autoload on the reader the alist holds an empty function cell -- every
+;; `gh' delivery then reads as malformed and is silently lost in `failed/'.
 ;;
-;; The names are spelled out rather than taken from `agent-river-gh--domains',
-;; which is the table that owns them: this form is extracted into the
-;; autoloads file and runs before anything in this file is defined, so a
-;; reference to the table would be a void variable at startup -- the same
-;; silence one line further up.  A test holds the two lists together.
+;; The names are spelled out rather than read from `agent-river-gh--domains',
+;; since this form runs before that table exists.  A test holds the two
+;; lists together.
 ;;;###autoload
 (with-eval-after-load 'agent-river-spool
   (dolist (source '("gh" "gh-pr"))
@@ -390,9 +366,8 @@ look at rather than a thing to launch on."
                  " Where the state below shows another agent already in "
                  "these files, say so rather than working over the top of "
                  "it.\n\n"
-                 ;; The export rather than a fourth rendering of the state:
-                 ;; it is what exists for where the state *leaves* the
-                 ;; package, and a prompt to another agent is exactly that.
+                 ;; The export, not a fourth rendering of the state: it
+                 ;; exists for where the state leaves the package.
                  (or (agent-river-markdown) "")))))))
 
 ;;;###autoload
@@ -416,11 +391,9 @@ never seen."
       (list (list :name "Open on GitHub"
                   :act (lambda () (browse-url url)))))))
 
-;; Appended, like the launcher's: opening a thing comes before starting an
-;; agent on it only by load order, and reordering is the user's `setq'.  The
-;; cookie above is what keeps the entry from being a symbol with an empty
-;; function cell at startup -- the same silence `agent-river-gh--read' is
-;; autoloaded against.
+;; Appended, like the launcher's: order is just load order, and reordering
+;; is the user's `setq'.  The cookie above keeps this from autoloading as an
+;; empty function cell at startup.
 ;;;###autoload
 (with-eval-after-load 'agent-river
   (add-to-list 'agent-river-artifact-action-functions
@@ -481,11 +454,8 @@ mechanism over -- half a sentence said is worse than nothing said."
         (let ((line (string-trim (substring pending 0 (match-beginning 0)))))
           (setq pending (substring pending (match-end 0)))
           (unless (string-empty-p line)
-            ;; The repository in parentheses would be the other way round:
-            ;; the script names what `gh' was asked about and cannot know
-            ;; which entry of `agent-river-gh-repos' that came from, and
-            ;; both are worth having -- `... failed in o/r in /home/x/o/r'
-            ;; is the wording rather than the content.
+            ;; The script names what `gh' was asked about but not which
+            ;; configured directory it came from, so both are logged.
             (agent-river-log
              "fail" (agent-river--log-text
                      (format "%s (%s)" line (abbreviate-file-name dir))))))))))
@@ -521,18 +491,10 @@ binding that threw ever completed."
           (unless (or (null kinds) (member dir agent-river-gh--running))
             (push dir agent-river-gh--running)
             (setq pushed dir)
-            ;; The script takes the spool from the environment and defaults to
-            ;; the same XDG path `agent-river-spool' defaults to, which is
-            ;; exactly why leaving this out passes today and would stop
-            ;; passing for the first person to customise it: the poller would
-            ;; write to the old path, or -- more often -- exit 0 at its own
-            ;; `[ -d "$spool" ]' without writing at all.  Both are silent in
-            ;; the same way, since the process exits 0 and the sentinel
-            ;; reports success; the only symptom is that nothing ever arrives.
-            ;;
-            ;; Bound rather than passed: `make-process' has no `:environment'
-            ;; argument and ignores one without complaining, which fails in
-            ;; precisely the same silence.
+            ;; The script defaults to the same XDG path `agent-river-spool'
+            ;; does, so this passes untested until somebody customises the
+            ;; spool -- then the poller silently writes nowhere.  Bound
+            ;; rather than passed: `make-process' has no `:environment'.
             (let ((process-environment
                    (append (list (concat "AGENT_RIVER_SPOOL="
                                          (expand-file-name agent-river-spool))
@@ -548,16 +510,10 @@ binding that threw ever completed."
                :noquery t
                :connection-type 'pipe
                :buffer nil
-               ;; The script writes one line per query that failed and nothing
-               ;; else ever, so anything arriving here is a failure report.
-               ;; Without it a kind that fails *persistently* -- an old `gh'
-               ;; that rejects a field, a token short a scope, pull requests
-               ;; disabled -- is invisible: the other kind goes on delivering,
-               ;; the process exits 0, the sentinel reports success, and the
-               ;; watermark is held for ever while the window grows without
-               ;; bound.  One query failing used to mean no deliveries at all,
-               ;; which is at least visible; with two, the working one masks
-               ;; the broken one.
+               ;; The script writes one line per query that failed and
+               ;; nothing else, so anything here is a failure report.
+               ;; Without it, one kind failing persistently is invisible:
+               ;; the other keeps delivering and the process exits 0.
                :filter (agent-river-gh--reporter dir)
                :sentinel
                (lambda (_process event)
@@ -605,17 +561,11 @@ needs two more things configured."
   :lighter " gh>"
   (if agent-river-gh-mode
       (progn
-        ;; The script writes into the spool and gives up at its own
-        ;; `[ -d "$spool" ]' if it is not there, so turning this on without
-        ;; ever having turned the spool on polls GitHub and drops the answer
-        ;; on the floor -- silently on both sides, which is the failure the
-        ;; `AGENT_RIVER_SPOOL' comment in `--poll-1' is about, one layer up.
+        ;; The script gives up silently if the spool directory doesn't
+        ;; exist, so ensure it rather than poll GitHub into the void.
         (agent-river-spool--ensure-dirs)
-        ;; And say when nothing can come of it.  Deliveries would still pile
-        ;; up in the inbox with the spool mode off, but nothing would read
-        ;; them; with no repositories there is not even a poll.  Either way
-        ;; the symptom is an empty map, which is indistinguishable from a
-        ;; quiet week.
+        ;; And say when nothing can come of it -- otherwise the symptom is
+        ;; an empty map, indistinguishable from a quiet week.
         (dolist (missing
                  (delq nil
                        (list (unless agent-river-gh-repos
@@ -632,10 +582,8 @@ needs two more things configured."
         (setq agent-river-gh--timer
               (run-with-timer agent-river-gh-interval agent-river-gh-interval
                               #'agent-river-gh-poll))
-        ;; Wide once, then incremental.  See `agent-river-gh--poll-1': the
-        ;; table this fills does not survive a restart and the watermark
-        ;; does, so the first poll of a session has to ask about more than
-        ;; what has moved since the last one.
+        ;; Wide once, then incremental: the table doesn't survive a restart
+        ;; but the watermark does, so the first poll must ask more broadly.
         (agent-river-gh-poll t))
     (when (timerp agent-river-gh--timer)
       (cancel-timer agent-river-gh--timer))

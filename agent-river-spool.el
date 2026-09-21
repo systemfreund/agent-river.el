@@ -132,19 +132,16 @@ cost is that a genuinely broken file is filed a couple of seconds late."
 ;;   :text     the line for the log
 ;;   :session  the agent-river session this came out of, where one did
 ;;
-;; A reader *returns* a spec rather than declaring one itself, for the reason
-;; `agent-river--event' builds an event rather than folding one: there is then
-;; a single place where something enters the table, and a reader is a pure
-;; translation that tests without a table, a spool or a timer.
+;; A reader returns a spec rather than declaring one, so there is one place
+;; things enter the table and a reader tests without a table, a spool or a
+;; timer.
 ;;
-;; `:session' is the one field that is not about the artifact.  It says which
-;; session produced the delivery, and it is noted on *that* session rather
-;; than folded into the record -- see `agent-river-spool--note-session'.
+;; `:session' is noted on that session rather than folded into the record --
+;; see `agent-river-spool--note-session'.
 ;;
-;; There is no `:cwd'.  Where an agent would be started is not a property of
-;; the thing it would work on, and this package never reads a value out of a
-;; context: a source that knows a working tree puts it in the context, and the
-;; brief -- which is the user's own code -- is what reads it back out.
+;; There is no `:cwd': where an agent would start is not a property of the
+;; thing it works on.  A source that knows a working tree puts it in the
+;; context, and the brief reads it back out.
 
 (defun agent-river-spool--string (value)
   "Return VALUE if it is a non-empty string, else nil."
@@ -341,10 +338,8 @@ sense there is."
                                  :name (plist-get spec :name)
                                  :context (plist-get spec :context)
                                  :text (plist-get spec :text))
-      ;; An ending is folded whether or not the appearing was news: a source
-      ;; that reports a closed thing it has reported before is telling us
-      ;; something that moved, and not-news is not the same as nothing
-      ;; happened.
+      ;; An ending is folded even when appearing was not news: a repeat
+      ;; report of a closed thing still says something moved.
       (when (plist-get spec :gone)
         (agent-river-ended (plist-get spec :key) (plist-get spec :text))))))
 
@@ -371,9 +366,8 @@ arrived."
             (agent-river-spool--note-session spec)
             (agent-river-spool--declare spec)
             (delete-file file))
-        ;; Declaring threw.  Retrying every minute for the life of the Emacs
-        ;; is the one thing that must not happen, so this file is treated
-        ;; exactly like one that would not parse.
+        ;; Declaring threw; treat it like a file that would not parse rather
+        ;; than retry it forever.
         (error (agent-river-spool--fail file err) nil)))))
 
 (defun agent-river-spool--inbox ()
@@ -402,10 +396,8 @@ many deliveries were taken in."
   (agent-river-spool--ensure-dirs)
   (let ((taken 0))
     (dolist (file (agent-river-spool--inbox))
-      ;; Per file, so that whatever one delivery manages to throw costs that
-      ;; delivery and not the scan.  `--take-in' guards the two errors it
-      ;; expects; this is for the third kind, and the point is that the
-      ;; queue behind a bad file keeps moving.
+      ;; Guarded per file, so a delivery that throws costs only itself and
+      ;; the rest of the queue keeps moving.
       (when (condition-case err
                 (agent-river-spool--take-in file)
               (error
@@ -478,10 +470,8 @@ Turning it on takes in whatever was delivered while it was off."
       (progn
         (agent-river-spool--ensure-dirs)
         (setq agent-river-spool--watch
-              ;; A watch is a nicety, not the mechanism: it is what makes a
-              ;; delivery land in under a second, and where it cannot be had
-              ;; -- no inotify, a remote spool -- the timer below is still
-              ;; the whole guarantee.
+              ;; A nicety, not the guarantee: it lands a delivery quickly
+              ;; where available, but the timer below is the real promise.
               (ignore-errors
                 (file-notify-add-watch (agent-river-spool--dir nil)
                                        '(change)
