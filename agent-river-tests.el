@@ -4072,24 +4072,28 @@ the view looks like once the work has moved on."
     ;; heading would set the whole listing in the heading face and say that
     ;; a file contains the lines after it.
     ;; The gutter sits between the marker and the name, so the heading is
-    ;; still a heading and the name is still a code span.
-    (should (string-match-p "\\`## +`common/`"
+    ;; still a heading.
+    (should (string-match-p "\\`## +common/"
                             (agent-river--map-line 2 "common/" nil)))
-    (should (string-match-p "\\`- +`c.el`"
+    (should (string-match-p "\\`- +c\\.el"
                              (agent-river--map-line 'leaf "c.el" nil)))
     ;; A leaf says `leaf' rather than a number for exactly this reason: the
     ;; overview pushes records to level 3 to make room for section headings,
     ;; and a line with nothing under it taking its level from them would
     ;; follow them into being a heading.
-    (should (string-match-p "\\`### +`common/`"
+    (should (string-match-p "\\`### +common/"
                             (agent-river--map-line 3 "common/" nil)))))
 
-(ert-deftest agent-river-test-a-filename-is-not-eaten-by-markup ()
-  ;; Bare in Markdown, `foo_bar_baz.el' renders with `bar' in italics and
-  ;; the underscores gone -- a filename the view would be lying about.  A
-  ;; code span is both what a path is for and where inline markup stops.
-  (should (string-match-p "`foo_bar_baz\\.el`"
-                          (agent-river--map-line 'leaf "foo_bar_baz.el" nil))))
+(ert-deftest agent-river-test-a-filename-keeps-every-character-it-has ()
+  ;; This was a code span, against a reading of Markdown that does not hold
+  ;; here twice over.  The grammar is CommonMark, where an underscore inside
+  ;; a word opens no emphasis at all; and `markdown-ts-hide-markup' is nil in
+  ;; this buffer -- the marker is the indentation -- so even a name that does
+  ;; open some markup keeps every character on screen.  What the fence cost
+  ;; was two backticks around every name in the view.
+  (let ((line (agent-river--map-line 'leaf "foo_bar_baz.el" nil)))
+    (should (string-match-p "foo_bar_baz\\.el" line))
+    (should-not (string-match-p "`" line))))
 
 (ert-deftest agent-river-test-map-faces-ride-on-their-own-property ()
   (let* ((parties '((:party "alpha" :touches 9)))
@@ -4408,8 +4412,10 @@ the text -- which is all the motion reads -- is the same either way."
                    "inc:INC-1"))
     ;; And point is on the name, not in column zero: column zero is the
     ;; Markdown marker, and a cursor on `#' reads as though the markup were
-    ;; the content.  The name is what the record is called, not its key.
-    (should (eq (char-before) ?`))
+    ;; the content.  It lands there by the property the name carries, which
+    ;; is the only thing on the line that can say where a name begins.  The
+    ;; name is what the record is called, not its key.
+    (should (get-text-property (point) 'agent-river-map-point))
     (should (looking-at-p "Disk full"))))
 
 (ert-deftest agent-river-test-map-motion-walks-every-entry ()
@@ -4474,6 +4480,13 @@ the text -- which is all the motion reads -- is the same either way."
   ;; opening it is the consent, and killing it is the retirement.
   (should-not (memq #'agent-river--map-observe agent-river-observers))
   (should-not (get-buffer agent-river-map-buffer-name)))
+
+;;; Artifacts -- the second subject
+;;
+;; What the table has to be true of before any view reads it.  The rule these
+;; circle is the same one: a fact about the artifact belongs here, a fact about
+;; a session reaching it stays in the session, and neither is allowed to become
+;; a second account of the other.
 
 (defmacro agent-river-test--with-artifacts (&rest body)
   "Run BODY with empty registries, empty observer lists and an empty HUD."
@@ -4576,8 +4589,8 @@ the text -- which is all the motion reads -- is the same either way."
     (agent-river-reach "inc:INC-444" "s1")
     (agent-river-reach "inc:INC-444" "s2" t)
     (let ((hits (agent-river-reaching "inc:INC-444" 'session)))
-      ;; Two agents on one incident is the case worth seeing, and it is the
-      ;; same reading `agent-river-touching' gives one subject over.
+      ;; Two agents on one incident is the case worth seeing, and this is
+      ;; the only query left that answers it.
       (should (= (length hits) 2))
       (should (= (plist-get (cdr (assoc "s2" hits)) :writes) 1))
       (should (zerop (plist-get (cdr (assoc "s1" hits)) :writes))))
@@ -4945,8 +4958,11 @@ it clears them."
       ;; new source.  The heading is the domain as declared -- the prefix on
       ;; every key in the section -- and not a capitalisation of it, which
       ;; made `pr' into `Pr'.
-      (should (let ((case-fold-search nil)) (string-match-p "`inc`" map)))
-      (should-not (let ((case-fold-search nil)) (string-match-p "Inc`" map)))
+      ;; Names are drawn bare, so it is the word itself -- on the header,
+      ;; since one domain needs no section heading under a header that
+      ;; already names it.
+      (should (let ((case-fold-search nil)) (string-match-p "^# +inc " map)))
+      (should-not (let ((case-fold-search nil)) (string-match-p "Inc" map)))
       (should (string-match-p "INC-444 disk full" map)))))
 
 (ert-deftest agent-river-test-an-unreached-artifact-is-still-listed ()
@@ -5452,26 +5468,35 @@ line two" "safe tail"))))
                                    'agent-river-map-path))
         (goto-char (point-min))
         (should-not (re-search-forward "^## injected" nil t))
-        ;; And the name cannot close the span it is sitting in: the backtick
-        ;; in it ended the code span, which italicised the rest of the line.
+        ;; And the name arrives whole, character for character.  It is drawn
+        ;; bare now, which costs nothing here: `markdown-ts-hide-markup' is
+        ;; nil in this buffer, so the emphasis the asterisks open puts a face
+        ;; on the title and cannot take a character out of it.
         (goto-char (point-min))
-        (should (search-forward "`` Fix `foo` in *bar* ## injected ``" nil t))))))
+        (should (search-forward "Fix `foo` in *bar* ## injected" nil t))))))
 
-(ert-deftest agent-river-test-a-name-is-fenced-long-enough-to-hold-it ()
-  ;; The map is Markdown on the condition that every token in it is ours, and
-  ;; a record's name is the first one that is not.  Same answer the export
-  ;; already takes for the two values the agent wrote.
-  (should (equal (agent-river--map-name "a`b") "`` a`b ``"))
-  (should (equal (agent-river--map-name "one\ntwo") "`one two`")))
+(ert-deftest agent-river-test-a-name-is-drawn-bare-and-on-one-line ()
+  ;; The fence put two backticks on screen around every name in the view, and
+  ;; bought nothing this buffer needed: `markdown-ts-hide-markup' is nil here,
+  ;; so inline markup can only colour a name, never eat a character of one.
+  ;; What is still owed is the one line, which is what keeps a record's title
+  ;; from making a second, propertyless entry.
+  (should (equal (substring-no-properties (agent-river--map-name "a`b")) "a`b"))
+  (should (equal (substring-no-properties (agent-river--map-name "one\ntwo"))
+                 "one two"))
+  ;; And it says where the name starts, which is the whole of what the motion
+  ;; below has to go on.
+  (should (get-text-property 0 'agent-river-map-point (agent-river--map-name "a.el"))))
 
-(ert-deftest agent-river-test-point-lands-past-the-whole-fence ()
+(ert-deftest agent-river-test-point-lands-on-a-name-that-reads-like-a-prefix ()
   (with-temp-buffer
-    (insert "##    " (agent-river--map-name "a`b") "\n")
+    ;; A name beginning with a dash is indistinguishable from the marker and
+    ;; the gutter to anything reading the rendered text, which is why the name
+    ;; is found by its property instead.
+    (insert "##    " (agent-river--map-name "-dash.el") "\n")
     (goto-char (point-min))
     (agent-river--map-beginning-of-name)
-    ;; Point lands on the name, never on markup -- and the first backtick is
-    ;; markup in exactly the case the longer fence exists for.
-    (should (looking-at-p "a`b"))))
+    (should (looking-at-p "-dash\\.el"))))
 
 ;;; The cost of a redraw
 ;;
@@ -5483,9 +5508,9 @@ line two" "safe tail"))))
 
 (ert-deftest agent-river-test-a-hand-built-entry-still-resolves ()
   (agent-river-test--with-artifacts
-    ;; `agent-river--artifact-gone-p' and `agent-river--rows-step' build an
-    ;; entry by hand and carry no cached answer.  They must go on working, or
-    ;; the cache has quietly become mandatory.
+    ;; `agent-river--artifact-gone-p' builds an entry by hand and carries no
+    ;; cached answer.  It must go on working, or the cache the walk used to
+    ;; keep has quietly become mandatory.
     (should (equal (agent-river--artifact-absolute '(:cwd "/repo" :file "a.el"))
                    "/repo/a.el"))))
 

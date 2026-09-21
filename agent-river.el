@@ -6978,29 +6978,38 @@ for a line that differs from the ones around it."
   (if face (propertize text 'agent-river-map-face face) text))
 
 (defun agent-river--map-name (name)
-  "Return NAME as a Markdown code span, fenced and on one line.
+  "Return NAME as one line of the map, marked as the name on that line.
 
-Backticks rather than bare text, for two reasons that happen to agree: a
-path is what a code span is for, and inline markup does not apply inside
-one -- without it `foo_bar_baz.el' renders with `bar' in italics and half
-the underscores eaten, which is a filename the view would be lying about.
+Bare text, where this was a measured code span
+\(`agent-river--md-code') for as long as the fence was thought to be what
+kept a name readable.  Measured again against the grammar this buffer
+actually has, it was not: `markdown-ts-hide-markup' is nil here -- the
+marker is the indentation, so nothing in this buffer is ever hidden --
+and with nothing hidden, inline markup can only put a face on a name.  It
+cannot eat a character of one.  The italics the fence was written against
+never happened either: tree-sitter reads CommonMark, where an underscore
+inside a word opens nothing, so `foo_bar_baz.el' draws plain without any
+help from us.  What the fence did do was put two backticks on screen
+around every name in the view, which is the one thing here nobody asked
+for.
 
-Which holds only for as long as the name cannot close the span it is
-sitting in, and a name stopped being ours the moment a record could carry
-one: `agent-river-artifact-name' is a ticket title from whatever declared
-it, and `Fix \\=`foo\\=` in *bar*' ended the span at its first backtick and
-italicised the rest of the line.  So the fence is measured
-\(`agent-river--md-code', the same answer the export already takes) and
-the text is held to one line (`agent-river--map-one-line', the same rule
-a contributed row already owes) -- a newline here did not make two lines,
-it made one entry and one stray, and the stray carried none of the
-properties the motions and `agent-river--map-here' read.
+So what is left to prevent is structural, and the marker already prevents
+it: a name never starts a line, so no name can become a heading, a rule or
+a setext underline whatever it holds.  `## injected' in a record title
+lands mid-line and stays text.  What that argument rests on is the line
+staying one line (`agent-river--map-one-line', the same rule a contributed
+row owes) -- a newline made one entry and one stray, and the stray carried
+none of the properties the motions and `agent-river--map-here' read.
 
-A path with a backtick in it is rare and was always possible; it gets the
-same treatment for free, which is the reason this is fixed in the one
-place every name goes through rather than beside the record that made it
-likely."
-  (agent-river--md-code (agent-river--map-one-line name)))
+The `agent-river-map-point' property is what
+`agent-river--map-beginning-of-name' lands on, and it is a property rather
+than a search for the marker because this view reads what a line is off
+its properties and never off its text: the prefix is a Markdown marker
+followed by a gutter of glyphs the user can set, and a name may itself
+begin with a dash or a hash.  Its own property rather than the line's
+`agent-river-map-name', which carries the node's name across the whole
+line and so cannot say where on that line the name begins."
+  (propertize (agent-river--map-one-line name) 'agent-river-map-point t))
 
 (defcustom agent-river-map-detail-rows nil
   "How many contributed rows a node shows before the rest are elided.
@@ -7200,9 +7209,9 @@ that is scannable down the listing; the row adds what only makes sense
 once you are looking at this one node -- whose touches they were, how long
 ago, and how many of them changed the file rather than read it.
 
-Ordered by the parties themselves, which `agent-river--map-reach\=' has
-already sorted heaviest first, so the row order is the same reading the
-line is ordered by and cannot contradict it."
+Ordered by the parties themselves, which `agent-river--domain-parties\='
+has already sorted heaviest first, so the row order is the same reading
+the line is ordered by and cannot contradict it."
   (let ((table (make-hash-table :test 'equal)))
     (dolist (node nodes)
       (let* ((parties (plist-get node :parties))
@@ -7626,20 +7635,26 @@ them."
 (defun agent-river--map-beginning-of-name ()
   "Put point on the first character of the name on this line.
 
-The names are code spans, so the backtick finds them.  A contributed row
-has no code span -- its text is prose the map escaped -- so the marker is
-stepped over instead; landing in column zero would put the cursor on the
-Markdown marker, which reads as though the markup were the content.
+The name carries `agent-river-map-point' (`agent-river--map-name'), which
+is what is looked for -- the rule this view already lives by one grain up,
+where which lines a motion may stop on is read off properties and never
+off the rendered text.  Searching the text instead would have to know the
+prefix, and the prefix is a Markdown marker followed by a gutter of glyphs
+the user can set; worse, it would have no way to tell a gutter dash from a
+name that begins with one.
 
-The whole fence, not one backtick of it.  A name holding a backtick is
-fenced with several and written with a space inside them
-\(`agent-river--md-code'), so stopping at the first one left point on
-markup in exactly the case the fence exists for.
+A contributed row has no name -- its text is prose the map escaped -- so
+there the marker is stepped over instead; landing in column zero would put
+the cursor on the Markdown marker, which reads as though the markup were
+the content.
 
 Falls back to the start of the line, so this is safe to call anywhere."
   (goto-char (line-beginning-position))
-  (or (re-search-forward "`+ ?" (line-end-position) t)
-      (re-search-forward "^[-# ]+" (line-end-position) t)))
+  (let* ((end (line-end-position))
+         (name (text-property-any (point) end 'agent-river-map-point t)))
+    (if name
+        (progn (goto-char name) t)
+      (re-search-forward "^[-# ]+" end t))))
 
 (defun agent-river--map-scan (count test)
   "Move to the COUNTth line satisfying TEST, forward when COUNT is positive.

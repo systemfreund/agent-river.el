@@ -156,8 +156,8 @@ function. Elsewhere it asks which session, and never guesses.
 The `:context` is opaque — this package never reads a value out of it, which is
 what lets a record carry a severity, a body and a URL without agent-river having
 to learn about any of them. It renders as rows under the line. Text you pass in
-is yours and is treated as such: a `:name` or a `:text` is fenced, flattened to
-one line and clipped before it reaches a buffer, and the `:context` you get back
+is yours and is treated as such: a `:name` or a `:text` is flattened to one
+line and clipped before it reaches a buffer, and the `:context` you get back
 from `agent-river-artifacts-list` is a copy, so a reading you took stays the
 reading you took.
 
