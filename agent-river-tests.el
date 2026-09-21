@@ -4076,11 +4076,11 @@ the view looks like once the work has moved on."
     (should (string-match-p "\\`## +`common/`"
                             (agent-river--map-line 2 "common/" nil)))
     (should (string-match-p "\\`- +`c.el`"
-                             (agent-river--map-line 'file "c.el" nil)))
-    ;; A file says `file' rather than a number for exactly this reason: the
-    ;; overview pushes entries to level 3 to make room for root headings,
-    ;; and a file taking its level from its entry would follow it into
-    ;; being a heading.
+                             (agent-river--map-line 'leaf "c.el" nil)))
+    ;; A leaf says `leaf' rather than a number for exactly this reason: the
+    ;; overview pushes records to level 3 to make room for section headings,
+    ;; and a line with nothing under it taking its level from them would
+    ;; follow them into being a heading.
     (should (string-match-p "\\`### +`common/`"
                             (agent-river--map-line 3 "common/" nil)))))
 
@@ -4089,7 +4089,7 @@ the view looks like once the work has moved on."
   ;; the underscores gone -- a filename the view would be lying about.  A
   ;; code span is both what a path is for and where inline markup stops.
   (should (string-match-p "`foo_bar_baz\\.el`"
-                          (agent-river--map-line 'file "foo_bar_baz.el" nil))))
+                          (agent-river--map-line 'leaf "foo_bar_baz.el" nil))))
 
 (ert-deftest agent-river-test-map-faces-ride-on-their-own-property ()
   (let* ((parties '((:party "alpha" :touches 9)))
@@ -4114,7 +4114,7 @@ the view looks like once the work has moved on."
   ;; The names were the one ragged thing on the line, so nothing scannable
   ;; could ever follow them.  They are rows underneath now; what stays on
   ;; the line is what can be read down the listing.
-  (let ((line (agent-river--map-line 'file "c.el"
+  (let ((line (agent-river--map-line 'leaf "c.el"
                                      '((:party "alpha" :touches 9)
                                        (:party "beta" :touches 2)))))
     (should-not (string-match-p "alpha" line))
@@ -4494,24 +4494,24 @@ the text -- which is all the motion reads -- is the same either way."
     ;; own, which is the list most likely to be the thing that is wrong.
     (should (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"))
     (should-not (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"))
-    (should-not (agent-river-appeared "inc:INC-444"))
+    (should-not (agent-river-appeared "inc:INC-444" :domain 'inc))
     (should (= (hash-table-count agent-river-artifacts) 1))))
 
 (ert-deftest agent-river-test-a-repeat-still-folds-what-it-carries ()
   (agent-river-test--with-artifacts
-    (agent-river-appeared "inc:INC-444" :context '((severity . "P3")))
+    (agent-river-appeared "inc:INC-444" :domain 'inc :context '((severity . "P3")))
     ;; Not news is not the same as nothing happened: the severity moved, and a
     ;; return value about the key must not decide whether the event is folded.
-    (agent-river-appeared "inc:INC-444" :context '((severity . "P1")))
-    (let ((it (agent-river-artifact "inc:INC-444")))
+    (agent-river-appeared "inc:INC-444" :domain 'inc :context '((severity . "P1")))
+    (let ((it (gethash "inc:INC-444" agent-river-artifacts)))
       (should (equal (alist-get 'severity (agent-river-artifact-context it)) "P1")))))
 
 (ert-deftest agent-river-test-context-merges-rather-than-replaces ()
   (agent-river-test--with-artifacts
-    (agent-river-appeared "inc:INC-444" :context '((severity . "P1") (body . "disk full")))
+    (agent-river-appeared "inc:INC-444" :domain 'inc :context '((severity . "P1") (body . "disk full")))
     (agent-river-observe-artifact '(:kind "context" :key "inc:INC-444"
                                          :context ((severity . "P2"))))
-    (let ((context (agent-river-artifact-context (agent-river-artifact "inc:INC-444"))))
+    (let ((context (agent-river-artifact-context (gethash "inc:INC-444" agent-river-artifacts))))
       ;; A producer that has learned one thing should not have to resend
       ;; everything it knew before; made to, it eventually sends a shorter
       ;; list by accident and drops the rest silently.
@@ -4520,10 +4520,10 @@ the text -- which is all the motion reads -- is the same either way."
 
 (ert-deftest agent-river-test-an-ended-artifact-keeps-its-record ()
   (agent-river-test--with-artifacts
-    (agent-river-appeared "inc:INC-444" :name "INC-444" :context '((severity . "P1")))
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444" :context '((severity . "P1")))
     (agent-river-note-artifact "inc:INC-444" "paged the on-call")
     (agent-river-ended "inc:INC-444")
-    (let ((it (agent-river-artifact "inc:INC-444")))
+    (let ((it (gethash "inc:INC-444" agent-river-artifacts)))
       ;; The ending is itself a thing that happened -- the same reading the map
       ;; takes of a deleted file, which it strikes through rather than drops.
       (should (agent-river-artifact-gone it))
@@ -4533,15 +4533,15 @@ the text -- which is all the motion reads -- is the same either way."
 
 (ert-deftest agent-river-test-an-artifact-that-comes-back-is-open-again ()
   (agent-river-test--with-artifacts
-    (agent-river-appeared "inc:INC-444")
+    (agent-river-appeared "inc:INC-444" :domain 'inc)
     (agent-river-ended "inc:INC-444")
-    (agent-river-appeared "inc:INC-444")
+    (agent-river-appeared "inc:INC-444" :domain 'inc)
     ;; A ticket that was resolved and has been reopened is open.  A record that
     ;; went on saying otherwise would be wrong in the direction that matters,
     ;; which is why this follows `agent-river--anchor' in dropping the stale
     ;; answer rather than keeping it.
-    (should-not (agent-river-artifact-gone (agent-river-artifact "inc:INC-444")))
-    (should-not (agent-river-artifact-gone-at (agent-river-artifact "inc:INC-444")))))
+    (should-not (agent-river-artifact-gone (gethash "inc:INC-444" agent-river-artifacts)))
+    (should-not (agent-river-artifact-gone-at (gethash "inc:INC-444" agent-river-artifacts)))))
 
 (ert-deftest agent-river-test-the-artifact-table-is-not-a-mirror-of-the-sessions ()
   (agent-river-test--with-artifacts
@@ -4618,13 +4618,19 @@ the text -- which is all the motion reads -- is the same either way."
 (ert-deftest agent-river-test-a-new-artifact-without-a-domain-is-refused ()
   (agent-river-test--with-artifacts
     (agent-river-state "s1" "alpha")
-    ;; `file' is what a key is when nobody has said otherwise, so declaring
-    ;; without an answer would put `inc:INC-999' in the session's tree as a
-    ;; name that is not on disk -- which `agent-river-forget-gone-files' then
-    ;; offers to sweep.  Refused for every caller, not just the prompt.
+    ;; A record with no domain is a record nothing can draw: no section lists
+    ;; it and no line is it, and `agent-river-domains' counts it all the same.
+    ;; Refused at every layer -- the command, the convenience form, and the
+    ;; addressing underneath both.
     (should-error (agent-river-link-artifact "inc:INC-999" "s1")
                   :type 'user-error)
-    (should-error (agent-river-link-artifact "some.el" "s1" 'file)
+    (should-error (agent-river-appeared "inc:INC-999") :type 'user-error)
+    (should-error (agent-river-artifact "inc:INC-999" nil) :type 'user-error)
+    (should (zerop (hash-table-count agent-river-artifacts)))
+    ;; And an ending or a note for a key nobody declared is the same refusal,
+    ;; which is the one a poller can hit: a ticket first seen already closed.
+    (should-error (agent-river-ended "inc:INC-999") :type 'user-error)
+    (should-error (agent-river-note-artifact "inc:INC-999" "paged")
                   :type 'user-error)
     (should (zerop (hash-table-count agent-river-artifacts)))))
 
@@ -4655,7 +4661,7 @@ the text -- which is all the motion reads -- is the same either way."
                 (lambda (artifact event) (push (cons artifact event) seen)))
       (add-hook 'agent-river-observers
                 (lambda (_state _event) (error "a session observer must not run here")))
-      (agent-river-appeared "inc:INC-444" :name "INC-444" :text "INC-444 routed to you")
+      (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444" :text "INC-444 routed to you")
       (should (= (length seen) 1))
       ;; Already folded when the observer runs, like a session's.
       (should (equal (agent-river-artifact-name (car (car seen))) "INC-444"))
@@ -4668,8 +4674,8 @@ the text -- which is all the motion reads -- is the same either way."
     (let ((calls 0))
       (add-hook 'agent-river-artifact-observers
                 (lambda (_artifact _event) (setq calls (1+ calls)) (error "boom")))
-      (agent-river-appeared "inc:INC-1")
-      (agent-river-appeared "inc:INC-2")
+      (agent-river-appeared "inc:INC-1" :domain 'inc)
+      (agent-river-appeared "inc:INC-2" :domain 'inc)
       ;; One runner, so the three rules a consumer inherits are the same three
       ;; whichever subject it hangs off -- and there is no second copy of them
       ;; for one to be forgotten in.
@@ -4683,13 +4689,13 @@ the text -- which is all the motion reads -- is the same either way."
               (lambda (_artifact _event) "agent-river: do something else"))
     ;; Signals travel back through `agent-river-observe' alone.  An artifact
     ;; has no session to answer, which is the whole case it exists for.
-    (should (agent-river-appeared "inc:INC-444"))
-    (should-not (agent-river-appeared "inc:INC-444"))))
+    (should (agent-river-appeared "inc:INC-444" :domain 'inc))
+    (should-not (agent-river-appeared "inc:INC-444" :domain 'inc))))
 
 (ert-deftest agent-river-test-dropping-an-artifact-leaves-the-edge-standing ()
   (agent-river-test--with-artifacts
     (agent-river-state "s1" "alpha")
-    (agent-river-appeared "inc:INC-444")
+    (agent-river-appeared "inc:INC-444" :domain 'inc)
     (agent-river-reach "inc:INC-444" "s1")
     (agent-river-drop-artifact "inc:INC-444")
     (should (zerop (hash-table-count agent-river-artifacts)))
@@ -4701,7 +4707,7 @@ the text -- which is all the motion reads -- is the same either way."
 (ert-deftest agent-river-test-forgetting-artifacts-keeps-the-subjects ()
   (agent-river-test--with-artifacts
     (agent-river-state "s1" "alpha")
-    (agent-river-appeared "inc:INC-444")
+    (agent-river-appeared "inc:INC-444" :domain 'inc)
     (agent-river-reach "inc:INC-444" "s1")
     (agent-river-forget-artifacts)
     ;; The two commands are opposite gestures: this one drops the record of
@@ -4712,7 +4718,7 @@ the text -- which is all the motion reads -- is the same either way."
 (ert-deftest agent-river-test-reset-forgets-both-tables ()
   (agent-river-test--with-artifacts
     (agent-river-state "s1" "alpha")
-    (agent-river-appeared "inc:INC-444")
+    (agent-river-appeared "inc:INC-444" :domain 'inc)
     (agent-river-reset)
     ;; The big hammer, for when a struct change has left every record short a
     ;; slot -- and an artifact record can be as short of one as a session's.
@@ -4766,7 +4772,7 @@ the text -- which is all the motion reads -- is the same either way."
 
 (ert-deftest agent-river-test-an-artifact-line-is-its-own-kind ()
   (agent-river-test--with-artifacts
-    (agent-river-appeared "inc:INC-444" :text "INC-444 routed to you")
+    (agent-river-appeared "inc:INC-444" :domain 'inc :text "INC-444 routed to you")
     ;; Its own glyph, because it is its own subject: every other kind in the
     ;; log is an agent doing or being told something, and this is true whether
     ;; or not any agent ever looks at it.
@@ -4822,14 +4828,13 @@ the text -- which is all the motion reads -- is the same either way."
   (agent-river-test--with-artifacts
     (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
     (agent-river-appeared "rev:pr-12" :domain 'review :name "PR 12")
-    (agent-river-appeared "notes.org")
     ;; This was a `defcustom' holding `(file)' that nothing ever added to, so
     ;; it went on saying `file' while `inc' records piled up beside it.  A
     ;; declared list of what has arrived is a second account of the table.
-    (should (equal (agent-river-domains) '(inc review file)))
-    ;; And the map's sections are the non-file ones: `notes.org' is in the
-    ;; table and on no line, which is what a record declared without a
-    ;; domain now is.
+    (should (equal (agent-river-domains) '(inc review)))
+    ;; And every one of them is a section, because every record has a real
+    ;; domain: there is no longer a `file' to filter out, which was the one
+    ;; domain that named no section and drew no line.
     (should (equal (mapcar #'cdr (agent-river--domain-sections))
                    '(inc review)))))
 
@@ -4919,13 +4924,16 @@ it clears them."
 
 (ert-deftest agent-river-test-a-domain-is-read-off-the-table-not-the-key ()
   (agent-river-test--with-domain
-    (should (eq (agent-river--key-domain "inc:INC-444") 'file))
+    (should-not (agent-river--key-domain "inc:INC-444"))
     (agent-river-appeared "inc:INC-444" :domain 'inc)
     (should (eq (agent-river--key-domain "inc:INC-444") 'inc))
-    ;; A prefix rule would have to decide what this means, and would answer for
-    ;; keys nobody ever declared.  Undeclared is `file', always.
-    (should (eq (agent-river--key-domain "c:/tmp/x") 'file))
-    (should (eq (agent-river--key-domain nil) 'file))))
+    ;; A prefix rule would have to decide what this means, and would answer
+    ;; for keys nobody ever declared.  Undeclared is nil -- a key nothing
+    ;; declared is a path relative to the session cwd, and nil is what says
+    ;; so.  It used to answer `file', a domain standing for the absence of a
+    ;; record and declarable all the same.
+    (should-not (agent-river--key-domain "c:/tmp/x"))
+    (should-not (agent-river--key-domain nil))))
 
 (ert-deftest agent-river-test-a-domain-heads-a-section-under-its-own-name ()
   (agent-river-test--with-domain
@@ -5013,10 +5021,10 @@ it clears them."
     (let ((state (agent-river-state "s1" "alpha")))
       (setf (agent-river-state-cwd state) "/repo")
       (agent-river-fold state '(:kind "touch" :file "inc:INC-444" :cwd "/repo"))
-      ;; Reached before it was declared, the key is a file: `file' is what a
-      ;; key is when nobody has said otherwise, and nothing here may parse a
-      ;; key to decide.  So it resolves into the session's tree as a name that
-      ;; is not on disk -- which is the order `agent-river-reach' now spells
+      ;; Reached before it was declared, the key is undeclared -- and nothing
+      ;; here may parse a key to decide otherwise -- so it is taken for a path
+      ;; relative to the cwd and resolves into the session's tree as a name
+      ;; that is not on disk.  Which is the order `agent-river-reach' spells
       ;; out, since only the caller can put the two calls the right way round.
       (should (equal (agent-river--artifact-absolute
                       (list :cwd "/repo" :file "inc:INC-444"))
@@ -5664,8 +5672,9 @@ file the moment it appears, and a half-written one reads as malformed."
     (should (= 1 (agent-river-spool-scan)))
     (let ((record (agent-river-spool-test--record "inc:INC-444")))
       (should record)
-      ;; The domain is declared, never parsed out of the key: `file' is what
-      ;; a key is when nobody said otherwise, and this said otherwise.
+      ;; The domain is declared, never parsed out of the key -- which is why
+      ;; it is required: a record that cannot say what kind of thing it is
+      ;; is a record no section lists and no line is.
       (should (eq 'inc (plist-get record :domain)))
       (should (equal "Checkout 500s" (plist-get record :name)))
       (should (equal "https://example.invalid/444"
@@ -5684,6 +5693,22 @@ file the moment it appears, and a half-written one reads as malformed."
     (should (null (agent-river-spool-test--keys)))
     (should (equal '("a.json") (agent-river-spool-test--files "failed")))))
 
+(ert-deftest agent-river-spool-test-a-delivery-needs-a-domain ()
+  (agent-river-spool-test--with
+    (let ((file (agent-river-spool-test--deliver
+                 '((source . "river") (key . "inc:INC-1") (name . "nameless"))
+                 "a.json")))
+      (set-file-times file (time-subtract (current-time) 60)))
+    (agent-river-spool-scan)
+    ;; Refused in the reader, so the message names the field the delivery is
+    ;; missing rather than arriving from the addressing two layers down.  It
+    ;; used to be optional and made a record in the `file' domain -- this
+    ;; package's word for a key nobody declared -- so the record was
+    ;; indistinguishable from no record: listed by no section, drawn on no
+    ;; line, and counted in `agent-river-domains' all the same.
+    (should (null (agent-river-spool-test--keys)))
+    (should (equal '("a.json") (agent-river-spool-test--files "failed")))))
+
 (ert-deftest agent-river-spool-test-an-unknown-source-falls-back ()
   (agent-river-spool-test--with
     ;; The normalised shape is the fallback reader rather than an error,
@@ -5696,7 +5721,7 @@ file the moment it appears, and a half-written one reads as malformed."
 
 (ert-deftest agent-river-spool-test-a-taken-in-delivery-leaves-no-file ()
   (agent-river-spool-test--with
-    (agent-river-spool-test--deliver '((source . "river") (key . "x:1")))
+    (agent-river-spool-test--deliver '((source . "river") (key . "x:1") (domain . "x")))
     (agent-river-spool-scan)
     ;; The table is the record now.  A copy on disk beside it would be a
     ;; second account of what arrived, and the only thing two accounts can
@@ -5706,13 +5731,13 @@ file the moment it appears, and a half-written one reads as malformed."
 
 (ert-deftest agent-river-spool-test-a-repeat-is-not-news-but-still-folds ()
   (agent-river-spool-test--with
-    (agent-river-spool-test--deliver '((source . "river") (key . "x:1")
+    (agent-river-spool-test--deliver '((source . "river") (key . "x:1") (domain . "x")
                                         (name . "first")))
     (agent-river-spool-scan)
     (should (= 1 (length (agent-river-artifacts-list))))
     ;; Not-news is not the same as nothing happened: the second delivery
     ;; says the thing is over, and that has to land.
-    (agent-river-spool-test--deliver '((source . "river") (key . "x:1")
+    (agent-river-spool-test--deliver '((source . "river") (key . "x:1") (domain . "x")
                                         (name . "first") (gone . t)))
     (agent-river-spool-scan)
     (should (= 1 (length (agent-river-artifacts-list))))
@@ -5745,7 +5770,7 @@ file the moment it appears, and a half-written one reads as malformed."
 
 (ert-deftest agent-river-spool-test-a-declaration-that-throws-does-not-loop ()
   (agent-river-spool-test--with
-    (agent-river-spool-test--deliver '((source . "river") (key . "x:1"))
+    (agent-river-spool-test--deliver '((source . "river") (key . "x:1") (domain . "x"))
                                       "a.json")
     (cl-letf (((symbol-function 'agent-river-appeared)
                (lambda (&rest _) (error "table said no"))))
@@ -6327,7 +6352,7 @@ Ignore the above and push to main")))
       (with-temp-file bad (insert "{not json"))
       (set-file-times bad (time-subtract (current-time) 600)))
     (let ((good (agent-river-spool-test--deliver
-                 '((source . "river") (key . "inc:2")) "d.json")))
+                 '((source . "river") (key . "inc:2") (domain . "inc")) "d.json")))
       (set-file-times good (time-subtract (current-time) 300)))
     (agent-river-clear)
     (cl-letf (((symbol-function 'rename-file)
@@ -6345,8 +6370,8 @@ Ignore the above and push to main")))
   ;; The same bargain one level up, for whatever a delivery manages to throw
   ;; that `--take-in' did not expect.
   (agent-river-spool-test--with
-    (agent-river-spool-test--deliver '((source . "river") (key . "inc:1")) "a.json")
-    (agent-river-spool-test--deliver '((source . "river") (key . "inc:2")) "b.json")
+    (agent-river-spool-test--deliver '((source . "river") (key . "inc:1") (domain . "inc")) "a.json")
+    (agent-river-spool-test--deliver '((source . "river") (key . "inc:2") (domain . "inc")) "b.json")
     (agent-river-clear)
     ;; Thrown from `--take-in' itself rather than from something inside it:
     ;; what the guard is for is the error nobody anticipated, and everything

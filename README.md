@@ -138,13 +138,12 @@ Three calls put it there:
 (agent-river-ended "inc:INC-444")
 ```
 
-**Declare before you reach.** A domain is read off the artifact table and
-`file` is what a key is when nobody has said otherwise, so a key reached before
-its record exists *is* a file: `inc:INC-444` resolves against the session's cwd
-as a name that is not on disk, which `agent-river-forget-gone-files` will then
-offer to sweep — and it gets no line on the map, since the map lists records
-and it has none yet. Declaring later
-repairs it — the domain is read at every draw — but the order to write is
+**Declare before you reach.** A domain is read off the artifact table, so a key
+reached before its record exists is *undeclared* — and undeclared is a path:
+`inc:INC-444` resolves against the session's cwd as a name that is not on disk,
+which `agent-river-forget-gone-files` will then offer to sweep, and it gets no
+line on the map, since the map lists records and it has none yet. Declaring
+later repairs it — the domain is read at every draw — but the order to write is
 `appeared`, then `reach`.
 
 By hand, those two are one command: **`M-x agent-river-link-artifact`**. Run in
@@ -172,13 +171,18 @@ table is **not a mirror**: a file an agent touched needs no record there,
 because the session's table already says everything true of it. In practice the
 artifact table holds tens of records where the session tables hold thousands.
 
-**A key belongs to a domain, and `file` is what it is when nobody said
-otherwise.** A file key is placed by resolving it against the session's working
-directory; a declared key has no such answer, and resolving `inc:INC-444`
+**A key is either declared or it is a path — there is no third thing.** An
+undeclared key is placed by resolving it against the session's working
+directory; a declared one has no such answer, and resolving `inc:INC-444`
 against a cwd would produce `/repo/inc:INC-444` — a file in a tree it has
-nothing to do with, which every view would then draw, shade and eventually
-offer to delete as missing. The domain is read off the artifact table, never
-parsed out of the key, so a key nobody declared is a file and stays one.
+nothing to do with, which would then be drawn and eventually offered for
+deletion as missing. The domain is read off the artifact table, never parsed
+out of the key, and `agent-river--key-domain` answers **nil** for a key nobody
+declared. There was a `file` domain standing for that case, and it could itself
+be declared — at which point a record meant exactly what no record meant:
+invisible on the map and counted in `agent-river-domains` all the same. **A
+record now requires a domain**, and `agent-river-artifact` refuses to create one
+without it.
 
 ---
 
@@ -803,7 +807,7 @@ On the Emacs side, once: `(agent-river-spool-mode 1)`.
 |---|---|---|
 | `source` | **required** | which reader to use. `river` is this shape, and an unknown name falls back to it |
 | `key` | **required** | the identity. Put the domain in it (`inc:INC-444`), or two producers numbering from 1 will collide |
-| `domain` | | what kind of thing this is; heads its own section of the map. **Leave it out and the key is taken for a file name** |
+| `domain` | **required** | what kind of thing this is; heads its own section of the map. A delivery without one goes to `failed/`: nothing could say what it is carrying |
 | `name` | | what a person sees on the line. Defaults to the key |
 | `context` | | an object, carried and never read by agent-river. Drawn as rows under the line |
 | `gone` | | `true` when the thing is over: the line is struck through, not removed |

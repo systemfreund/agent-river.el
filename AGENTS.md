@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (392 tests). -L . is required: the tests require all four .el files.
+# Full suite (393 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -344,13 +344,13 @@ These are load-bearing; the tests enforce most of them.
   whoever calls it performed the dispatch and is reporting it -- the same
   standing any measurement made outside the hook stream has.
 - **Declaring comes before reaching, and only the caller can get that
-  right.** The domain is read off the table and `file` is what a key is when
-  nobody has said otherwise, so a key reached before its record exists *is*
-  a file: `inc:INC-444` resolves into the session's tree as a name that is
-  not on disk, which `agent-river-forget-gone-files` then offers to sweep --
-  the mistake below, reached by doing the two calls in the wrong order. Not
+  right.** The domain is read off the table, so a key reached before its
+  record exists is *undeclared* -- and undeclared is a path: `inc:INC-444`
+  resolves into the session's tree as a name that is not on disk, which
+  `agent-river-forget-gone-files` then offers to sweep -- the mistake below,
+  reached by doing the two calls in the wrong order. Not
   closed in code, and the alternatives are written down rather than merely
-  rejected. Declaring from `agent-river-reach` would give a *file* reached
+  rejected. Declaring from `agent-river-reach` would give a file reached
   that way a record saying nothing the session tables do not already say
   (the table is not a mirror) and would make two calls that declare a
   domain; a domain argument on the reach is the same duplication with a
@@ -362,11 +362,21 @@ These are load-bearing; the tests enforce most of them.
   is the one caller that *cannot* get it wrong, and not because it is
   careful: both halves are one function, so there is no order left for a
   caller to choose.
-- **A key belongs to a domain, read off the table and never parsed out of the
-  key** (`agent-river--key-domain`). `file` is what a key is when nobody said
-  otherwise. A prefix rule would have to decide what `c:/tmp/x` means and
-  would answer for keys nobody ever declared.
-  `agent-river--artifact-absolute` therefore answers **nil** for a non-file key,
+- **A key is either declared or it is a path, and which is read off the table
+  rather than parsed out of the key** (`agent-river--key-domain`, which
+  answers the domain or **nil**). A prefix rule would have to decide what
+  `c:/tmp/x` means and would answer for keys nobody ever declared. There was
+  a third state until recently: `file`, a domain standing for "nobody
+  declared this", which could itself be declared -- at which point a record
+  meant exactly what no record meant, listed by no section and drawn on no
+  line while `agent-river-domains` counted it. Two live ways in, and the
+  second is the one a poller hits: `agent-river-appeared` without a
+  `:domain`, and an `ended` or a note for a key nobody had declared, which is
+  what a first sighting of an already-closed ticket produces. **A record
+  requires a domain now** (`agent-river-artifact` signals, and only where it
+  would have to create one, so `ended` and `note` go on working for a key
+  that is already there).
+  `agent-river--artifact-absolute` answers **nil** for a declared key,
   which is what every existing caller already does the right thing with:
   resolved against a cwd, `inc:INC-444` became `/repo/inc:INC-444`, a file in
   a tree it has nothing to do with, which every view would then draw, shade
@@ -374,12 +384,12 @@ These are load-bearing; the tests enforce most of them.
   to stop, one domain over. There was a second reading beside it once,
   `agent-river--artifact-place` -- "which artifact" where this one says
   "where on disk" -- and it went with the position marker, its last caller:
-  a section listing keys them by the key itself, which is what a non-file
+  a section lists its records by the key itself, which is what a declared
   artifact's name already is. **Which domains are in play is derived too**
-  (`agent-river-domains`, and `agent-river--domain-sections` for the
-  non-file ones the map draws -- there was a third,
-  `agent-river--map-live-domains`, which narrowed one to the other and
-  ended up with no caller at all). It
+  (`agent-river-domains`, and `agent-river--domain-sections` for the roots
+  the map draws -- there was a third, `agent-river--map-live-domains`, which
+  narrowed one to the other and ended up with no caller at all, and the
+  narrowing itself went with the `file` domain there was to narrow away). It
   was a `defcustom` holding `(file)`, documented as the list a reader could
   consult instead of walking the table, and nothing ever added to it -- so
   it went on saying `file` while `inc` records piled up beside it. A
@@ -826,8 +836,10 @@ performed the dispatch, and nothing in this package performs one. A user does.
 - **The domain is asked every time, never defaulted**
   (`agent-river--read-domain`). There is no default right often enough to be
   worth the one time it is not, and the one time it is not is the failure the
-  invariant above describes. `file` is refused for every caller and not only
-  at the prompt, because the table is not a mirror. The candidates come from
+  invariant above describes. An empty answer is refused, which is the same
+  refusal `agent-river-artifact` makes one layer down -- there was a second
+  one here, of the literal domain `file`, and it went with `file` as a
+  hardwired name for the absence of a record. The candidates come from
   `agent-river-domains` -- what the table has. There was a presentational
   list beside it once, `agent-river-map-domains`, and reading *that* would
   have let a view's settings decide what a producer may declare: it would
@@ -895,15 +907,14 @@ are collected (`agent-river--artifact-actions`) and either run or offered
   it down with it, which leaves a line that does nothing and no account of
   why.
 - **The subject carries `:path` beside the key, never inside it**
-  (`agent-river--map-subject`). An artifact record where the table has one,
-  and where it has none the line names a file — `file` is what a key is when
-  nobody said otherwise. What an action needs of a file is the absolute name,
-  and it travels as a separate key for `agent-river--artifact-absolute`'s
-  reason: a key cannot say where it is, and a non-file key resolved against a
-  directory becomes a file in a tree it has nothing to do with. Here the
-  absolute name is what the map already had, so there is nothing to resolve,
-  and it is set only where the name genuinely is absolute — which is never
-  true of a domain key.
+  (`agent-river--map-subject`). The artifact record, which is all a map line
+  ever names: the listing *is* the table. `:path` is set only where the key
+  is itself absolute, which is the producer's doing rather than the map's --
+  a record may be keyed by a path (a log, a report on disk). It travels as a
+  separate key for `agent-river--artifact-absolute`'s
+  reason: a key cannot say where it is, and a declared key resolved against a
+  directory becomes a file in a tree it has nothing to do with. Nothing is
+  resolved here; the name is either already absolute or there is none.
 - **Order is the list's own, and deliberately not a `:rank`.** A contributed
   row has one because which contributor was registered first says nothing
   about which row is worth reading, and every row is on screen at once. A
@@ -1686,7 +1697,7 @@ Four things about the map are load-bearing:
   RET goes on a heading and where `^` comes back from. One domain is drawn
   without a section heading, since the header already names it and repeating
   it would indent the listing to say nothing — which is also why a leaf line
-  passes `file` to `agent-river--map-marker` rather than a number, so that
+  passes `leaf` to `agent-river--map-marker` rather than a number, so that
   pushing records down a level for the section headings cannot push the
   elision and empty-map lines into being headings too.
 - **A section root is an identity, never a path**

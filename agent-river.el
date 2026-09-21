@@ -850,7 +850,7 @@ no view names a file any more.  What still reads a *file* entry is
 `agent-river--hottest' (the report and the fail-streak signal, both of
 which go to the agent rather than to a buffer),
 `agent-river--artifact-list' (the approval queue\'s context line, the name
-alone) and `agent-river--gone-artifacts'.  What reads a non-file key is
+alone) and `agent-river--gone-artifacts'.  What reads a *declared* key is
 the map."
   (when (and path (not (string-empty-p path)))
     (agent-river--touch-1 (agent-river-state-artifacts state) path wrote)
@@ -1199,7 +1199,7 @@ replaying a session's events from the start."
   ;; chose, and it should carry its domain (`inc:INC-444') so that two
   ;; producers cannot collide on a bare number.
   key
-  domain            ; symbol: who understands `key'.  `file' when nobody said
+  domain            ; symbol: who understands `key'.  Required; see the fold
   name              ; what a human calls it; `key' when nothing better was given
   ;; Whatever the producer carried in, an alist, opaque here.  This package
   ;; never reads a value out of it -- it is passed to the views that asked for
@@ -1233,23 +1233,44 @@ Keyed the same way the session tables are, so that a key here and a key
 there are the same artifact and a view can put the two readings together
 without translating between them.")
 
-(defun agent-river-artifact (key &optional domain name)
-  "Return the artifact keyed by KEY, creating it if needed.
+(defun agent-river-artifact (key domain &optional name)
+  "Return the artifact keyed by KEY, creating it with DOMAIN if needed.
 
 DOMAIN and NAME are set once, when the record is created -- an artifact
 does not change what kind of thing it is, and a later event that wants to
 rename it says so through the fold (`name' on an `appear'), where it is
 logged like every other transition.  This is addressing, not folding; it
-writes no slot but the ones a record cannot exist without."
+writes no slot but the ones a record cannot exist without.
+
+DOMAIN is required, and nil is refused **only where a record has to be
+created**: `agent-river-ended' and `agent-river-note-artifact' name no
+domain and must go on working, which they do because by then the key is
+in the table.  Where it is not, the producer has said a thing is over or
+has been noted before saying what it is, and there is nothing to make a
+record out of.
+
+It used to default to `file', and that default was the hole this
+signal closes.  `file' was never a domain in the sense the others are: it
+was `agent-river--key-domain's word for a key the table does *not* have,
+so a record declared into it was a record that existed and was
+indistinguishable from one that did not -- listed by no section, drawn on
+no line, and reported by `agent-river-domains' as a domain that draws
+nothing.  Two live ways in: `agent-river-appeared' called without a
+`:domain', and an `ended' or a note arriving for a key nobody had
+declared, which is what a poller that first sees a ticket already closed
+produces."
   (or (gethash key agent-river-artifacts)
-      (puthash key
-               (agent-river--artifact-create
-                :key key
-                :domain (or domain 'file)
-                :name (or name key)
-                :appeared (current-time)
-                :last (current-time))
-               agent-river-artifacts)))
+      (progn
+        (unless domain
+          (user-error "Artifact %s needs a domain" key))
+        (puthash key
+                 (agent-river--artifact-create
+                  :key key
+                  :domain domain
+                  :name (or name key)
+                  :appeared (current-time)
+                  :last (current-time))
+                 agent-river-artifacts))))
 
 (defun agent-river-artifact-known-p (key)
   "Return non-nil when KEY is already in `agent-river-artifacts'.
@@ -1445,9 +1466,9 @@ polling a queue can therefore act on the return value and keep no
 bookkeeping of its own, which is the bookkeeping most likely to be the
 thing that is wrong.
 
-This is also what says a key is not a file, so for a non-file key it
-comes before `agent-river-reach\=' rather than after it -- see there for
-what a reach on a key nobody has declared is taken for."
+This is what says a key is declared at all, so it comes before
+`agent-river-reach\=' rather than after it -- see there for what a reach on
+a key nobody has declared is taken for."
   (agent-river-observe-artifact
    (append (list :kind "appear" :key key) props)))
 
@@ -1503,14 +1524,13 @@ ID defaults to the session that most recently acted.  That is a guess, and
 it is the guess this table exists to avoid making -- name the session
 where you can.
 
-**Declare a non-file key before you reach it.**  A domain is read off
-`agent-river-artifacts\=' and `file\=' is what a key is when nobody has said
-otherwise, so a key reached before its record exists is a file: resolved
-against the session cwd, `inc:INC-444\=' becomes `/repo/inc:INC-444\=', which
-the map lists as a name that is not on disk and
-`agent-river-forget-gone-files\=' then offers to sweep.  That is exactly the
-mistake `agent-river--key-domain\=' exists to stop, arrived at by doing the
-two calls in the wrong order.
+**Declare a key before you reach it.**  A domain is read off
+`agent-river-artifacts\=', so a key reached before its record exists is
+undeclared, and undeclared is a path: resolved against the session cwd,
+`inc:INC-444\=' becomes `/repo/inc:INC-444\=', which
+`agent-river-forget-gone-files\=' then offers to sweep as a name that is not
+on disk.  That is exactly the mistake `agent-river--key-domain\=' exists to
+stop, arrived at by doing the two calls in the wrong order.
 
 The window closes by itself -- the domain is read at every draw, so
 `agent-river-appeared\=' landing later repairs the placement -- and the one
@@ -1637,20 +1657,19 @@ artifact gets declared, which is the whole of what this reading is for."
   "Read the domain a newly declared artifact key belongs to.
 
 Asked every time rather than defaulted, because there is no default that
-is right often enough to be worth the one time it is not.  `file' is what
-a key is when nobody has said otherwise, so a key declared without an
-answer here is a file: `inc:INC-444' resolved against the session cwd
-becomes a name that is not on disk, which the map lists and
-`agent-river-forget-gone-files' then offers to sweep.  Reading the domain
-off the key's own spelling instead is the prefix rule
+is right often enough to be worth the one time it is not, and because an
+undeclared key is not a kind of thing -- it is a path relative to the
+session cwd, which `agent-river--artifact-absolute' resolves and
+`agent-river-forget-gone-files' may then sweep.  Reading the domain off
+the key's own spelling instead is the prefix rule
 `agent-river--key-domain' exists to refuse.
 
 No match is required: a domain nothing here has heard of is still drawn,
 and something that has arrived must not wait for configuration before it
-can be seen.  `file' is refused outright -- the artifact table is not a
-mirror of the session tables, so a file reached by an agent needs no
-record here and one made anyway would say nothing its session's own table
-does not already say.
+can be seen.  An empty answer is refused, which is the same refusal
+`agent-river-artifact' makes one layer down -- there was a second one
+here, of the literal domain `file', and it went with `file' as a
+hardwired name for the absence of a record.
 
 The candidates are `agent-river-domains', which is what the table has.
 There was a presentational list beside it once, `agent-river-map-domains',
@@ -1660,8 +1679,7 @@ while the domains that did arrive went unlisted, which is the wrong way
 round for a list whose job is to save typing."
   (let ((answer (string-trim
                  (completing-read
-                  "Domain: " (mapcar #'symbol-name
-                                     (delq 'file (agent-river-domains)))))))
+                  "Domain: " (mapcar #'symbol-name (agent-river-domains))))))
     (if (string-empty-p answer)
         (user-error "A new artifact needs a domain")
       (intern answer))))
@@ -1677,8 +1695,7 @@ session is that buffer's; anywhere else it is asked for.
 
 DOMAIN is required for a key that is new and refused for one that is not:
 a record already says what its key means, and a second answer here would
-be a way for the two to disagree.  It may not be `file' -- see
-`agent-river--read-domain'.
+be a way for the two to disagree.
 
 Everything is checked before anything is folded.  Declaring an artifact
 and then failing to reach it would leave a record nobody asked for, which
@@ -1703,8 +1720,6 @@ which is `agent-river-reach's rule and this only passes it on."
       (user-error "No session %s to link to" session))
      ((and fresh (null domain))
       (user-error "A new artifact needs a domain"))
-     ((and fresh (eq domain 'file))
-      (user-error "A file needs no record: its session's table already has it"))
      (t
       (when fresh
         (agent-river-appeared key :domain domain :name name
@@ -6502,13 +6517,15 @@ and it wins over the cwd here."
   (let ((cwd (or (plist-get entry :anchor) (plist-get entry :cwd)))
         (file (plist-get entry :file)))
     (and cwd (not (string-empty-p cwd)) file (not (string-empty-p file))
-         ;; A key declared into another domain is not a file, and resolving it
-         ;; here is how `inc:INC-444' became `/repo/inc:INC-444' -- a name in a
-         ;; tree it has nothing to do with, which every view downstream would
-         ;; then draw, shade and eventually offer to delete.  Answering nil is
-         ;; what each of them already does the right thing with: a key that
-         ;; cannot be placed is left alone rather than guessed at.
-         (eq (agent-river--key-domain file) 'file)
+         ;; A key somebody declared is not a path, and resolving it here is how
+         ;; `inc:INC-444' became `/repo/inc:INC-444' -- a name in a tree it has
+         ;; nothing to do with, which every view downstream would then draw and
+         ;; eventually offer to delete.  Answering nil is what the caller does
+         ;; the right thing with: a key that cannot be placed is left alone
+         ;; rather than guessed at.  Undeclared is the *only* kind that gets
+         ;; resolved, which is what `agent-river--key-domain' answering nil
+         ;; means.
+         (null (agent-river--key-domain file))
          (expand-file-name file (file-name-as-directory cwd)))))
 
 ;;; The map -- what has arrived, and who is on it
@@ -6610,10 +6627,9 @@ never been touched is."
 
 ;;; Domains -- what a section of the map is a section of
 ;;
-;; The map lists a directory and annotates it with what the agents did there,
-;; which is dired's question asked over the whole state.  That works because a
-;; file key can be placed: `agent-river--artifact-absolute' resolves it against the
-;; session's cwd, or against the anchor where the cwd cannot.
+;; A key an agent reached is a path: `agent-river--rel' made it relative to
+;; the session cwd, and `agent-river--artifact-absolute' puts the two back
+;; together -- against the anchor where the cwd cannot.
 ;;
 ;; An artifact declared from outside has no such answer.  `inc:INC-444' is a
 ;; perfectly good key -- the session tables count it and the parties
@@ -6622,9 +6638,13 @@ never been touched is."
 ;; do with.  That is the same mistake the anchors were folded to stop, one
 ;; domain over, and it is why placement is decided here rather than assumed.
 ;;
-;; So: a key belongs to a domain, the domain is read off the artifact table
-;; (`agent-river--key-domain'), and `file' is what a key is when nobody said
-;; otherwise.  A non-file domain heads a section of its own, and the section's
+;; So: a key is either **declared** -- it has a record, and therefore a
+;; domain, read off the artifact table (`agent-river--key-domain') and never
+;; parsed out of the key -- or it is not, and then it is a path and nothing
+;; else.  That was three states until recently rather than two: `file' was a
+;; domain meaning "nobody declared this", and it could itself be declared, at
+;; which point a record meant exactly what no record meant.  A domain heads a
+;; section of its own, and the section's
 ;; listing is the artifact table itself -- which is the whole reason there is
 ;; no per-domain listing function to write.  A record already carries its name,
 ;; whether it has ended, and whatever context its producer put on it; asking a
@@ -6637,17 +6657,25 @@ never been touched is."
 ;; configuration before it can be seen.
 
 (defun agent-river--key-domain (key)
-  "Return the domain KEY belongs to: the symbol it was declared with, or `file'.
+  "Return the domain KEY was declared with, or nil when nobody declared it.
 
 Read off `agent-river-artifacts' rather than parsed out of the key, which
 matters more than it looks.  A prefix rule would have to decide what
 `c:/tmp/x' means, and would answer for keys nobody ever declared -- where
-this answers `file' for everything the event stream produced on its own
-and something else only where a producer said so.  Which is the same line
-the artifact table itself is drawn on."
+this answers for what a producer actually said.  Which is the same line
+the artifact table itself is drawn on.
+
+**Nil is the whole of what an undeclared key is**, and the callers read it
+that way: a key nothing declared is a path relative to the session cwd, so
+it is the one kind `agent-river--artifact-absolute' will resolve and the
+one kind that heads no section.  It used to answer `file' for that case --
+a pseudo-domain standing for the absence of a record, which could also be
+*declared*, at which point a record meant the same as no record: invisible
+on the map and counted in `agent-river-domains' all the same.  A domain is
+what somebody said; nothing said is nil."
   (let ((artifact (and key (not (string-empty-p key))
                        (gethash key agent-river-artifacts))))
-    (or (and artifact (agent-river-artifact-domain artifact)) 'file)))
+    (and artifact (agent-river-artifact-domain artifact))))
 
 (defun agent-river--domain-root (domain)
   "Return the section root standing for DOMAIN.
@@ -6683,8 +6711,7 @@ once."
         (cdr box)
       (let (sections)
         (dolist (domain (agent-river-domains))
-          (unless (eq domain 'file)
-            (push (cons (agent-river--domain-root domain) domain) sections)))
+          (push (cons (agent-river--domain-root domain) domain) sections))
         (setq sections (nreverse sections))
         (when box (setcar box t) (setcdr box sections))
         sections))))
@@ -6713,7 +6740,7 @@ already seen."
   (symbol-name domain))
 
 (defun agent-river--map-domain-roots (&optional scope)
-  "Return one (ROOT . LAST) per live non-file domain, newest first.
+  "Return one (ROOT . LAST) per domain with something in it, newest first.
 
 LAST is the most recent thing to have happened in the domain, taken from
 the artifact records rather than from the sessions: a queue with nothing
@@ -6727,19 +6754,18 @@ which is precisely backwards for the case this exists for."
     ;; sorts by that rather than by when its records last changed.
     (dolist (entry entries)
       (let ((domain (agent-river--key-domain (plist-get entry :file))))
-        (unless (eq domain 'file)
+        (when domain
           (puthash domain
                    (agent-river--map-later (gethash domain seen)
                                            (plist-get entry :last))
                    seen))))
     (maphash (lambda (_key artifact)
                (let ((domain (agent-river-artifact-domain artifact)))
-                 (unless (eq domain 'file)
-                   (puthash domain
-                            (agent-river--map-later
-                             (gethash domain seen)
-                             (agent-river-artifact-last artifact))
-                            seen))))
+                 (puthash domain
+                          (agent-river--map-later
+                           (gethash domain seen)
+                           (agent-river-artifact-last artifact))
+                          seen)))
              agent-river-artifacts)
     (maphash (lambda (domain last)
                (push (cons (agent-river--domain-root domain) last) result))
@@ -7210,11 +7236,13 @@ line is ordered by and cannot contradict it."
 
 A record is a heading, because it has something under it and folds: the
 rows a contributor puts there.  A line with nothing under it ever passes
-`file' rather than a number and comes out a list item -- the elision line
+`leaf' rather than a number and comes out a list item -- the elision line
 and the empty-map line, which must not be headings that swallow whatever
 follows them.  The overview pushes the records down a level to make room
 for the section headings, which is why a number is the wrong thing for a
-line that is a leaf whatever level it is drawn at.
+line that is a leaf whatever level it is drawn at.  It was spelled `file'
+while the map drew files, which left the one symbol in this package that
+is not a domain looking exactly like the domain that has since gone.
 
 The markup is left visible.  Hiding it is `markdown-ts-view-mode's own
 default and it looks better on prose, but here the marker is the
@@ -7474,7 +7502,7 @@ nothing."
           ;; shown an empty listing.
           (unless sections
             (insert (propertize
-                     (concat (agent-river--map-marker 'file)
+                     (concat (agent-river--map-marker 'leaf)
                              "*nothing has arrived yet*\n")
                      'agent-river-map-face 'agent-river-stale)))
           (dolist (section sections)
@@ -8113,7 +8141,7 @@ With ASK (a prefix argument), prompt for one domain to show instead.
 Needs no mode to be switched on: the buffer is the consent, and killing it
 takes the map off the event stream."
   (interactive "P")
-  (let* ((domains (delq 'file (agent-river-domains)))
+  (let* ((domains (agent-river-domains))
          (root (and ask domains
                     (agent-river--domain-root
                      (intern (completing-read "Map: "
