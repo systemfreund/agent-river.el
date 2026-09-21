@@ -169,6 +169,15 @@ one that cannot has exactly one place to be taught.
 `inc:INC-444' does: two producers that both number things from one would
 otherwise collide on a bare number.
 
+`domain' is required, and refused here rather than two layers down so
+that the message names the field the delivery is missing.  It used to be
+optional and a delivery without one made a record in the `file' domain --
+which was this package's word for a key nobody had declared, so the
+record was indistinguishable from no record at all: listed by no section
+and drawn on no line.  A delivery that cannot say what kind of thing it
+is carrying is a delivery nothing can show, and it goes to `failed/'
+where its author can see it.
+
 `session' is the one field that is not about the artifact at all.  A
 producer that knows which session caused the thing it is delivering says
 so, and that is noted on *that session* -- see
@@ -177,8 +186,10 @@ so, and that is noted on *that session* -- see
         (domain (agent-river-spool--string (alist-get 'domain data))))
     (unless key
       (error "No `key': nothing to identify this by"))
+    (unless domain
+      (error "No `domain': nothing can say what kind of thing this is"))
     (list :key key
-          :domain (and domain (intern domain))
+          :domain (intern domain)
           :name (agent-river-spool--string (alist-get 'name data))
           :context (agent-river-spool--alist (alist-get 'context data))
           :gone (and (alist-get 'gone data) t)

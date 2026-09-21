@@ -82,14 +82,14 @@ ground truth left in it.
 
 | Kind | Example | Where it lives |
 |---|---|---|
-| **Measurement** | 23 steps, 6 touches of `mpv.el` | folded into the state |
+| **Measurement** | 23 steps, 2 failures, 6 touches of `mpv.el` | folded into the state |
 | **Claim** | `agent-river-set-intent` — what the agent says it is doing | its own slots, reports as `:claimed-intent`, **never feeds a signal** |
-| **Current-state** | is this buffer modified, is git dirty, is a permission request still open | queried where it is read, **never folded** |
+| **Current-state** | is this buffer modified, is this file still on disk, is a permission request still open | queried where it is read, **never folded** |
 
 The third distinction is the one integrators get wrong. A fact that stops being
 true without an event to say so must not be stored: a pending approval is
-answered by a button in another buffer, a diffstat is wrong again by the next
-write. Fold what happened; query what is.
+answered by a button in another buffer, a file the state records a touch of
+is deleted a second later. Fold what happened; query what is.
 
 ## Artifacts: things that are not files
 
@@ -99,18 +99,19 @@ requested, a build that broke — has no session to hang on, and it matters most
 when *no* agent is running, which is exactly when there is no session to hang
 it on.
 
-So there is a second table, `agent-river-artifacts`, with a fold of its own. A
-non-file **domain** heads a section of its own on the map:
+So there is a second table, `agent-river-artifacts`, with a fold of its own.
+Each **domain** heads a section of the map, and the map is nothing but this
+table:
 
 ```
-# 2 roots  ·  1 agent
-##   ⏿ `Incidents`
-### ▾ ⏿ `INC-444 disk full on db-3`
+# 2 domains  ·  1 agent
+##  ⇄ `inc`
+### ▾  `INC-444 disk full on db-3`
 - severity: P1
 - queue: infra
-- alpha · 0s ago
-###     `INC-501 cert expiring`
-##     `~/src/agent-river`
+- alpha · 2 writes · 0s ago
+###    `INC-501 cert expiring`
+##     `pr`
 ```
 
 Three calls put it there:
@@ -127,7 +128,7 @@ Three calls put it there:
                       :text "INC-444 routed to you")
 
 ;; An agent was dispatched to it.  Folded onto the *session* as a touch, so
-;; the map's parties and listing and `agent-river-touching' see it without
+;; the map's parties and listing and `agent-river-reaching' see it without
 ;; being taught anything — and it counts no step, because no tool ran.
 (agent-river-reach "inc:INC-444" session-id)
 
@@ -137,12 +138,12 @@ Three calls put it there:
 (agent-river-ended "inc:INC-444")
 ```
 
-**Declare before you reach.** A domain is read off the artifact table and
-`file` is what a key is when nobody has said otherwise, so a key reached before
-its record exists *is* a file: `inc:INC-444` resolves against the session's cwd
-and shows up in its tree as a name that is not on disk, which
-`agent-river-forget-gone-files` will then offer to sweep. Declaring later
-repairs it — the domain is read at every draw — but the order to write is
+**Declare before you reach.** A domain is read off the artifact table, so a key
+reached before its record exists is *undeclared* — and undeclared is a path:
+`inc:INC-444` resolves against the session's cwd as a name that is not on disk,
+which `agent-river-forget-gone-files` will then offer to sweep, and it gets no
+line on the map, since the map lists records and it has none yet. Declaring
+later repairs it — the domain is read at every draw — but the order to write is
 `appeared`, then `reach`.
 
 By hand, those two are one command: **`M-x agent-river-link-artifact`**. Run in
@@ -170,13 +171,18 @@ table is **not a mirror**: a file an agent touched needs no record there,
 because the session's table already says everything true of it. In practice the
 artifact table holds tens of records where the session tables hold thousands.
 
-**A key belongs to a domain, and `file` is what it is when nobody said
-otherwise.** A file key is placed by resolving it against the session's working
-directory; a declared key has no such answer, and resolving `inc:INC-444`
+**A key is either declared or it is a path — there is no third thing.** An
+undeclared key is placed by resolving it against the session's working
+directory; a declared one has no such answer, and resolving `inc:INC-444`
 against a cwd would produce `/repo/inc:INC-444` — a file in a tree it has
-nothing to do with, which every view would then draw, shade and eventually
-offer to delete as missing. The domain is read off the artifact table, never
-parsed out of the key, so a key nobody declared is a file and stays one.
+nothing to do with, which would then be drawn and eventually offered for
+deletion as missing. The domain is read off the artifact table, never parsed
+out of the key, and `agent-river--key-domain` answers **nil** for a key nobody
+declared. There was a `file` domain standing for that case, and it could itself
+be declared — at which point a record meant exactly what no record meant:
+invisible on the map and counted in `agent-river-domains` all the same. **A
+record now requires a domain**, and `agent-river-artifact` refuses to create one
+without it.
 
 ---
 
@@ -329,9 +335,6 @@ to prevent. Note what happened, never what you think about it.
 ;;  :subagents (:running 0 :total 1 :steps 2
 ;;              :each (("Explore" :steps 2 :fail-streak 0 :status "done"))))
 
-(agent-river-touching "supersonic-mpv.el")
-;; (("session-b" :label "worktree-…" :touches 2 :ago "9s"))
-
 (agent-river-reaching "inc:INC-444" 'session)
 ;; (("s1" :label "alpha" :touches 1 :writes 0 :ago "2m"))
 
@@ -358,14 +361,13 @@ still answers for what it cost, which reading `agent-shell--state` cannot do.
 Totals are summed **per currency**, since this is the one place the figure
 itself is shown and two currencies added together are a number true of neither.
 
-`agent-river-touching` is the one that earns its keep: two agents editing the
-same file without knowing about each other is a real hazard in a worktree setup.
-It matches on the **basename**, so one file reached from a worktree and from the
-main checkout counts as one artifact. `agent-river-reaching` matches the **key
-exactly**, which is right for an artifact that has no other spelling.
+`agent-river-reaching` matches the **key exactly**, which is right for an
+artifact that has no other spelling. There was a query beside it,
+`agent-river-touching`, which asked the same question of a *file* and matched
+on the basename so that a worktree and a main checkout counted as one; it went
+with the views that named files, along with `M-x agent-river-who-touches`.
 
-Interactively, `M-x agent-river-status` lists every session in full and
-`M-x agent-river-who-touches` answers the contention question.
+Interactively, `M-x agent-river-status` lists every session in full.
 
 `M-x agent-river-markdown` and `agent-river-copy-report` render the state for an
 issue or a PR. The export is a third derivation beside the panel and the report,
@@ -407,8 +409,8 @@ got, whether it finished — read with `agent-river-children`:
 Three consequences worth knowing if you consume this.
 
 - **A delegated step is the session's step**, and a delegated touch lands in
-  the session's own artifact tables — which is what `agent-river-touching` and
-  the map read. You do not have to range over a family to find it.
+  the session's own artifact tables rather than in a record of the child's.
+  You do not have to range over a family to find it.
 - **A delegated failure does not raise the session's streak.** Three
   subagents failing once each is not one line of work failing three times, and
   the streak is what a signal is built from. It is counted everywhere else: the
@@ -425,15 +427,12 @@ as plain function calls. Nothing advertises this, so: it exists.
 
 ```elisp
 (agent-river-report "<session-id>")     ; own state
-(agent-river-touching "supersonic.el")  ; is another session on this file?
+(agent-river-reaching "inc:INC-444")    ; is another session on this record?
 (agent-river-set-intent "narrowing down why queue position goes stale")
 ```
 
-`agent-river-touching` is the one that carries something the agent does not
-already have — another session, in another worktree, editing the file it is
-about to rewrite leaves no trace in its own transcript. The other two address a
-*session* and cannot reliably tell which one the caller is, so pass the
-`session_id` from the hook payload.
+Both of the first two address a *session* and cannot reliably tell which one
+the caller is, so pass the `session_id` from the hook payload.
 
 `set-intent` records the one thing the hooks cannot derive: `:task` is literally
 the user's prompt, which stays put for twenty minutes while the work moves
@@ -455,7 +454,7 @@ answer to one question: *what is it about?*
 | react to something arriving | `agent-river-artifact-observers` | an artifact |
 | report what only Emacs can see | `agent-river-note` | a session |
 | report something no session owns | `agent-river-appeared` | an artifact |
-| annotate the map's lines | `agent-river-map-contributors` | a path or key |
+| annotate the map's lines | `agent-river-map-contributors` | an artifact key |
 
 The first four hang off a **subject** — the thing an event is folded onto, of
 which there are exactly two. The last is a view: it is handed something to
@@ -562,33 +561,27 @@ and never the screen.
 A row is `:text` (one line; the map escapes it), `:key` (stable across redraws,
 or point lands on the wrong row after one), `:rank` (low first) and optionally
 `:face` — **a face symbol, never a face on the text**, because tree-sitter owns
-`face` in that buffer and would quietly drop a text property. `:summary` is how
-a contributor earns the line's fixed-width column, and it must be a reading *of
-the rows*, the same data smaller, never a second account of it.
+`face` in that buffer and would quietly drop a text property.
 
-Rows are detail: a node whose only children are rows draws closed and TAB opens
-it, so a contributor's rows are read when a reader asks that line for them.
-`:summary` is the way onto the line itself, and the only thing a contributor
-can say that is read without a keystroke.
+Rows are detail: a node draws closed and TAB opens it, so a contributor's rows
+are read when a reader asks that line for them. Nothing a contributor says
+reaches the line itself — the line is the listing, and what can be read straight
+down it is the map's own.
 
-Batch per root — thirty lines with a subprocess each, every TTL, is a fork bomb
-with a view attached — and expect to be **retired on the first error**, like an
-observer. The diffstat (`agent-river--rows-vc`) is the asynchronous, batched and
-aggregating case at once; read it before writing anything that shells out.
+Batch per section — thirty lines with a subprocess each, every TTL, is a fork
+bomb with a view attached — and expect to be **retired on the first error**,
+like an observer.
 
 ## Domains
 
-Registering a domain in `agent-river-map-domains` is optional and only ever
-about presentation — a `:label` for the section:
-
-```elisp
-(add-to-list 'agent-river-map-domains
-             (cons 'inc (list :label "Incidents")))
-```
-
-A domain absent from it is still drawn: something that has arrived should not
-have to wait for configuration before it can be seen, which is the failure mode
-of every dashboard that has to be taught about a new source.
+There is nothing to register. Pass `:domain` when you declare an artifact and
+it heads a section of the map under that name — something that has arrived
+should not have to wait for configuration before it can be seen, which is the
+failure mode of every dashboard that has to be taught about a new source.
+There was a table for a prettier section heading (`agent-river-map-domains`,
+`:label`) and it is gone: a second name for something the artifact table
+already holds is right only for as long as somebody keeps the two in step, and
+the heading is now the domain itself — the prefix on every key in the section.
 
 ## Actions — what RET may do
 
@@ -641,7 +634,7 @@ Three ways out, and each answers a different question:
 
 | You are asking | Use |
 |---|---|
-| *which* file is this | match the basename, as `agent-river-touching` does |
+| *which* file is this | match on the basename yourself |
 | *where* is the file the event was about | read `:path` off the raw event |
 | *where* does this key sit in a tree | `agent-river--artifact-absolute`, anchor over cwd |
 
@@ -649,6 +642,8 @@ The third is the only one that can place a key in a directory tree and the only
 one that re-splits a worktree from its main checkout. It answers **nil** for a
 key in a non-file domain, which is what every caller already does the right
 thing with — a key that cannot be placed is left alone rather than guessed at.
+Only one thing asks it now (`M-x agent-river-forget-gone-files`): the map used
+to place every key it drew and lists artifact records instead.
 
 ---
 
@@ -683,8 +678,8 @@ by any window you have not scrolled away from.
 
 ```
 *agent-river*
-* │⣶⣶⣷⣴⣀⣀│ · supersonic.el    · editing · 4m12s · 23 steps · mpv.el (6 touches)
-* │⠀⠀⣀⣤⣶⣿│ · supersonic.el<2> · editing · 2 steps · supersonic-mpv.el (2 touches)
+* │⣶⣶⣷⣴⣀⣀│ · supersonic.el    · editing · fix the mpv bridge · 4m12s · 23 steps
+* │⠀⠀⣀⣤⣶⣿│ · supersonic.el<2> · editing · seek handler · 51s · 2 steps · 1 failing
 
 *agent-river-log*
 19:06:55 superson ◆ fix the mpv bridge
@@ -701,9 +696,10 @@ window is you saying what you want your screen to be, and a view that comes
 back on the next tool call overrules you several times a minute. Never the log,
 which is written whether or not anybody is looking at it. Either one comes back
 by asking. The keys are shared with the map and the approval queue, but each
-buffer takes only the grains its own content answers: `n`/`p` in both,
-`M-n`/`M-p` over session lines in the block, `>`/`<` over the landmarks
-(`agent-river-notable-kinds`) in the log.
+buffer takes only the grains its own content answers: `n`/`p` in both, and
+`>`/`<` over the landmarks (`agent-river-notable-kinds`) in the log. The block
+takes neither `M-n`/`M-p` nor `>`/`<` — it is one line per live session with
+nothing under it, so the coarse grain would land where `n` does.
 
 One tool call is **one line**: the outcome is written onto the line that opened
 it, so the timestamp stays the one the call began at. Pairing is by
@@ -738,19 +734,28 @@ text restructure the view watching it.
 
 ## The map (`M-x agent-river-map`)
 
-The view of the artifact tables: one directory listed in full, each entry
-annotated with what has happened *beneath* it, so several agents spread over a
-large repository are visible at once. Who has been in a name, and how long ago,
-are rows under it (TAB); the line carries what can be read straight down the
-listing.
+The view of `agent-river-artifacts`: one section per domain, one line per
+record, each annotated with whoever has reached it. **The listing is the table**
+— nothing is read off the disk and nothing here is a path. Who has been on a
+record and how long ago are rows under it (TAB); the line carries what can be
+read straight down the listing. RET on a section zooms into it, `^` comes back
+out, and RET on a record does whatever that record offers (see *Actions*).
 
-Three facts per line, each on its own channel: contention and position are
-markers, existence is a strike-through, and the diffstat is a fixed column.
-`n`/`p`, `M-n`/`M-p` and `>`/`<` are three grains of motion, shared with the HUD
-and the approval queue.
+Two facts per line, each on its own channel: contention is a marker and having
+ended is a strike-through. `n`/`p`, `M-n`/`M-p` and `>`/`<` are three grains of
+motion, shared with the HUD and the approval queue — and `>` deliberately does
+*not* stop on a record nobody has reached, because it means "some agent is
+under this".
 
-Nothing drops out of this view by getting old. `M-x agent-river-forget-artifacts`
-is what says the work has landed, and `C` sweeps the files that are gone.
+The single most important line here is the one **nobody has picked up**: an
+unreached record is listed like any other, which is the whole reason this view
+exists. It was a lens over dired for most of its life — one directory listed in
+full, each entry carrying what had been reached beneath it — and that is gone.
+What an agent did to a file is counted in the session tables and named by no
+view: the block says what a session is doing, not which files it is in.
+
+Nothing drops out of this view by getting old. `M-x agent-river-drop-artifact`
+forgets one record, `M-x agent-river-artifacts-reset` forgets them all.
 
 ## The approval queue (`M-x agent-river-approval-queue`)
 
@@ -802,7 +807,7 @@ On the Emacs side, once: `(agent-river-spool-mode 1)`.
 |---|---|---|
 | `source` | **required** | which reader to use. `river` is this shape, and an unknown name falls back to it |
 | `key` | **required** | the identity. Put the domain in it (`inc:INC-444`), or two producers numbering from 1 will collide |
-| `domain` | | what kind of thing this is; heads its own section of the map. **Leave it out and the key is taken for a file name** |
+| `domain` | **required** | what kind of thing this is; heads its own section of the map. A delivery without one goes to `failed/`: nothing could say what it is carrying |
 | `name` | | what a person sees on the line. Defaults to the key |
 | `context` | | an object, carried and never read by agent-river. Drawn as rows under the line |
 | `gone` | | `true` when the thing is over: the line is struck through, not removed |
