@@ -4015,8 +4015,7 @@ half of what it shows is what is on disk and untouched."
        (delete-directory ,var t))))
 
 (ert-deftest agent-river-test-the-map-lists-only-what-was-reached ()
-  (let (
-        (agent-river-map-untouched nil))
+  (let ((agent-river-map-untouched nil))
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root
@@ -4028,8 +4027,7 @@ half of what it shows is what is on disk and untouched."
                        '("dialog")))))))
 
 (ert-deftest agent-river-test-the-map-can-list-the-quiet-entries-too ()
-  (let (
-        (agent-river-map-untouched t))
+  (let ((agent-river-map-untouched t))
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root
@@ -4053,8 +4051,7 @@ half of what it shows is what is on disk and untouched."
   ;; and the entry was a directory, so the node was kept as one of its
   ;; files.  Every reader resolves a file's `:rel' against its entry, so the
   ;; next draw died with `stringp, nil' and so did every one after it.
-  (let (
-        (agent-river-map-untouched nil))
+  (let ((agent-river-map-untouched nil))
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :tool "Grep" :cwd root
@@ -4109,8 +4106,7 @@ the view looks like once the work has moved on."
   ;; `:missing' is derived from the listing on every draw and the shading is
   ;; torn down and rebuilt with it, so the mark follows the disk in both
   ;; directions rather than being remembered anywhere.
-  (let (
-        (agent-river-map-untouched nil))
+  (let ((agent-river-map-untouched nil))
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root :file "scratch.el"))
@@ -4140,8 +4136,7 @@ the view looks like once the work has moved on."
   ;; A file deleted a moment ago is warm, and the deletion is something the
   ;; agent did.  Dropping it the instant it happens would throw away the one
   ;; thing worth seeing about it.
-  (let (
-        (agent-river-map-untouched nil))
+  (let ((agent-river-map-untouched nil))
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root :file "scratch.el"))
@@ -4155,8 +4150,7 @@ the view looks like once the work has moved on."
   ;; whose last act was a deletion named nowhere at all, and losing a party
   ;; off the map is the worse of the two readings -- the strike-through is
   ;; what keeps this one honest.
-  (let (
-        (agent-river-map-untouched nil))
+  (let ((agent-river-map-untouched nil))
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root :file "scratch.el"))
@@ -4171,8 +4165,7 @@ the view looks like once the work has moved on."
   ;; The TTL is a guess at a process we cannot see, and a name is not thrown
   ;; away on a guess.  A CLI session outside Emacs that has simply not been
   ;; given a prompt for a while is still there.
-  (let (
-        (agent-river-map-untouched nil))
+  (let ((agent-river-map-untouched nil))
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
@@ -4308,8 +4301,7 @@ the view looks like once the work has moved on."
   ;; no parties" rather than "is not on disk", so an entry the state knows
   ;; about and the disk does not survives it -- which is exactly the entry a
   ;; disk-shaped filter would have dropped.
-  (let (
-        (agent-river-map-untouched nil))
+  (let ((agent-river-map-untouched nil))
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root
@@ -4320,7 +4312,7 @@ the view looks like once the work has moved on."
           (should (plist-get (car entries) :missing)))))))
 
 (ert-deftest agent-river-test-a-map-entry-carries-what-is-beneath-it ()
-  (let ()
+  (progn
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root
@@ -4337,7 +4329,7 @@ the view looks like once the work has moved on."
                          2)))))))
 
 (ert-deftest agent-river-test-the-map-shows-two-agents-on-one-directory ()
-  (let ()
+  (progn
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (let ((other (agent-river-state "s2" "beta")))
@@ -4354,7 +4346,7 @@ the view looks like once the work has moved on."
             (should (equal (plist-get (car parties) :touches) 2))))))))
 
 (ert-deftest agent-river-test-the-map-reads-the-frame-it-is-asked-for ()
-  (let ()
+  (progn
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
@@ -4373,7 +4365,7 @@ the view looks like once the work has moved on."
                                  :parties)))))))
 
 (ert-deftest agent-river-test-the-map-still-shows-a-file-that-is-gone ()
-  (let ()
+  (progn
     (agent-river-test--with-tree root
       (agent-river-test--with-session state
         (agent-river-fold state (list :kind "act" :cwd root
@@ -4737,7 +4729,7 @@ The plain mode rather than the Markdown one: the grammars are not part of
 the suite's world, and the text -- which is all the motion reads -- is the
 same either way."
   (declare (indent 1))
-  `(let ()
+  `(progn
      (agent-river-test--with-tree ,root
        (agent-river-test--with-session state
          (dotimes (_ 7)
@@ -6089,8 +6081,7 @@ line two" "safe tail"))))
   ;; it: `agent-river--rows-parties' names them in the order it is handed, and
   ;; a line shaded for the heaviest party with the lightest named first would
   ;; be two answers to one question.
-  (let (
-        )
+  (progn
     (agent-river-test--with-session state
       (let ((other (agent-river-state "s2" "beta")))
         (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/c.el"))
@@ -6108,8 +6099,7 @@ line two" "safe tail"))))
   ;; What a directory's reading is aggregated from, and the order the rows
   ;; under it inherit: an unsorted list would put the party names in
   ;; whichever order the table happened to hash them.
-  (let (
-        )
+  (progn
     (agent-river-test--with-session state
       (agent-river-fold state '(:kind "act" :cwd "/repo" :file "src/cold.el"))
       (dotimes (_ 3)
