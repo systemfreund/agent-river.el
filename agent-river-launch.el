@@ -65,19 +65,17 @@
 The `>' goes on in exactly one place, and that is the whole point of the
 function.  A source that builds a quotation field by field instead --
 title here, a name added beside it there -- reopens the injection this
-exists to close: GitHub's own brief once formatted a branch name with
-`format' next to an already-quoted body, and a branch name carrying a
-newline closed the quotation early, so everything meant to read as GitHub's
-words read as the operator's instead.  Anything from a producer goes
-through here, together, so the next field to arrive is covered before it
-is written rather than after something breaks on it.
+exists to close: a field carrying a newline closes the quotation early,
+and everything after it reads as the operator's own words.  Anything from
+a producer goes through here, together, so the next field to arrive is
+covered before it is written rather than after something breaks on it.
 
 An empty part is the blank quoted line between two others, and is spelled
 without the trailing space a prefix alone would leave.
 
 A part's *trailing* blank lines are dropped, because producer text
 commonly ends in a newline and `split-string' answers that with a final
-empty string -- which came out as a lone `>' hanging under the quotation.
+empty string, which would hang a lone `>' under the quotation.
 Only the trailing ones: a blank line inside a part is a paragraph break
 and is the producer's, and an empty part is a separator between fields
 and is the brief's."
@@ -136,29 +134,26 @@ The other switch, and the sharp one.  Each entry is a plist:
 RECORD is the plist `agent-river-artifacts-list' produces -- `:key',
 `:domain', `:name', `:context' and the rest.  Nil means there is nothing
 to say about this artifact and so nothing to start, which is the arming
-switch it has always been: a launcher with no brief can never launch,
-whatever the launcher is.
+switch: a launcher with no brief can never launch.  There is no
+applicability predicate beside it, which would be a second account of the
+answer the brief already gives.
 
-A list rather than one function, because a brief is not one thing.  The
-same pull request is a thing to review and a thing to rebase, and those
-are different prompts and quite possibly different models -- which one is
-wanted is a question for the person looking at the line, not something a
-`:domain' can answer once.  So every brief with something to say about a
-record is one entry in the menu RET opens, and nil is what keeps the
-others out of it.  There is no applicability predicate beside it: that
-would be a second account of the answer the brief already gives.
+Several, because a brief is not one thing: the same pull request is a
+thing to review and a thing to rebase, under different prompts and quite
+possibly different models, and which one is wanted is a question for the
+person looking at the line.  Every brief with something to say about a
+record is one entry in the menu RET opens.
 
 `:buffer-name' is optional and names the buffer the session runs in --
-agent-shell's own name for it otherwise.  It is the brief's rather than
-this layer's because two briefs on one artifact are two sessions somebody
-has to tell apart, and only the brief knows which of them it is.  A
-launcher-specific key, like `:config': see `agent-river-launch--shell-name'.
+agent-shell's own name for it otherwise.  It is the brief's because two
+briefs on one artifact are two sessions somebody has to tell apart, and
+only the brief knows which of them it is.  A launcher-specific key, like
+`:config': see `agent-river-launch--shell-name'.
 
 `:config' is optional and overrides `agent-river-launch-shell-config' for
 this brief's sessions -- a function of no arguments returning the
-agent-shell config, the same shape the global has, so a brief that names
-one is not learning a second convention.  It is the model and session
-configuration a prompt is worth nothing without.
+agent-shell config, the same shape the global has.  It is the model and
+session configuration a prompt is worth nothing without.
 
 A brief is also where a context is read.  This package never reads a
 value out of one -- that is what lets a record carry a severity, a body
@@ -184,12 +179,10 @@ over this one -- see `agent-river-launch-briefs'."
 For a brief\='s `:config\=' -- the model and session configuration a prompt
 is worth nothing without.  BASE defaults to
 `agent-river-launch-shell-config\=', so what comes back is the *configured*
-agent plus these options rather than an agent of this brief\='s own, and
-that is the whole of why this is here rather than in everybody\='s config.
-Written out by hand the same four lines have to name some agent\='s config
-maker, and at that point `agent-river-launch-shell-config\=' has stopped
-deciding anything: point it at another agent and every brief goes on
-building the old one, with nothing anywhere saying so.
+agent plus these options rather than an agent of this brief\='s own; that
+is why this is here rather than in everybody\='s config, where the same
+lines would have to name some agent\='s config maker and
+`agent-river-launch-shell-config\=' would stop deciding anything.
 
 OPTIONS is an alist of (OPTION . VALUE) in the agent\='s own vocabulary --
 \"model\", \"mode\", \"effort\".  This package neither knows nor checks what
@@ -201,16 +194,12 @@ come before anything scoped to it.
 
 BASE is read now rather than at every call, which is what makes setting
 `agent-river-launch-shell-config\=' to the result of this the ordinary
-thing it looks like.  Read later it would be its own base and call
-itself for ever -- on the availability check as much as on the launch,
-so a map where nothing had been launched yet would hang on the first
-RET.
+thing it looks like.  Read later it would be its own base and call itself
+for ever, on the availability check as much as on the launch.
 
 Nil in is nil out.  Nil is what the default answers where agent-shell
 cannot build a config at all, and `agent-river-launch--shell-available-p\='
-reads it to say the launcher cannot run here; a wrapper that turned it
-into an alist holding one key would have the launcher claim it can, and
-the first artifact somebody took would be where they found out."
+reads it to say the launcher cannot run here."
   (let ((base (or base agent-river-launch-shell-config)))
     (lambda ()
       (when-let* ((config (funcall base)))
@@ -263,8 +252,7 @@ behind."
   "Return the agent-shell config BRIEF asked for, or the configured default.
 
 Built here rather than where the brief was read, which is the reason it
-is a function on both sides: the docstring of
-`agent-river-launch--shell-available-p' says the config reaches for
+is a function on both sides: building a config reaches for
 authentication, and the briefs are read on every RET to work out what a
 line offers.  Only the one that is launched is built."
   (funcall (or (plist-get brief :config) agent-river-launch-shell-config)))
@@ -275,11 +263,10 @@ line offers.  Only the one that is launched is built."
 A brief\='s `:buffer-name\=', and a launcher-specific key the way `:config\=' is:
 what a headless CLI would do with one is nothing.  Absent is the ordinary
 answer and leaves agent-shell the name it chose, so nothing renames
-anything unless somebody wrote a name down.  The brief rather than this
-layer, because two briefs on one artifact are two sessions that have to be
-told apart, and the only thing that knows which is which is the brief --
-named from the record here, `Review\=' and `Address the review\=' would be one
-name and a `<2>\='.
+anything unless somebody wrote a name down.  The brief knows which of two
+briefs on one artifact this is, and this layer does not -- named from the
+record here, `Review\=' and `Address the review\=' would be one name and a
+`<2>\='.
 
 `shell-maker-set-buffer-name\=' and not `agent-shell-rename-buffer\=', which is
 buffer-locally aliased to a command taking no argument that prompts for
@@ -287,9 +274,8 @@ one.  The setter is what agent-shell calls itself in `agent-shell-restart\=',
 and it records the name as an override -- a bare `rename-buffer\=' would be
 undone by the next thing that asks shell-maker what this buffer is called.
 
-Guarded, and that guard is the reason this is a function rather than two
-lines in the caller.  Everything here happens *after* the launch: the
-process is up and the prompt is already on its way.  A throw would leave
+Guarded, because everything here happens *after* the launch: the process
+is up and the prompt is already on its way.  A throw would leave
 `:launch\=' through `agent-river-launch-artifact\='s handler, which writes
 `launch failed\=' and never pushes the record `--resolve-pending\=' reads --
 so a session that is running would be unnamed, unlinked to the artifact it
@@ -309,19 +295,15 @@ was started for, and described in the log as one that never started."
 (defun agent-river-launch--shell-launch (brief)
   "Start an agent-shell session for BRIEF and hand it its prompt.
 
-`:session-strategy \='new\=' rather than agent-shell\='s own default, which is
-`prompt\=' -- and it is the layer\='s premise rather than a preference.  A
+`:session-strategy \='new\=' rather than agent-shell\='s own default of
+`prompt\=', and it is the layer\='s premise rather than a preference.  A
 launch here is a session that did not exist: `--resolve-pending\=' waits for
-an id to appear and links *that* session to the artifact, and its
-docstring says the id does not exist yet when the process starts.  A
-resumed session existed before the launch and is quite possibly in the
-registry already, so the wait would settle instantly onto something
-nobody started for this thing -- and the brief would land in a
-conversation about another one.
-
-It also stops a modal question arriving between the choice and the agent,
-which is the same failure `agent-river-launch--confirm-p\=' answers one
-gesture up: what the user picked has already said what should happen."
+an id to appear and links *that* session to the artifact.  A resumed
+session existed before the launch and is quite possibly in the registry
+already, so the wait would settle instantly onto something nobody started
+for this thing -- and the brief would land in a conversation about another
+one.  It also stops a modal question arriving between the choice and the
+agent."
   (let* ((default-directory (or (plist-get brief :cwd) default-directory))
          (buffer (agent-shell--start
                   :config (agent-river-launch--shell-config brief)
@@ -367,8 +349,8 @@ current-state fact: a package loaded after Emacs started makes its
 launcher available without anything here being told.
 
 Asked here rather than at the launch so that \"this cannot run\" is the
-first thing said and not the last.  Asked last, the user was prompted to
-confirm a launch that then failed."
+first thing said and not the last: asked at the launch, the user would be
+prompted to confirm something that then failed."
   (when agent-river-launch-launcher
     (let ((launcher (seq-find (lambda (l)
                                 (equal (plist-get l :name)
@@ -388,12 +370,11 @@ artifact it was started for; having answered, it is dropped.")
 (defconst agent-river-launch--resolve-window 300
   "Seconds a launch is asked what session it became before it is given up on.
 
-There has to be a number, and it cannot be inferred: `:resolve' returning
-nil means \"not yet\" and \"never\" in the same breath, so nothing in the
-answer distinguishes a handshake still running from a process that died
-before it announced anything.  Five minutes is far longer than any
-handshake and far shorter than an Emacs session, which is the only
-property it needs.")
+There has to be a number: `:resolve' returning nil means \"not yet\" and
+\"never\" in the same breath, so nothing in the answer distinguishes a
+handshake still running from a process that died before it announced
+anything.  Five minutes is far longer than any handshake and far shorter
+than an Emacs session, which is the only property it needs.")
 
 (defvar agent-river-launch--resolve-timer nil
   "Timer asking pending launches what they became, or nil.")
@@ -472,9 +453,7 @@ and the session appearing, which is a handful of seconds a day."
 
 The whole of which briefs apply to a thing, and there is no second
 mechanism deciding it: a brief answering nil is a brief with nothing to
-say, which was already the arming switch when there was only one of them.
-Asked per entry now rather than once, so the list of briefs is the list
-of offers.
+say, so the list of briefs is the list of offers.
 
 A brief with no `:prompt' is one of those, not an offer that fails later:
 what a launch is, is a prompt reaching an agent, so an answer without one
@@ -532,7 +511,7 @@ and ran its one action outright.
 Asked otherwise, and that is the ordinary case: starting a process is the
 most expensive thing this package does and the one gesture with nothing
 on the far side that can take it back.  What the question names is what
-will run, the brief included, which is the half a line cannot show."
+will run, the brief included."
   (or agent-river-artifact-chosen
       (y-or-n-p (format "Start %s on %s (%s)? "
                         agent-river-launch-launcher
@@ -564,9 +543,7 @@ never going to happen."
   "Start an agent on the artifact KEY names, briefed as BRIEF-NAME.
 
 The whole of what this layer does with a launcher, and it is a gesture
-rather than a rule: a person looked at the thing and said so.  What would
-be needed to make that decision without them is issue #37, and none of it
-is here.
+rather than a rule: a person looked at the thing and said so.
 
 BRIEF-NAME names an entry of `agent-river-launch-briefs'.  Without one,
 the only brief with something to say about KEY is used and several are
@@ -619,8 +596,8 @@ An `agent-river-artifact-action-functions' entry, and the reason this
 file needs no keymap of its own: a line of the map is asked what it
 offers, and this answers with the launches that are actually possible on
 it.  Nothing where the launcher cannot run here, which is
-`agent-river-launch--launcher' answering at selection rather than at the
-launch -- an offer that can only fail is worse than no offer.
+`agent-river-launch--launcher' answering at selection: an offer that can
+only fail is worse than no offer.
 
 The entries are the briefs themselves rather than one `Launch' that then
 asks which.  What a reader is choosing between is what the agent will be

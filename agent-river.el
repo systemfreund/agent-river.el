@@ -56,18 +56,7 @@
   :type 'string)
 
 (defcustom agent-river-log-buffer-name "*agent-river-log*"
-  "Name of the buffer the event stream is logged to.
-
-A buffer of its own rather than the foot of the block\='s.  The two are
-readings of one state, but they answer different questions -- what is
-happening now, and what has happened -- and holding them in one buffer
-charged every event for it: the block was torn down and rebuilt directly
-above a log that was being written to at the same moment, so whichever
-half a reader was in moved under them for reasons belonging to the other.
-Every guard that cost is still here and still needed, because each is
-about one half; what has gone is their meeting.  Apart, the block is a
-short window that never scrolls and the log is a long one nobody has to
-walk back up through to see the state."
+  "Name of the buffer the event stream is logged to."
   :type 'string)
 
 (defcustom agent-river-max-entries 100
@@ -84,42 +73,25 @@ without bound."
 (defcustom agent-river-block-max-height 12
   "Most lines the block\='s own side window is grown to.
 
-The block is sized to what it holds after every redraw, not once when it
-is displayed: it is a line per live session, so a window fitted while one
-agent was working would hide the second the moment it arrived.  The limit
-is what stops a morning\='s worth of sessions pushing the log off the
-screen, and it is a maximum rather than a height because the usual answer
-is one line."
+The block is sized to what it holds after every redraw rather than once
+when it is displayed, since a session may arrive at any time.  This limit
+stops a morning\='s worth of sessions pushing the log off the screen; it is
+a maximum rather than a height because the usual answer is one line."
   :type 'integer)
 
 (defcustom agent-river-auto-display t
   "Whether the first event opens the state block, when nothing is showing it.
 
-The first event, and only the first (`agent-river--block-shown').  The
-block is bounded -- a line per live session -- and it is what an onlooker
-is for, so a window appearing for it when the first agent starts working
-is the package doing its job.  A window appearing for it *again* is the
-opposite: deleting that window is a reader saying what they want their
-screen to be, and a view that comes back on the next tool call overrules
-that decision several times a minute for as long as the task runs.  So
-the opening happens once, and after it the window is the reader's --
-`agent-river-show' is how it comes back, which is the same asking the log
-has always needed.
+The first event, and only the first (`agent-river--block-shown').
+Deleting that window is a reader saying what they want their screen to be,
+and a view that came back on the next tool call would overrule that
+decision several times a minute.  After the offer the window is the
+reader's -- `agent-river-show' is how it comes back.
 
-The log is never opened by an event at all, being the opposite of the
-block on both counts, and while the two shared a buffer that could not be
-said: one buffer, one window, one answer.  Apart, an event that opened
-the log opened it every time, on the event after the one the reader had
-closed it on -- which is the same failure as above, met earlier and one
-buffer over.  So the log is opened by asking (`agent-river-show-log', or
-`l' in the block).
-
-What that gives up is that a line nobody is looking at is a line nobody
-sees.  The rule it appears to bend -- never go quiet -- is about writing
-the line, not about seizing a window for it: the failure is in the log
-whenever the log is opened, and the commands that mean it (`M-x
-agent-river-spend', the forget commands) say so in the echo area
-besides."
+The log is never opened by an event at all; it is asked for
+(`agent-river-show-log', or `l' in the block).  What that gives up is that
+a line nobody is looking at is a line nobody sees -- the never-go-quiet
+rule is about writing the line, not about seizing a window for it."
   :type 'boolean)
 
 (defcustom agent-river-fail-streak-threshold 3
@@ -139,9 +111,8 @@ signal that arrives constantly stops being a signal."
 
 Only a synchronous hook's stdout is read, so only those events can put an
 observation into the agent's context.  An observation produced on any
-other event is written into a pipe nobody reads -- and worse, it used to
-be logged and counted as though it had arrived, which made the `signals'
-tally state something false about the one thing it exists to measure.
+other event goes into a pipe nobody reads, while still being logged and
+counted as though it had arrived.
 
 The direction is deliberate: this list decides which events may answer,
 and the hook wiring must then mark exactly those as not `async'.  The
@@ -161,31 +132,21 @@ its hook synchronous."
     ("Edit" . "✏️") ("edit" . "✏️") ("Write" . "📄"))
   "What a log line draws in place of a tool's name, keyed by that name.
 
-A tool name is the host's own word, and usually it is also the most
-specific thing the line can say -- `Grep' and `WebFetch' are two
-different things being done, and neither is frequent enough that reading
-the word costs anything.  What earns a glyph is a call made so often that
-its name is the part of the line a reader has stopped seeing, while the
-argument beside it -- a command, a path, clipped to
-`agent-river-detail-width' -- is the part that differs between two of
-them and the part the room belongs to.
+Usually the host's own word is the most specific thing the line can say.
+What earns a glyph is a call made so often that its name is the part of
+the line a reader has stopped seeing, while the argument beside it -- a
+command, a path, clipped to `agent-river-detail-width' -- is what differs
+between two of them.
 
-Keyed by name and not by class, which is what the shell glyph used to be:
-`Bash', `BashOutput' and `execute' are three names for one thing and
-could be drawn from `agent-river-shell-tools', but `Edit' and `Write'
-are not a class -- they are two tools that differ, and the glyph is how
-they differ.  Once the table has to answer per name, a second class-keyed
-path beside it would be two mechanisms deciding one question.
-
-Both dialects are listed by hand, as in `agent-river-phase-buckets' and
-for the same reason: the hooks report the host's own tool name and an
-agent-shell session reports the coarser ACP `kind', and a table that knew
-only one of them would quietly stop drawing for the other.
+Keyed by name and not by class: `Edit' and `Write' are not a class, they
+are two tools that differ, and the glyph is how they differ.  Both
+dialects are listed by hand, as in `agent-river-phase-buckets' -- the
+hooks report the host's own tool name and an agent-shell session reports
+the coarser ACP `kind'.
 
 A tool absent from here keeps its name, which is also how a glyph is
-turned off -- the box a font without it draws says less than `Bash' does.
-Not held to the one-column rule `agent-river-spinner-frames' has: nothing
-is aligned after a tool name, since what follows it is free text."
+turned off.  Not held to the one-column rule
+`agent-river-spinner-frames' has: nothing is aligned after a tool name."
   :type '(alist :key-type string :value-type string))
 
 (defcustom agent-river-refresh-interval 1
@@ -204,10 +165,9 @@ character itself would stop the block being a document the moment an
 agent started working.  A `display' property changes what is shown and
 leaves the text alone.
 
-Nil turns the animation off and leaves the bare star -- which is also the
-answer for a font without these glyphs, where the alternative is a row of
-boxes.  Each frame should be one column wide, or the line will shift as
-it spins."
+Nil turns the animation off and leaves the bare star, which is also the
+answer for a font without these glyphs.  Each frame should be one column
+wide, or the line will shift as it spins."
   :type '(repeat string))
 
 (defcustom agent-river-spinner-interval 0.6
@@ -222,11 +182,9 @@ been running divided by this, so changing it re-times the animation
 without anything having to be restarted -- though a timer already running
 keeps the rate it was started at until the next turn.
 
-Slow on purpose.  The marker says an agent is working, which is a fact
-that holds for minutes; at a frame every 0.15 s it read as something
-demanding attention, and with several sessions the block flickered.  It is
-also what makes two markers being out of phase legible at all -- at speed
-they are a blur either way."
+Slow on purpose.  The marker says an agent is working, a fact that holds
+for minutes; faster it reads as something demanding attention, and it is
+what makes two markers being out of phase legible at all."
   :type 'number)
 
 (defcustom agent-river-phase-window 8
@@ -257,10 +215,9 @@ Two dialects in one list, because a step is matched by name and the two
 ways in do not name a tool alike.  The hooks report the host's own tool
 name; an agent-shell session has none to report, so
 `agent-river--shell-payload' stands the ACP call `kind' in for it --
-lower-case and coarser.  Listing only the first left a hooks-less session
-matching nothing at all: no phase ever, and -- since
-`agent-river--writing-p' reads this table -- no write ever, so the map's
-party rows could not say how much of a name's traffic had changed it.
+lower-case and coarser.  Listing only the first leaves a hooks-less
+session matching nothing at all: no phase, and -- since
+`agent-river--writing-p' reads this table -- no write either.
 
 ACP `think' and `other' are deliberately absent.  The phase abstains
 rather than guess, the same way a shell call does."
@@ -323,11 +280,9 @@ a clock, not a flag, and a session that has gone quiet simply drops out."
   "Face for what the agent said, at the end of a turn.
 
 The prompt's colour without its weight, because the two are the halves of
-one exchange: the user's words arrive as `agent-river-prompt\=' and the
-answer to them comes back here, and a colour of its own would file the
-answer with the tool calls it is nothing like.  Distinct from
-`agent-river-reason\=', which is the agent's words addressed to nobody --
-thinking is not telling.")
+one exchange; a colour of its own would file the answer with the tool
+calls it is nothing like.  Distinct from `agent-river-reason\=', which is
+the agent's words addressed to nobody -- thinking is not telling.")
 
 (defface agent-river-signal '((t :inherit warning :weight bold))
   "Face for an observation handed back to the agent.")
@@ -348,36 +303,31 @@ thinking is not telling.")
   "Face for a session holding a door open, waiting to be told whether to go on.
 
 `warning' inherited rather than a shade of its own: it is what the user's
-theme already means by \"this wants you\", which is the whole content of
-the line.  Distinct from `agent-river-idle', deliberately -- an agent
-that has finished its turn is waiting for whatever you want next, and an
-agent holding a permission request is waiting for one particular word.")
+theme already means by \"this wants you\".  Distinct from
+`agent-river-idle' deliberately -- an agent that has finished its turn is
+waiting for whatever you want next, and an agent holding a permission
+request is waiting for one particular word.")
 
 (defface agent-river-subject '((t :inherit font-lock-variable-name-face))
   "Face for something that is not a session having happened.
 
 Its own face because it is its own subject: every other kind on this list
 is an agent doing something or being told something, and an artifact
-appearing is true whether or not any agent ever looks at it.  Rendered as
-a note it would have shared a colour with those, leaving a reader unable
-to say whether a line was about an agent or about the work.")
+appearing is true whether or not any agent ever looks at it.  Sharing a
+colour with those would leave a reader unable to say whether a line was
+about an agent or about the work.")
 
 (defface agent-river-gone '((t :inherit agent-river-stale :strike-through t))
-  "Face for a record whose subject is over.
+  "Face for a record whose subject is over -- an issue closed, a PR merged.
 
-It was a name the state knew and the disk did not, on the tree listing
-this replaced; it is `agent-river-artifact-gone' now -- an issue closed, a
-pull request merged -- which is the same statement about a subject that
-has no disk to be missing from.  Either way the line stays: it was worked
-on and it is over, which is history until somebody says otherwise.
+The line stays: it was worked on and it is over, which is history until
+somebody says otherwise.
 
 Struck through rather than merely greyed, because grey is the map's word
 for several things at once -- stale, elided -- and \"this is over\" is
-worth saying exactly.  A face and not Markdown `~~\': every face
-the map wants already travels as an overlay, because tree-sitter owns
-`face' in that buffer and a face written as a text property there is drawn
-once and then quietly gone.  So this works in the plain fallback too,
-which a markup answer would not.")
+worth saying exactly.  A face and not Markdown `~~\': every face the map
+wants travels as an overlay, since tree-sitter owns `face' in that buffer,
+so this works in the plain fallback too.")
 
 (defconst agent-river-kinds
   '(("prompt" "◆" agent-river-prompt)
@@ -403,11 +353,10 @@ which a markup answer would not.")
 
 The same number the prompt is clipped to in `agent-river--event\=', matched
 rather than shared: the two sit side by side in the export as the halves
-of one exchange, and an answer allowed to run four times the length of the
-question would read as the whole of what happened rather than as the end
-of it.  Two values because they answer different questions -- how much of
-the brief is kept, and how much of the answer -- and either may move
-without the other.  The event carries the text unclipped.")
+of one exchange, and an answer four times the length of the question would
+read as the whole of what happened rather than as the end of it.  Two
+values because either may move without the other.  The event carries the
+text unclipped.")
 
 (cl-defstruct (agent-river-state (:constructor agent-river--state-create))
   id                ; registry key: "SESSION" or "SESSION/AGENT"
@@ -482,7 +431,7 @@ this needs no locking.")
 ;; the ACP session id, which is verbatim the hooks' `session_id'.  That makes
 ;; liveness, labels and uniquifying exact rather than guessed.
 ;;
-;; Degrades to the old behaviour when agent-shell is absent.
+;; Falls back to the TTL-based estimates when agent-shell is absent.
 
 ;; Declared so the byte-compiler sees a special variable rather than a free
 ;; one: agent-shell owns it, and this sets it only while
@@ -508,16 +457,16 @@ it is still the same turn.")
 (defvar agent-river--shell-sessions (make-hash-table :test 'equal)
   "What is known about who hosts each session, as id -> BUFFER or (none . TIME).
 
-The index behind `agent-river--shell-buffer', and the reason liveness is
-cheap.  A buffer recorded here is one we have seen hosting that session,
-and it is kept after it dies: that a session *had* a buffer and no longer
-does is exactly what tells `agent-river--active-p' that it is over, and it
-is the one thing a snapshot of the buffers alive now can never say.")
+The index behind `agent-river--shell-buffer'.  A buffer recorded here is
+one we have seen hosting that session, and it is kept after it dies: that
+a session *had* a buffer and no longer does is what tells
+`agent-river--active-p' it is over, and no snapshot of the buffers alive
+now can say that.")
 
 (defun agent-river--shell-scan (id)
   "Return the agent-shell buffer hosting session ID by looking for it.
-The expensive half of `agent-river--shell-buffer': this walks every buffer
-in Emacs, which in a long-lived one is thousands of them."
+The expensive half of `agent-river--shell-buffer': it walks every buffer
+in Emacs."
   (seq-find
    (lambda (buffer)
      (with-current-buffer buffer
@@ -530,12 +479,9 @@ in Emacs, which in a long-lived one is thousands of them."
 (defun agent-river--shell-buffer (id)
   "Return the agent-shell buffer hosting session ID, or nil.
 
-Answered from `agent-river--shell-sessions' wherever it can be.  This is
-asked of every session by every redraw -- for its label, for whether the
-line can be jumped to, for whether it is still alive -- and a walk of the
-buffer list each time was most of what drawing the block cost: measured at
-1.4 ms a call in an Emacs with ten thousand buffers, against 13 ms for the
-whole block.
+Answered from `agent-river--shell-sessions' wherever it can be, because
+every redraw asks this of every session several times over and a walk of
+the buffer list each time is most of what drawing the block costs.
 
 Three things can be known about an id, and the difference between the last
 two is the point:
@@ -546,11 +492,11 @@ two is the point:
     still without looking.
   - nothing at all: look, and remember what was found.
   - looked and found nothing, with the time.  Looked for again every
-    `agent-river--shell-rescan' seconds.  Remembering that permanently
-    would be cheaper and is a trap: a session whose first event beats
-    agent-shell to setting its id would be counted unhosted for the rest of
-    the Emacs session -- no label from its buffer, no reasoning lines, no
-    RET -- and nothing would ever say so."
+    `agent-river--shell-rescan' seconds, and never remembered
+    permanently: a session whose first event beats agent-shell to setting
+    its id would then be counted unhosted for the rest of the Emacs
+    session -- no label, no reasoning lines, no RET -- with nothing saying
+    so."
   (let ((known (gethash id agent-river--shell-sessions)))
     (cond
      ((buffer-live-p known) known)
@@ -670,16 +616,12 @@ A finished subagent says so via SubagentStop, which is authoritative.
 
 For a root session we have seen agent-shell hosting, the buffer settles
 it: the process runs in this Emacs, so whether it is alive is a fact and
-not an estimate.  The TTL is what is left for everything else --
-sessions nobody here owns -- and it was only ever a way of guessing at
-something we could not see.
+not an estimate.  The TTL is what is left for everything else -- sessions
+nobody here owns -- and is only ever a guess.
 
-Asked of `agent-river--shell-hosted', which is per session, where this
-used to ask a flag that went sticky as soon as agent-shell had hosted
-*anything* here.  The flag was a way of not forgetting a buffer that had
-died, which the index does properly; what it cost was every session run
-from a terminal, which has no buffer here and never did and was called
-inactive for it."
+Asked of `agent-river--shell-hosted', which is per session: a global flag
+would call every session run from a terminal inactive, since it has no
+buffer here and never did."
   (cond
    ((agent-river--shell-hosted (agent-river-state-id state))
     (and (agent-river--shell-buffer (agent-river-state-id state)) t))
@@ -704,12 +646,11 @@ itself."
 (defun agent-river--active-count ()
   "Return how many sessions are currently live.
 
-Sessions, and only sessions.  A subagent used to have a registry entry of
-its own and be counted here; it is a tally on its parent now, so a session
-with three of them running counts once.  That is right for the one thing
-this answers -- whether a second session exists, and the label column is
-therefore worth drawing -- and wrong for anything asking how many agents
-are at work, which has to add each session's running delegates
+Sessions, and only sessions: a subagent is a tally on its parent, so a
+session with three of them running counts once.  That is right for the one
+thing this answers -- whether a second session exists, and the label
+column is therefore worth drawing -- and wrong for anything asking how
+many agents are at work, which has to add each session's running delegates
 \(`agent-river-children') to this number."
   (let ((n 0))
     (maphash (lambda (_id state)
@@ -766,10 +707,8 @@ no process this Emacs can see -- which is why silence is reported as
 (defun agent-river--delegated-p (event)
   "Return non-nil when EVENT reports a call a subagent made.
 
-The payload says so -- a subagent's hook call carries its parent's session
-id and an agent_id of its own -- which is the whole of what this ever
-needed to know.  It used to be answered by looking for a registry entry
-that existed only so that there would be something to ask."
+The payload says so: a subagent's hook call carries its parent's session
+id and an agent_id of its own."
   (let ((agent (plist-get event :agent)))
     (and agent (not (string-empty-p agent)) t)))
 
@@ -806,13 +745,9 @@ change of task; the per-task one answers \"what is being worked on now\"
 rather than \"what has been opened all afternoon\".  Reporting one while
 labelling it the other is how a panel starts misleading people.
 
-Both are counted for every path, and for a file that is now all this does:
-no view names a file any more.  What still reads a *file* entry is
-`agent-river--hottest' (the report and the fail-streak signal, both of
-which go to the agent rather than to a buffer),
-`agent-river--artifact-list' (the approval queue\'s context line, the name
-alone) and `agent-river--gone-artifacts'.  What reads a *declared* key is
-the map."
+Both are counted for every path.  No view names a file: what still reads a
+*file* entry is `agent-river--hottest', `agent-river--artifact-list' and
+`agent-river--gone-artifacts'.  What reads a *declared* key is the map."
   (when (and path (not (string-empty-p path)))
     (agent-river--touch-1 (agent-river-state-artifacts state) path wrote)
     (agent-river--touch-1 (agent-river-state-task-artifacts state) path wrote)))
@@ -842,13 +777,10 @@ stale anchor would go on claiming the outside directory forever."
 (defun agent-river--delegate (state agent type &optional step failed done)
   "Record what subagent AGENT of TYPE did, on STATE's own tally.
 
-The whole of what the split into separate registry entries was for, at the
-size the question actually is: what did this session set in motion, how far
-has it got, and is it finished.  A plist rather than an `agent-river-state'
-because a subagent has none of the things a state carries -- no prompt, no
-working directory, no place, no intent, nothing that can be told to it --
-and giving it one meant every reader of the registry began by sorting it
-back out."
+What this session set in motion, how far it has got, and whether it is
+finished.  A plist rather than an `agent-river-state' because a subagent
+has none of the things a state carries -- no prompt, no working directory,
+no place, no intent, nothing that can be told to it."
   (let* ((table (agent-river-state-subagents state))
          (cell (and table agent (gethash agent table))))
     (when (and table agent (not (string-empty-p agent)))
@@ -1128,7 +1060,7 @@ replaying a session's events from the start."
 The second folded table beside `agent-river-registry', and the only other
 one: everything else this package keeps in a hash is a current-state fact
 queried where it is read -- which buffer hosts a session, what a session
-is waiting to be allowed, what git last said about a tree.
+is waiting to be allowed.
 
 Keyed the same way the session tables are, so that a key here and a key
 there are the same artifact and a view can put the two readings together
@@ -1148,18 +1080,8 @@ created**: `agent-river-ended' and `agent-river-note-artifact' name no
 domain and must go on working, which they do because by then the key is
 in the table.  Where it is not, the producer has said a thing is over or
 has been noted before saying what it is, and there is nothing to make a
-record out of.
-
-It used to default to `file', and that default was the hole this
-signal closes.  `file' was never a domain in the sense the others are: it
-was `agent-river--key-domain's word for a key the table does *not* have,
-so a record declared into it was a record that existed and was
-indistinguishable from one that did not -- listed by no section, drawn on
-no line, and reported by `agent-river-domains' as a domain that draws
-nothing.  Two live ways in: `agent-river-appeared' called without a
-`:domain', and an `ended' or a note arriving for a key nobody had
-declared, which is what a poller that first sees a ticket already closed
-produces."
+record out of.  There is no default domain: a record standing for \"nobody
+declared this\" would be indistinguishable from no record at all."
   (or (gethash key agent-river-artifacts)
       (progn
         (unless domain
@@ -1249,13 +1171,10 @@ second account this table exists to avoid."
 NEW wins per key, and the order of OLD is kept so a context that is read
 as a list does not reshuffle itself every time one field is updated.
 
-Every cell is built fresh, and that is the whole of what this owes.  It
-used to copy the spine with `copy-sequence\=' and update in place, which
-shares the cells: a context handed out by `agent-river-artifacts-list\=' is
-the record\='s own list, so a consumer holding one taken before the update
-read the value from after it -- an alist that changed under a reader with
-no event at that reader\='s end accounting for it, which is the second
-account this table exists to avoid, arrived at through the back.  A
+Every cell is built fresh, and that is the whole of what this owes.
+Copying the spine and updating in place shares the cells, so a context
+handed out by `agent-river-artifacts-list\=' would change under a consumer
+holding it with no event at that consumer\='s end accounting for it.  A
 producer\='s own list is left alone for the same reason; it may well be a
 quoted literal, and nothing here may write into one."
   (let (merged)
@@ -1274,16 +1193,10 @@ The artifact-side counterpart to `agent-river-observers', run by the same
 runner and under the same three rules: its own guard, retired on the first
 error, and torn down through the `agent-river-retire' symbol property.
 
-The same runner, not a second one of its own.  A copy of that loop would
-have been four lines and is exactly the shape this package keeps getting
-wrong: those three rules are the whole of what a consumer inherits, each
-of them is a mistake already made here once, and a second copy is a second
-place for one of them to be quietly dropped.  `agent-river--run-observers'
-takes the hook symbol for that reason: the rules are load-bearing, and both
-hooks want the same three.  Not because two callers are a threshold -- a
-count decides by arithmetic what has to be decided by looking, which is the
-convention in AGENTS.md about merging only where there is something to
-merge.
+The same runner, not a second one of its own: those three rules are the
+whole of what a consumer inherits, and a second copy of the loop is a
+second place for one of them to be quietly dropped.  That is why
+`agent-river--run-observers' takes the hook symbol.
 
 A separate hook rather than the same one, because the subject differs.
 One hook carrying either an `agent-river-state' or an
@@ -1312,19 +1225,14 @@ Returns the artifact when this event was the key's first appearance here,
 and nil when it was already known.  That is the dedup answer -- \"have I
 seen this one?\" -- given by the table rather than by every producer
 keeping a list of its own, and it is a return value rather than a query so
-that asking and folding cannot come apart.  It is the same shape
-`agent-river--signalled-p' gives one subject over, for the same reason: a
-tally says how many, a log says which, and only the second can stop a
-thing being delivered twice.
+that asking and folding cannot come apart.
 
 Nothing here can reach the agent.  Signals travel back through
 `agent-river-observe' alone, and an artifact has no session to answer --
 which is the whole case this table exists for.
 
-An empty :key is refused, the way `agent-river-reach\=' refuses one.  A
-record under no key is addressable by nobody -- it cannot be reached,
-found, ended or dropped, and it would head a map section answering to
-nothing -- so the producer\='s mistake is better said than kept."
+An empty :key is refused, the way `agent-river-reach\=' refuses one: a
+record under no key can be reached, found, ended or dropped by nobody."
   (let* ((key (agent-river--artifact-key event))
          (fresh (not (agent-river-artifact-known-p key)))
          (artifact (agent-river-artifact key
@@ -1425,18 +1333,12 @@ where you can.
 undeclared, and undeclared is a path: resolved against the session cwd,
 `inc:INC-444\=' becomes `/repo/inc:INC-444\=', which
 `agent-river-forget-gone-files\=' then offers to sweep as a name that is not
-on disk.  That is exactly the mistake `agent-river--key-domain\=' exists to
-stop, arrived at by doing the two calls in the wrong order.
-
-The window closes by itself -- the domain is read at every draw, so
-`agent-river-appeared\=' landing later repairs the placement -- and the one
-thing that can happen inside it is that sweep, which is a command and not
-a timer.  It is still the wrong order: `agent-river-appeared\=' says what a
-key is and this says who is on it, and nobody can answer the second
-question about a subject they have not named yet.  Declaring is not done
-here for the reason the table is not a mirror -- a file reached this way
-would earn a record saying nothing the session tables do not already say,
-and there would then be two calls that declare a domain."
+on disk.  The window closes by itself -- the domain is read at every draw,
+so `agent-river-appeared\=' landing later repairs the placement -- but the
+order is still wrong: nobody can say who is on a subject they have not
+named yet.  Declaring is not done here because the table is not a mirror
+of the session tables, and because two calls declaring a domain would be
+two places it is decided."
   (let* ((key (or key ""))
          (session (or id agent-river--current))
          (state (and session (gethash session agent-river-registry))))
@@ -1458,11 +1360,8 @@ and there would then be two calls that declare a domain."
 (defun agent-river-reaching (key &optional scope)
   "Return which sessions have reached artifact KEY, as a list of plists.
 
-Matched on the key exactly.  There was a second query beside this one,
-`agent-river-touching', which matched on a *basename* so that a worktree
-and a main checkout read as one file; it went with the views that named
-files, and an artifact key already *is* its own name and has no other
-spelling.
+Matched on the key exactly: an artifact key *is* its own name and has no
+other spelling.
 
 SCOPE is `session' for the whole session, `task' or nil for this task."
   (let (hits)
@@ -1483,15 +1382,14 @@ SCOPE is `session' for the whole session, `task' or nil for this task."
 
 ;; Linking by hand -- the user as the producer
 ;;
-;; `agent-river-reach' has had no shipping caller: the edge between a
-;; session and an artifact can only be reported by whoever performed the
-;; dispatch, and nothing in this package performs one.  A user does -- so
-;; the gesture below is that report, made where "which session" is not a
-;; guess.
+;; The edge between a session and an artifact can only be reported by
+;; whoever performed the dispatch, and nothing in this package performs
+;; one.  A user does -- so the gesture below is that report, made where
+;; "which session" is not a guess.
 ;;
-;; It is the first caller of `agent-river-appeared' and `agent-river-reach'
-;; together, and cannot get the order wrong: both halves are one function,
-;; and the session is checked before either runs.
+;; It calls `agent-river-appeared' and `agent-river-reach' as one
+;; function, so a caller has no order to get wrong, and the session is
+;; checked before either half runs.
 
 (defun agent-river--read-session ()
   "Return the session a gesture is about, asked only where it is in doubt.
@@ -1503,9 +1401,8 @@ has an exact answer rather than an estimate.
 
 Anywhere else this prompts, and deliberately does not fall back to
 `agent-river--current' the way `agent-river-reach' does when handed no id.
-That default is whichever session acted most recently; with several
-running it is quite possibly not the one meant, and the misattribution
-would be silent -- a wrong edge in the artifact tables reads exactly like
+That default is whichever session acted most recently, quite possibly not
+the one meant, and a wrong edge in the artifact tables reads exactly like
 a right one."
   (or (agent-river--shell-session)
       (let (cands)
@@ -1560,17 +1457,12 @@ the key's own spelling instead is the prefix rule
 
 No match is required: a domain nothing here has heard of is still drawn,
 and something that has arrived must not wait for configuration before it
-can be seen.  An empty answer is refused, which is the same refusal
-`agent-river-artifact' makes one layer down -- there was a second one
-here, of the literal domain `file', and it went with `file' as a
-hardwired name for the absence of a record.
+can be seen.  An empty answer is refused, the same refusal
+`agent-river-artifact' makes one layer down.
 
-The candidates are `agent-river-domains', which is what the table has.
-There was a presentational list beside it once, `agent-river-map-domains',
-and reading *that* here would have made a view's settings decide what a
-producer may declare -- offering a domain nothing has ever arrived under
-while the domains that did arrive went unlisted, which is the wrong way
-round for a list whose job is to save typing."
+The candidates are `agent-river-domains', which is what the table has --
+never a view's own list of domains, which would let a view's settings
+decide what a producer may declare."
   (let ((answer (string-trim
                  (completing-read
                   "Domain: " (mapcar #'symbol-name (agent-river-domains))))))
@@ -1627,21 +1519,12 @@ which is `agent-river-reach's rule and this only passes it on."
 (defun agent-river-domains ()
   "Return every domain with a record in `agent-river-artifacts\=', in arrival order.
 
-A domain is who knows what a key means.  `file\=' is this package\='s own and
-is what an unnamespaced key is: a name relative to a session\='s cwd, which
-`agent-river--rel\=' produced and `agent-river--artifact-absolute\=' can resolve.
-Anything else was declared by whoever put it here, and only that producer
-knows how to read it back.
+A domain is who knows what a key means.  It was declared by whoever put
+the record here, and only that producer knows how to read the key back.
 
-Derived, and that is the correction rather than the design.  This was a
-`defcustom\=' holding `(file)\=', documented as the list a reader could
-consult instead of walking the table -- and nothing ever added to it, so
-it went on saying `file\=' while `inc\=' records piled up beside it.  A
-declared list of what has arrived is a second account of the table by
-construction: it can only be right for as long as somebody keeps it in
-step, and here nobody did, which is the failure this package spends most
-of its comments avoiding one subject at a time.  The walk it was meant to
-save is the one `agent-river--domain-sections\=' was already doing."
+Derived from the table rather than declared in a variable: a declared list
+of what has arrived is a second account of the table, right only for as
+long as somebody keeps it in step."
   (let (domains)
     (maphash (lambda (_key artifact)
                (let ((domain (agent-river-artifact-domain artifact)))
@@ -1671,10 +1554,8 @@ outside, right only for as long as somebody kept them in step."
   "Return the artifact KEY names as a plist, or nil.
 
 The cheap way to ask about one: a `gethash' and one rendering, where
-`agent-river-artifacts-list' renders every record and asks
-`agent-river-reaching' -- a walk of the whole session registry -- for each
-of them.  Reading one key out of that is a walk of every session per
-artifact, for an answer all but one line of which is thrown away."
+`agent-river-artifacts-list' renders every record and walks the whole
+session registry for each of them."
   (when-let* ((artifact (and key (gethash key agent-river-artifacts))))
     (agent-river--artifact-plist artifact)))
 
@@ -1749,12 +1630,9 @@ same shape: nothing undoes this, and what it throws away is the half of
 the state no event can rebuild.  A session folds again from its next hook
 call; a record that arrived from a webhook an hour ago arrived once.
 
-Always, rather than only when a person typed it.  `called-interactively-p\='
-was the obvious reading and is the wrong one twice over -- it answers nil
-in batch, so the question would have been the one behaviour here the suite
-could not hold, and a producer clearing the table from Lisp is not a case
-this command is for: it is a gesture, and `clrhash\=' on
-`agent-river-artifacts\=' is what code that means it should say."
+Always, rather than only when a person typed it: this is a gesture, and
+`clrhash\=' on `agent-river-artifacts\=' is what code that means it should
+say."
   (interactive)
   (let ((n (hash-table-count agent-river-artifacts)))
     (cond
@@ -1852,28 +1730,15 @@ SCOPE is `session' for the whole session, or nil for the current task."
 (defun agent-river--answerable-p (event)
   "Return non-nil when an observation produced for EVENT can reach an agent.
 
-Measured rather than assumed.  A subagent's hook call carries its parent's
-session id and its own agent_id, `PostToolUseFailure' is wired
-synchronously, and `agent-river-hook' duly writes `additionalContext' for
-it -- and the text arrives nowhere.  Two subagents asked outright reported
-never seeing it, a trace confirmed the signal was produced on a genuinely
-synchronous hook rather than on a `think' refined into a `fail', and the
-session transcript holds no sidechain entry containing it.
+A signal produced for a subagent reaches nobody -- its hook is
+synchronous and `additionalContext' is written for it, but the text
+arrives nowhere -- so it would be written into a pipe nobody reads, and
+counting it in `signals' would make that tally report a conversation that
+never happened.
 
-A signal produced for a subagent is therefore written into a pipe nobody
-reads, and counting it in `signals' would repeat the very lie the gate on
-`agent-river-answering-kinds' exists to stop: a tally whose whole purpose
-is to make \"how often was the agent told something\" observable,
-reporting conversations that never happened.
-
-Asked of the EVENT rather than of the state, which is the whole of what
-this needed to know all along: the payload says whether a subagent made
-the call, and the session it belongs to is answerable either way.  It used
-to ask a registry entry that existed only so that this question had
-something to ask, and that entry is gone.
-
-Claude Code as measured on 2026-09-13; nothing is known about whether
-Codex or Gemini CLI behave the same way."
+Asked of EVENT rather than of a state: the payload says whether a subagent
+made the call, so the session it belongs to is answerable either way.
+Only known to hold on Claude Code; Codex and Gemini CLI are untested."
   (not (agent-river--delegated-p event)))
 
 (defun agent-river--signalled-p (state id)
@@ -1908,14 +1773,11 @@ it back through `emacsclient', whose printed representation of a plain
 string is then parsed as JSON, and an embedded newline would break that.
 
 :id names *what* is being reported rather than what was said about it, and
-an id already in `signals' is not reported again.  Without it the throttle
-keyed on the failure streak alone -- a number that does not move when the
-agent merely acts -- so a single run of failures was re-delivered on every
-tool call that followed it, which is the exact thing the throttle exists
-to prevent.
-
-The two do different jobs and both are needed: the throttle decides which
-streaks are worth a word, the id decides that each of them gets one."
+an id already in `signals' is not reported again.  The throttle alone
+keys on the failure streak, a number that does not move when the agent
+merely acts, so one run of failures would be re-delivered on every tool
+call after it: the throttle decides which streaks are worth a word, the id
+decides that each of them gets one."
   (let* ((streak (agent-river-state-fail-streak state))
          ;; Which run, and how deep into it: the run number distinguishes
          ;; separate streaks, the streak earns each of 3, 6, 9 its own word
@@ -1975,10 +1837,8 @@ streaks are worth a word, the id decides that each of them gets one."
   "Return the offsets in TEXT just past every sentence that ends inside it.
 
 A stop is a full stop, question or exclamation mark followed by a space or
-by the end -- the boundary `agent-river--first-sentence\=' has always used,
-two marks wider.  An abbreviation (\"e.g. \") makes a false one, and that
-is the whole of what it costs: a cut in a slightly odd place, which is
-what cutting by counting characters does everywhere."
+by the end.  An abbreviation (\"e.g. \") makes a false one, and that is the
+whole of what it costs: a cut in a slightly odd place."
   (let ((stops nil) (start 0))
     (while (string-match "[.!?][\"')]*\\(?: \\|\\'\\)" text start)
       (push (match-end 0) stops)
@@ -2019,11 +1879,10 @@ boundary already begins at a whole one."
 
 The closing *line* first, and its last sentence where the line is too
 long.  Lines rather than sentences because of how these messages are
-actually written: a summary, a list of what was done, and then the ask or
-the verdict on a line of its own.  Squished into one line the bullets and
-the ask become a single sentence, so asking for the last sentence there
-answers with the whole tail of the message -- which is how this heuristic
-first went wrong, and the case it exists for."
+written: a summary, a list of what was done, and then the ask or the
+verdict on a line of its own.  Squished into one line the bullets and the
+ask become a single sentence, so a last-sentence rule answers with the
+whole tail of the message."
   (let* ((lines (seq-remove #'string-empty-p
                             (mapcar #'string-trim
                                     (split-string (or text "") "\n"))))
@@ -2073,12 +1932,10 @@ boundary otherwise."
   "Return TEXT as one line of about WIDTH characters, cut where it means something.
 
 For the agent\\='s own prose, which is the one text here whose length and
-shape it chooses.  `agent-river--clip\\=' takes the first WIDTH characters,
-and on a turn\\='s output those are the least informative ones it has: an
-answer opens by restating the question and closes on what it concluded or
-what it wants from you, and the middle is a prose account of the tool
-calls -- which is the part this state has already measured, in steps,
-files and failures.  So both ends are kept and the middle is the gap.
+shape it chooses.  Both ends are kept and the middle is the gap: an answer
+opens by restating the question and closes on what it concluded or what it
+wants from you, while the middle is a prose account of the tool calls,
+which this state has already measured in steps, files and failures.
 
 The gap is marked, because the result is then a quotation with a hole in
 it rather than something the agent said, and the two must not look alike.
@@ -2107,18 +1964,15 @@ anything -- since two fragments are worse than one sentence."
 (defun agent-river--log-text (text)
   "Return TEXT as something one log line can hold.
 
-Every other way into `agent-river-log\=' has done this already: a tool
-argument is squished and clipped where the event is built
-(`agent-river--event\='), because the HUD is line-based.  A newline does not
-make two log lines -- it makes one line and a remainder carrying none of
-the properties `n\=' and `>\=' read, and `agent-river-max-entries\=' then trims
-by counting lines that are no longer one entry each.
+The HUD is line-based: a newline does not make two log lines, it makes one
+line and a remainder carrying none of the properties `n\=' and `>\=' read,
+and `agent-river-max-entries\=' then trims by counting lines that are no
+longer one entry each.
 
-The artifact path had none of it, and it is the path whose text is least
-ours: a ticket title or a note body arrives at whatever length and shape
-its producer sent, where a tool argument at least came from a host this
-file knows the dialect of.  Control characters go first and the whitespace
-collapse follows, so an escape sequence cannot survive as a gap."
+For producer text above all -- a ticket title or a note body arrives at
+whatever length and shape its producer sent.  Control characters go first
+and the whitespace collapse follows, so an escape sequence cannot survive
+as a gap."
   (agent-river--clip
    (agent-river--squish (replace-regexp-in-string "[[:cntrl:]]+" " " (or text "")))
    agent-river-detail-width))
@@ -2157,13 +2011,10 @@ to save a few characters of a log line."
   "Return the file path named in tool INPUT, whichever host named it.
 Claude Code and Codex say `file_path', Gemini CLI says `absolute_path'
 for a read and `file_path' for a write, and several tools say plain
-`path'.  An agent-shell session adds `filePath' and `filepath' -- the ACP
-`rawInput' for a Claude edit carries the target under the camel-case
-`filePath', which the snake-case ladder missed, so every edit went
-uncounted and the map never drew it.  `fileName' is what a
-Copilot-style diff names.  The artifact tables are keyed on this, so a
-name we did not know would not fail -- it would quietly stop counting
-files, which is the failure mode this whole file is written against."
+`path'.  An agent-shell session adds `filePath' and `filepath', the ACP
+`rawInput' spellings, and `fileName' is what a Copilot-style diff names.
+The artifact tables are keyed on this, so a name we did not know would not
+fail -- it would quietly stop counting files."
   (seq-some (lambda (key) (agent-river--arg input key))
             '(file_path filePath filepath absolute_path path fileName)))
 
@@ -2223,12 +2074,10 @@ is taken at its word."
 (defun agent-river--interrupted-p (payload)
   "Non-nil when PAYLOAD's tool response says the user stopped the call.
 
-Guarded with `consp' like `agent-river--failed-p', and for a reason that
-had already bitten: a tool response is not always an alist.  An MCP tool
-answers with an *array* of content parts, and the hook parses arrays as
-vectors, so `alist-get' threw on every one of them -- which cost the
-whole event, leaving each MCP call unfolded and logged as `hook failed'
-instead of counted."
+Guarded with `consp' like `agent-river--failed-p': a tool response is not
+always an alist.  An MCP tool answers with an *array* of content parts,
+which the hook parses as a vector, and `alist-get' on one throws -- losing
+the whole event."
   (let ((response (alist-get 'tool_response payload)))
     (and (consp response)
          (eq t (alist-get 'interrupted response)))))
@@ -2480,23 +2329,19 @@ Called from BUFFER's `kill-buffer-hook'.
 `agent-shell-restart' kills the shell buffer and starts a new session with
 a new id, so the state the old id folded to can no longer be jumped to --
 and it is kept, not dropped, because `agent-river-status' still reports on
-a session that has ended.  What must not survive is the *view*: the block
-is drawn on the next event, and after a restart no event ever addresses
-the old id again, so without this the line sits there inviting a RET that
-can only fail.  The state is left to `agent-river--active-p', which already
-calls a hosted session whose buffer is gone by what it is.
+a session that has ended.  What must not survive is the *view*: no event
+ever addresses the old id again, so without this the line sits there
+inviting a RET that can only fail.  The state is left to
+`agent-river--active-p', which already calls a hosted session whose buffer
+is gone by what it is.
 
 Deferred by a tick, because `kill-buffer-hook' runs while the buffer is
 still live: redrawn inline, `agent-river--shell-buffer' would still find
 the dying buffer and draw the session straight back in.
 
-The map used to be told as well, and it no longer is.  It read a session
-as existing in three places -- a position marker, a shaded name, and the
-agent count in its header -- and each of them went with the reading it
-was part of, so a kill now changes nothing the map draws: the names on
-the lines a session reached stay whatever becomes of the session, because
-it did reach them.  Marking the map dirty here would be a redraw that can
-only produce the same text."
+Only the block.  A name the map drew stays on the lines that session
+reached whatever becomes of the session, because it did reach them, so
+there is nothing there a kill can change."
   (remhash buffer agent-river--teardown-hooked)
   (run-at-time 0 nil #'agent-river--redraw-block))
 
@@ -2755,12 +2600,13 @@ ever supplies the sessions the first way in cannot reach."
 
 ;;; What the agent said -- the other half of a turn
 ;;
-;; The fold knows what a session *did* and what it *thought*, but never
-;; what it *said*: a turn's output reached the log only as a `done' line.
+;; What a session did and what it thought are folded from the events it
+;; makes; what it *said* comes in here, as one `say' event carrying the
+;; end of a turn.
 ;;
-;; The hooks can't close that -- none carries the message text -- so this
-;; follows the stream, like the thought path: a session with no agent-shell
-;; buffer gets no `say' lines at all.
+;; No hook carries the message text, so this follows the stream, like the
+;; thought path: a session with no agent-shell buffer gets no `say' lines
+;; at all.
 ;;
 ;; Not gated on `agent-river--claim': that gate is about who counts a
 ;; session's steps once, and no hook reports a message, so there is
@@ -2818,13 +2664,12 @@ No cwd, deliberately, which puts this with the events made inside Emacs
 rather than with the steps: the fold refreshes the anchor from every event
 that carries one, and a `say' reached no file.  Carrying the shell
 buffer\='s `default-directory' would have every turn end re-anchor a
-session the hooks anchored -- and the two spellings need not agree, since
+session the hooks anchored, and the two spellings need not agree since
 `expand-file-name' does not resolve a symlink and a host\='s reported cwd
-may, so keys relativised against one would then resolve against the
-other.  What that costs is a session folded from this path *alone* -- no
-hooks, `agent-river-watch-mode' off -- which has no cwd and so no place in
-the block.  It also has no artifact keys, which is the only thing an
-anchor is for, so there is nothing there to misplace."
+may.  What that costs is a session folded from this path *alone* -- no
+hooks, `agent-river-watch-mode' off -- which then has no cwd and so no
+place in the block; it has no artifact keys either, which is the only
+thing an anchor is for."
   (let ((chunks (gethash session agent-river--say-runs)))
     (remhash session agent-river--say-runs)
     (let ((text (apply #'concat (nreverse chunks))))
@@ -2930,7 +2775,8 @@ something anyone can be told later."
 ;; agent-shell asks before a tool call the agent may not make on its own,
 ;; and renders the question in the session buffer.  With several sessions,
 ;; which is waiting and for what is exactly the question the HUD exists to
-;; answer, and today it cannot: the `waiting' phase is just `idle'.
+;; answer -- and the phase alone cannot say it, since a session holding a
+;; door open reads as `waiting', which is only the end of a turn.
 ;;
 ;; The offer is read through `agent-shell-permission-responder-function', a
 ;; documented variable carrying the tool call, the options and a function
@@ -3091,8 +2937,7 @@ most sessions in it."
            (agent-river-log "ask" (agent-river--offer-text offer)
                             (agent-river--shell-label session))
            ;; The block carries the open question ahead of everything
-           ;; measured on the line, so it has to be redrawn for one -- the
-           ;; log line used to do that on its way past and no longer does.
+           ;; measured on the line, so it has to be redrawn for one.
            (agent-river--redraw-block)
            ;; Drawn rather than marked dirty, unlike the map: that observer
            ;; fires on every tool call, this fires when somebody is asked a
@@ -3316,10 +3161,9 @@ while this buffer happened to be open belongs to whoever switched it on.")
 (defvar-local agent-river--approval-expanded nil
   "Request ids whose block is showing all of its arguments.
 
-Buffer-local and kept here rather than in overlays, for the reason the
-HUD's `agent-river--panel-expanded' is: the buffer is erased and rebuilt
-on every question and every tick, so a fold that lived in the text would
-spring open again a second later.")
+Buffer-local and kept here rather than in overlays: the buffer is erased
+and rebuilt on every question and every tick, so a fold that lived in the
+text would spring open again a second later.")
 
 (defun agent-river--offer-answered-p (offer)
   "Return non-nil when agent-shell's own account says OFFER is answered.
@@ -3437,12 +3281,11 @@ several screens up."
                          (when (> streak 0)
                            (propertize (format "%d failing" streak)
                                        'face 'agent-river-fail))
-                         ;; The name without its count -- the one place
-                         ;; this differs from the panel's reading of the
-                         ;; same table, since the count is the least of
-                         ;; what a decision turns on.  Still read through
-                         ;; `agent-river--artifact-list' so the two can't
-                         ;; disagree about which file it is.
+                         ;; The most-touched name, and no count beside it:
+                         ;; what the session is about to be allowed to act
+                         ;; on is most of what an allow-or-deny turns on,
+                         ;; and how often it has been reached is the least
+                         ;; of it.
                          (when-let* ((hot (car (agent-river--artifact-list state))))
                            (propertize (car hot) 'face 'agent-river-time))))))
       (when parts (mapconcat #'identity parts " · ")))))
@@ -3641,8 +3484,8 @@ fires when somebody has been asked a question and is waiting."
 
 ;;; Moving about the queue
 ;;
-;; The same keys as the HUD and the map, for the same three grains -- but
-;; here the coarse grain and the attention grain are the same motion, since
+;; The same keys as the HUD and the map, for the same grains -- but here
+;; the coarse grain and the attention grain are the same motion, since
 ;; every block in this buffer is a question waiting on somebody.  Bound all
 ;; the same so a reader arriving from either other buffer can press `>' and
 ;; get the next thing that wants them.
@@ -3982,17 +3825,14 @@ One buffer read for both meters, since they live in one alist and are
 wanted on the same event: `:used' is the context fill, `:cost' what has
 been spent, `:currency' what that is in.
 
-Both are read past agent-shell\='s own starting values, which are 0 and 0.0
-and are indistinguishable from a reading by their type alone.  A context
-of zero is not a session using nothing -- one that has been prompted holds
-thousands of tokens before the agent says a word -- it is a server that
-does not report one, and taken as a measurement it would have the graph
-draw a full row of idle bars for a session that may be working hard.  A
-cost counts as reported when it is positive, or when a currency was named
-beside it: that is the evidence the figure is the server\='s rather than the
-value the state was born with, and it leaves a run that is genuinely
-reported as free with its zero while keeping an unreported one out of the
-money in `agent-river-spend'.
+Both are read past agent-shell\='s own starting values, 0 and 0.0, which by
+type alone are indistinguishable from a reading.  A context of zero is a
+server that does not report one rather than a session using nothing -- one
+that has been prompted holds thousands of tokens before the agent says a
+word -- so it counts only when positive.  A cost counts when it is
+positive or when a currency was named beside it: the currency is the
+evidence the figure is the server\='s, and this leaves a genuinely free run
+its zero while keeping an unreported one out of `agent-river-spend'.
 
 Nil, and nil fields within it, are the ordinary answer rather than a
 failure -- a session nobody here hosts has no meter to read, and one whose
@@ -4012,12 +3852,11 @@ ACP server reports no cost never will have."
   "Record READING as what SESSION was using as of NOW.
 
 The graph is made of the differences between readings, so the *first*
-reading of a session adds nothing to it.  Otherwise a session this Emacs
-has just adopted -- reloaded into, or started watching mid-task -- would
-draw its whole context as one spike at the moment we first looked, which
-is the one shape this view must never invent.  What the first reading does
-establish is `:since', which is what tells a bar nothing arrived in from a
-bar before there was anything to arrive.
+reading of a session adds nothing to it: a session this Emacs has just
+adopted -- reloaded into, or started watching mid-task -- would otherwise
+draw its whole context as one spike at the moment we first looked.  What
+the first reading does establish is `:since', which is what tells a bar
+nothing arrived in from a bar before there was anything to arrive.
 
 `:since' is set by the first *context* reading and not by the first sample
 of anything, which makes it the graph\='s own start: a session whose server
@@ -4067,11 +3906,11 @@ place it is presented as a fact."
 (defun agent-river--usage-trim (now)
   "Drop every session\\='s bars older than the horizon, as of NOW.
 
-Swept over the whole table rather than over the session being written.
-Trimming only that one left a session that has stopped being sampled --
-ended, or its shell buffer killed -- holding whatever bars it had at the
-end for as long as this Emacs runs, and made `agent-river--usage-max' walk
-every session ever seen rather than the ones still working.
+Swept over the whole table rather than over the session being written, so
+a session that has stopped being sampled -- ended, or its shell buffer
+killed -- does not hold its last bars for as long as this Emacs runs, and
+`agent-river--usage-max' walks the sessions still working rather than
+every one ever seen.
 
 What is deliberately not dropped is the entry.  Its `:cost' is what lets
 `agent-river-spend' answer for a session whose buffer is gone, which is
@@ -4094,9 +3933,9 @@ Cleared by `agent-river-reset'.  See `agent-river--usage-sample'.")
 Guarded like an observer, and for an observer\\='s three reasons: this runs
 on every tool call, it reads another package\\='s internals, and it is extra
 to the fold.  So it must not report itself as the fold having broken --
-that sends somebody to `agent-river-reset' over a decoration -- it must
-not repeat a failure thousands of times, and it must not go quiet either,
-which `ignore-errors' here did.  It says so once and stops sampling."
+that sends somebody to `agent-river-reset' over a decoration -- must not
+repeat a failure thousands of times, and must not go quiet either.  It
+says so once and stops sampling."
   (unless agent-river--usage-broken
     (condition-case err
         (when-let* ((reading (agent-river--usage-read session)))
@@ -4159,11 +3998,8 @@ say the same thing about work an order of magnitude apart -- which is the
 whole of what a stack of graphs is read for.
 
 Recomputed per line rather than memoised for the draw: this is a handful
-of sessions with a few dozen bars between them, and a dynamic binding to
-get right costs more than the microseconds it would save.  What keeps that
-true is `agent-river--usage-trim' sweeping the whole table rather than one
-session: without it this walk would grow with every session this Emacs had
-ever seen, and a memo would be answering the wrong question."
+of sessions with a few dozen bars between them, which
+`agent-river--usage-trim' keeps true by sweeping the whole table."
   (let ((window (* 2 (or agent-river-tokens-width 6)))
         (bar (agent-river--usage-bar now))
         (max nil))
@@ -4237,21 +4073,15 @@ column nothing can ever fill is the blank half of that mistake."
 (defun agent-river--usage-column (session &optional now)
   "Return SESSION\\='s graph padded to a fixed width, or nil.
 
-Every graph is the same length, and drawn first on the line -- ahead of
-the name -- that makes it a real column rather than a promise of one: only
-the outline marker comes before it, so the graphs stack into a strip that
-can be read straight down, which is what sharing one scale is for.
-Further right it sat behind a label and a task of whatever width the
-session had, and no two lines put it in the same place; the padding still
-bought the comparison there, since the rightmost bar is `now' in every
-graph wherever it starts, but nothing else.  Here it squares up the field
-after it as well, the name being the one that now starts at a fixed place.
-
-What the padding also buys is that a line\\='s own tail stops jumping when
-its session goes from unsampled to sampled.
+Every graph is the same length and drawn first on the line, ahead of the
+name: only the outline marker comes before it, so the graphs stack into a
+strip that can be read straight down, which is what sharing one scale is
+for.  It also squares up the field after it, the name being the one that
+starts at a fixed place.
 
 Padded with blank braille rather than spaces, so an empty column is
-exactly as wide as a full one in whatever font is drawing them.
+exactly as wide as a full one in whatever font is drawing them, and a
+line\\='s own tail does not jump when its session is first sampled.
 
 NOW is read once and handed to both readings below.  Left to each of them
 to ask, a draw that straddled a bar boundary would scale the graph against
@@ -4293,9 +4123,9 @@ This is where the cost is answered for, and it is the only place: the
 graph on the session line is the context window filling, because that
 moves as the work happens where the cost moves once a turn.
 
-Deliberately a query rather than a line in the HUD.  A total across
+Deliberately a query rather than a line in the HUD: a total across
 sessions belongs to no session, so it would need a line or a header of its
-own, and this view has spent one of those before and taken it back."
+own."
   (interactive)
   (let (rows totals)
     (maphash (lambda (session entry)
@@ -4448,9 +4278,9 @@ often the agent had to be told something is itself part of the state."
       (agent-river--ensure-timer)
       (agent-river--ensure-spinner)
       ;; Only ask for an observation on an event that can actually deliver
-      ;; one: computing it regardless meant a streak still standing at
-      ;; `idle' (whose hook is async) produced a signal that was logged and
-      ;; folded but never read, overcounting `signals'.
+      ;; one: asked regardless, a streak still standing at `idle' (whose
+      ;; hook is async) produces a signal that is logged and folded but
+      ;; never read, overcounting `signals'.
       (let ((signal (and (member kind agent-river-answering-kinds)
                          (agent-river--answerable-p event)
                          (agent-river--signal state))))
@@ -4593,9 +4423,9 @@ session that most recently acted."
 (defun agent-river--child-digest (child)
   "Return a compact summary of CHILD, one entry of `agent-river-children'.
 
-No `:hottest'.  A delegated file lands in the session's own artifact
-tables now, and a second per-child copy of that reading would be the one
-that could disagree with them."
+No `:hottest': a delegated file lands in the session's own artifact
+tables, and a per-child copy of that reading could only disagree with
+them."
   (list (or (plist-get child :type) "agent")
         :steps (plist-get child :steps)
         :failures (plist-get child :failures)
@@ -4707,8 +4537,8 @@ the line into markup."
   "Return one Markdown line for subagent CHILD, indented under its session.
 
 CHILD is one entry of `agent-river-children'.  No hottest file: a
-delegated file lands in the session's own tables now and is already named
-above, and a second reading of it here is the one that could disagree."
+delegated file lands in the session's own tables and is already named
+above, and a second reading of it here could only disagree."
   (let ((steps (plist-get child :steps))
          (failures (plist-get child :failures)))
     (format "    - %s — %s · %d step%s%s"
@@ -4839,22 +4669,17 @@ for; anywhere else it takes them all.  ID overrides both."
 (define-derived-mode agent-river-mode special-mode "Agent-Focus"
   "Major mode for the state block.
 
-The log used to run underneath this, and what the split bought is the
-whole of what this buffer now is: one line per live session, redrawn on
-every fold, in a window that can be sized to exactly that.  Nothing here
-grows, so nothing here scrolls."
+One line per live session, redrawn on every fold, in a window sized to
+exactly that.  Nothing here grows, so nothing here scrolls."
   ;; A session line carries a dozen fields and does not fit the side
   ;; window; truncating it would drop the numbers at the end of it.
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
   ;; Clear of the outline star, which is structure rather than content.
-  ;; The log clears its timestamp column instead -- the one width the two
-  ;; buffers used to share and no longer have a reason to.
   (setq-local wrap-prefix "  ")
-  ;; The session lines are outline headings, so `outline-cycle' (TAB) can
-  ;; fold each session's details.  The fold is for looking, not state: it
-  ;; lives in overlays, and the block is erased and rebuilt on every fold,
-  ;; so the next event naturally unfolds it again.
+  ;; The session lines are outline headings, so outline navigation walks
+  ;; the block as a document.  Matched against the buffer text, which is
+  ;; why the star stays a literal `*' whatever is drawn over it.
   (setq-local outline-regexp "^\\*+ ")
   (outline-minor-mode 1)
   ;; Explicitly none: a value left behind by an older version of this file
@@ -4885,15 +4710,13 @@ the view watching it."
 (defun agent-river--artifact-list (state &optional scope)
   "Return STATE's artifacts as (NAME . TOUCHES), most-touched first.
 
-NAME is the bare basename, so a file reached from a worktree and from the
-main checkout counts once.  SCOPE is `session' for the whole session, nil
-for the current task.
+NAME is the bare basename, and the touches of every path sharing one are
+summed, so a file reached from a worktree and from the main checkout
+counts once.  SCOPE is `session' for the whole session, nil for the
+current task.
 
-One caller left: the approval queue's context line, which takes the head
-of this list and shows the name without its count.  The HUD's `files'
-heading and the export's file list are gone, and `agent-river-touching'
--- which matched basenames the same way, and is where the summing rule
-came from -- with them."
+Read by the approval queue's context line, which takes the head of this
+list and shows the name without its count."
   (let ((totals (make-hash-table :test 'equal)))
     (maphash (lambda (path entry)
                (let ((name (file-name-nondirectory path)))
@@ -4919,10 +4742,9 @@ in step with anything and a redraw cannot jog the marker."
   "Return the frame a marker whose turn began at SINCE is showing.
 
 The phase is that session's own, so two agents given their prompts at
-different moments spin out of step -- which is what they are.  A single
-counter for the whole block put every marker on the same frame whatever
-each session was doing, and a row of markers moving as one reads as one
-animation about the block rather than as one apiece.
+different moments spin out of step -- which is what they are.  A row of
+markers moving as one would read as a single animation about the block
+rather than as one apiece.
 
 Derived from the clock rather than advanced by the timer, so the timer
 below has no state to keep and a redraw mid-turn cannot reset the phase.
@@ -4953,12 +4775,11 @@ sessions are working or matching a regexp over the rendered text."
             " ")))
 
 (defun agent-river--panel (state)
-  "Return the header-line summary of STATE, as a top-level outline heading.
+  "Return the summary line of STATE, as a top-level outline heading.
 
-This is the view of the *state*, as opposed to the buffer below it, which
-is the view of the event stream.  A scrolling log shows activity; only
-this line answers what is being worked on right now, which is the
-question an onlooker actually has."
+The view of the *state*: a log shows activity, and only this line answers
+what is being worked on right now, which is the question an onlooker
+actually has."
   (let* ((kids (agent-river-children (agent-river-state-id state)))
          (running (seq-count (lambda (c) (equal (plist-get c :status) "running"))
                              kids))
@@ -4972,7 +4793,7 @@ question an onlooker actually has."
                  ;; marker comes before it, so every graph starts in the
                  ;; same place and stacks into a strip read straight down,
                  ;; which is what sharing one scale is for.  It also
-                 ;; squares up the name, the one field after it that now
+                 ;; squares up the name, the one field after it that
                  ;; starts at a fixed place.
                  ;;
                  ;; It is in neither frame: everything after it is this
@@ -5029,14 +4850,14 @@ question an onlooker actually has."
                  (when (> running 0)
                    (format "%d subagent%s" running (if (= running 1) "" "s")))))))
     ;; The `* ' at column zero makes the line an outline heading, so
-    ;; outline navigation and `outline-cycle' (TAB) treat the block as a
-    ;; document.  It stays inside the make-visitable call so the whole
-    ;; line, star included, is the visitable region.
+    ;; outline navigation treats the block as a document.  It stays inside
+    ;; the make-visitable call so the whole line, star included, is the
+    ;; visitable region.
     ;;
     ;; `agent-river-line' is marked whether or not the session turned out
     ;; to be visitable: a line the motion can stop on and a line RET can
-    ;; act on are different questions, and tying them together made `n'
-    ;; skip every session agent-shell does not host.
+    ;; act on are different questions, and tying them together would make
+    ;; `n' skip every session agent-shell does not host.
     ;;
     ;; `agent-river-block' is what a redraw finds the line by, a second
     ;; property rather than `agent-river-session' reused, since that one
@@ -5052,11 +4873,10 @@ question an onlooker actually has."
 
 ;;; Moving about the HUD
 ;;
-;; The same three grains as the map, on the same keys: every line worth
-;; stopping on, the coarse structure alone, and the lines that want
-;; attention.  A session line here is a map entry; a log line is what
-;; neither view has an analogue for and takes the fine grain with the
-;; entries.
+;; The map's keys, for the grains these buffers hold: every line worth
+;; stopping on, and in the log the lines that want attention.  A session
+;; line here is a map entry; a log line is what neither other view has an
+;; analogue for and rides the fine grain with the entries.
 ;;
 ;; Which lines those are is read off `agent-river-line', marked where the
 ;; line is built -- not matched by a regexp over the rendered text, which
@@ -5204,25 +5024,18 @@ took a step."
 (defun agent-river--panel-block ()
   "Return one top-level panel line per live session.
 
-There is no heading closing the block off from the log below it.  One was
-tried -- `* -- eventlog', so the log was an outline subtree TAB could fold
-away -- and removed: a divider that exists only to be a fold handle earns
-its line from nobody who is reading, and TAB now unfolds the session under
-point instead.
-
-Lives at the foot of the log rather than in the header line, because a
-header line is structurally single-line: with two sessions it could only
-show whichever acted last, and the step count would jump between them
-with nothing to say they were different agents."
+A buffer of lines rather than a header line, which is structurally
+single-line: with two sessions it could only show whichever acted last,
+and the step count would jump between them with nothing to say they were
+different agents."
   (let ((states (agent-river--panel-states)))
     (when states
       (mapconcat #'agent-river--panel states "\n"))))
 
 (defun agent-river--update-panel (state)
   "Note STATE as the session that last acted, for `agent-river-set-intent'.
-No resolving to a parent any more: a subagent folds onto the session it
-was spawned from, so the session was already the state that was handed
-here."
+Nothing to resolve: a subagent folds onto the session it was spawned from,
+so STATE is already a session."
   (setq agent-river--current (agent-river-state-id state)))
 
 (defun agent-river--buffer ()
@@ -5291,13 +5104,8 @@ later finds it by."
 (defun agent-river--insert-block ()
   "Draw the state block into the current buffer, which holds nothing else.
 
-There is no separator to draw any more, and no marker to keep.  Both were
-the price of the log starting where the block stopped: the blank line was
-what kept the state from reading as the head of the stream, and
-`agent-river--block-end' was where everything downstream had to start
-looking to be sure it was in the log.  With the log in a buffer of its
-own, the block is the buffer and `point-max' is the answer to every
-question either of them used to be asked."
+No separator and no end marker: the block is the whole buffer, so
+`point-max' answers where it stops."
   (let ((block (agent-river--panel-block)))
     (when block
       (goto-char (point-min))
@@ -5320,11 +5128,10 @@ the text, the way it does for the insertion at the other end."
 
 (defun agent-river--block-here ()
   "Return the id of the session whose line point is on, or nil for none.
-This is the map\\='s `agent-river--map-here' at the block\\='s grain, for the same
-reason: the block is torn down and rebuilt, so a place in it has to be named
-rather than remembered as a position.  It held the id and an index while a
-session had detail lines under it, and is a plain id now that the block is
-one line per session."
+This is the map\\='s `agent-river--map-here' at the block\\='s grain, for the
+same reason: the block is torn down and rebuilt, so a place in it has to
+be named rather than remembered as a position.  A plain id, the block
+being one line per session."
   (get-text-property (line-beginning-position) 'agent-river-block))
 
 ;;;###autoload
@@ -5383,11 +5190,9 @@ motion would have left it."
 
 `save-excursion' cannot do this on its own, and the failure is silent:
 the marker it restores is inside the region the rebuild deletes, so it
-collapses to `point-min' and the new block is inserted in front of it.
-Point at the top of the buffer, on every refresh tick -- which is the
-block redrawing itself under whoever navigated into it, and the motion
-commands made pointless a second way after
-`agent-river--following-windows' stopped doing it.
+collapses to `point-min' and the new block is inserted in front of it --
+point at the top of the buffer on every refresh tick, which is the block
+redrawing itself under whoever navigated into it.
 
 So a block line is restored by what it names.  Point on no line of the
 block is nobody\='s place and goes to the head, which is also where a line
@@ -5428,10 +5233,9 @@ every tool call, whatever `agent-river--following-windows' had decided."
 A window is following while it shows the end of the buffer and has not
 been navigated, and `agent-river--follow' pins one to `point-max', so the
 last line is exactly the span that means \"nobody has moved this\".  The
-line alone, never more: this used to be the *first* line, with the state
-block underneath it in the same buffer, and counting the block in meant
-every line a reader could navigate to still counted as following -- so
-the next tool call pulled them off it.
+line alone, never more: any wider a span and a reader who had navigated
+would still count as following, and the next tool call would pull them
+off the line they chose.
 
 The trailing newline is why this steps back a line.  `point-max' sits at
 the start of an empty line after the newest entry, and a reader on the
@@ -5448,9 +5252,7 @@ entry itself has not moved either."
 Read before the buffer is touched, because the tail is about to move.
 Only these get pinned back afterwards: a window someone has scrolled or
 navigated away from is one they moved on purpose, and snapping it to the
-end on the next tool call makes the buffer unreadable by hand.  That is
-what it used to do, which is why the motion commands had to arrive with
-this."
+end on the next tool call would make the buffer unreadable by hand."
   (with-current-buffer buffer
     (let ((tail (agent-river--tail-start)))
       (seq-filter (lambda (window) (>= (window-point window) tail))
@@ -5461,10 +5263,7 @@ this."
 
 Oldest to newest, so this is an ordinary log and this is the ordinary
 thing to do with one: the newest entry is at the bottom and a window
-nobody has moved stays on it.  It was the other way round while the state
-block was pinned above the log in the same buffer -- newest first put the
-two things worth seeing together at the top, where neither could scroll
-away and nothing had to be tailed -- and that reason left with the block.
+nobody has moved stays on it.
 
 `window-start' is computed rather than left to redisplay, which would
 find point below the window and recentre: the newest line would land in
@@ -5550,8 +5349,7 @@ second verdict to a line that already carries its own."
 CALL names the tool call this line opens, so its outcome can later be
 written onto this line instead of taking one of its own.
 This is the view half, usable on its own; `agent-river-observe' is the
-half that also folds -- and the half that draws the block, which no
-longer happens here because the two are no longer one buffer."
+half that also folds, and the half that draws the block."
   (let* ((buffer (agent-river--log-buffer))
          ;; Asked before the edit, because the edit moves the head.
          (following (agent-river--following-windows buffer)))
@@ -5577,16 +5375,14 @@ longer happens here because the two are no longer one buffer."
 What `agent-river-auto-display' reads to open the block once and not
 again.  A plain flag rather than anything derived, because the fact it
 records is that the offer has been made -- a window deleted afterwards
-leaves nothing behind to ask, which is exactly why the old test (is one
-showing right now) reopened the block on the event after every time the
-reader closed it.
+leaves nothing behind to ask, so \"is one showing right now\" would
+reopen the block on the event after every time the reader closed it.
 
 Set three ways, all of them the block having been on screen: the event
 that opens it, `agent-river-show' being asked, and an event that finds a
-window already showing it.  The third is what keeps a reload honest --
-this file is reloaded into a live Emacs several times an hour, which
-clears the flag, and without it a block that has been up all morning
-would be reopened once more the next time the reader closed it.
+window already showing it.  The third is what keeps a reload honest -- a
+reload clears the flag, and without it a block that has been up all
+morning would be reopened once more the next time the reader closed it.
 
 Never cleared, `agent-river-reset' included: forgetting what the sessions
 did is not a request for a window.")
@@ -5615,10 +5411,8 @@ at."
 (defun agent-river-show-log ()
   "Display the event log in a side window under the block.
 
-The slot below the block\='s, so the two open into the layout they used to
-share as one buffer: the state on top, the stream beneath it.  Which is
-where the resemblance stops -- this window is the one that scrolls, and
-nothing here is ever pinned for the block\='s sake."
+The slot below the block\='s: the state on top, the stream beneath it.
+This is the window that scrolls."
   (interactive)
   (display-buffer (agent-river--log-buffer)
                   `((display-buffer-in-side-window)
@@ -5712,9 +5506,8 @@ exactly what was just forgotten.
 The map is drawn rather than marked dirty: its timer only runs while an
 agent is working, so a flag set between turns would sit there until the
 next one and the view would go on naming what was just forgotten.  Which
-is the whole reason the artifact commands come through here too -- they
-remove a subject rather than fold it, so the observer hook the map now
-listens on never hears about them."
+is why the artifact commands come through here too -- they remove a
+subject rather than fold it, so no observer hook hears about them."
   (when (get-buffer agent-river-log-buffer-name)
     (agent-river-log (or kind "note") text))
   (agent-river--redraw-block)
@@ -5761,8 +5554,9 @@ The map strikes those names through rather than dropping them, because a
 deletion is a thing the agent did and losing it would make the view
 flicker through every branch switch.  That is right while the deletion is
 news and wrong once it is history -- after a merge or a cleanup the
-struck-through lines are a list of what used to be there, and only you
-know when that moment has come.  So this is a command and not a rule.
+struck-through lines are a list of files nobody is looking for, and only
+you know when that moment has come.  So this is a command and not a
+rule.
 
 Measured against the disk, not against the strike-through.  An entry is
 also drawn as missing when it was reached through an anchor the root
@@ -5771,12 +5565,7 @@ elsewhere -- sweeping it would throw away a measurement about a file that
 still exists.  Such a line therefore stays struck through afterwards,
 which looks like the command missing one and is the command refusing one.
 
-It used to be on the map's own keymap, on the grounds that its subject was
-already gone -- what is lost is the record of an absence rather than the
-record of the work.  The map lists artifact records now and no files at
-all, so there is nothing there for this to be about and it is an ordinary
-\\[execute-extended-command] command again.  It asks either way, because
-nothing undoes it."
+It asks first, because nothing undoes it."
   (interactive)
   (let ((found nil) (n 0))
     (maphash (lambda (_key state)
@@ -5898,9 +5687,7 @@ The event\='s way in, where `agent-river--redraw-block' is the timer\='s: this
 creates the buffer when it has been killed and may open a window for it
 under `agent-river-auto-display', and a tick must do neither.  A buffer
 the user killed stays killed until something happens, and then it is the
-something that brings it back -- which is how it has always worked, from
-when every event went through `agent-river-log' and the block came with
-it.
+something that brings it back.
 
 A *window* the user closed is the other way round and stays closed: the
 opening is offered once per Emacs, and `agent-river--block-shown' is what
@@ -5909,10 +5696,9 @@ asked, and answers a different question -- has it ever been on screen
 versus is it on screen now -- which is why the branch where it is sets
 the flag rather than doing nothing.
 
-Called wherever a fold has moved what the block draws, which is now an
-explicit step rather than a side effect of logging.  That is the price of
-the split, and it is paid in the four places a state changes rather than
-on every line that is written about one."
+Called from each of the four places a state changes, not from wherever a
+line is logged: an outcome written onto the line that opened its call
+writes no line of its own."
   (let* ((buffer (agent-river--buffer))
          (shown (get-buffer-window buffer t)))
     (agent-river--redraw-block)
@@ -5958,8 +5744,8 @@ on every line that is written about one."
 ;; way to the other is here and there is none going back.  `q' is.
 (define-key agent-river-mode-map (kbd "l") #'agent-river-show-log)
 
-;; The log's own two grains.  No `M-n': a log line has no coarse structure
-;; over it, which is exactly what the block took away with it.
+;; The log's own two grains: every line, and the landmarks among them.  No
+;; `M-n', since a log line has no coarse structure over it to walk.
 (define-key agent-river-log-mode-map (kbd "n") #'agent-river-next-line)
 (define-key agent-river-log-mode-map (kbd "p") #'agent-river-previous-line)
 (define-key agent-river-log-mode-map (kbd "SPC") #'agent-river-next-line)
@@ -6030,10 +5816,9 @@ than at whatever the previous tick drew."
 The gate the animation runs on, and deliberately read off the rendering
 rather than off the registry.  `agent-river--star' marks a star exactly
 when `agent-river--state-working-p' holds for that session, so this is the
-same question one step later and cannot answer differently -- but asking
-the registry meant asking `agent-river--active-p' of every session, which
-for an agent-shell session walks every buffer in Emacs.  Six times a
-second, that was most of what the animation cost."
+same question one step later and cannot answer differently -- and it
+derives nothing, where asking the registry would ask
+`agent-river--active-p' of every session several times a second."
   (and (buffer-live-p buffer)
        (with-current-buffer buffer
          (and (text-property-not-all (point-min) (point-max)
@@ -6045,12 +5830,10 @@ second, that was most of what the animation cost."
 With STOP, take the frames off and leave the bare stars instead.
 
 Each star carries its session's phase as the value of its
-`agent-river-spinner' property, so what to draw is read off the mark,
-and the stars are found by that property rather than by looking for one
-in the text.  That mattered most while the log ran underneath -- a line
-of the agent's own words may well begin with a star -- and it is kept
-because the property is what says which session a star belongs to, which
-no search of the text could answer.
+`agent-river-spinner' property, so what to draw is read off the mark, and
+the stars are found by that property rather than by looking for one in the
+text: the property is also what says which session a star belongs to,
+which no search of the text could answer.
 
 `with-silent-modifications' because this is not an edit anyone should be
 able to undo, and at this rate an undo list of frame changes would grow
@@ -6085,11 +5868,8 @@ though it were still working."
   "Draw each session marker at its own phase, or stop once none is left.
 
 Derives nothing: every frame it needs is written on the mark it is
-painting, and whether to carry on is `agent-river--spinning-p'.  A tick
-that asked the registry instead spent almost all of itself walking every
-buffer in Emacs to decide whether anything was still working -- ~3 ms of
-it, against 9 us for this -- an answer the panel had already reached when
-it drew the block."
+painting, and whether to carry on is `agent-river--spinning-p' -- an
+answer the panel already reached when it drew the block."
   (condition-case err
       (let ((buffer (get-buffer agent-river-buffer-name)))
         ;; get-buffer, not agent-river--buffer: a tick must never resurrect
@@ -6117,11 +5897,11 @@ is drawn before this is called, so the marks are already the answer."
 ;;; Reading the artifact tables
 ;;
 ;; One derivation, and every view of those tables is built on it rather
-;; than walking the registry for itself: the map's roots, listing,
-;; parties and domain sections all answer from the same walk.
+;; than walking the registry for itself: the map's domain sections and
+;; the parties on its lines both answer from the same walk.
 ;;
 ;; Nothing here folds.  Readings are taken from the tables on every draw,
-;; like the panel's, so the two cannot drift and the fold stays pure.
+;; so no two readers can disagree about them and the fold stays pure.
 ;;
 ;; The keys deliberately cannot address a file on disk: `agent-river--rel'
 ;; normalises them relative to the session cwd, a bare basename outside
@@ -6132,13 +5912,9 @@ is drawn before this is called, so the marks are already the answer."
 (defun agent-river--party-label (state)
   "Return the name STATE goes by in a view that shows several of them.
 
-The session's label, and nothing else.  This used to name a subagent under
-its root -- `alpha/Explore' -- because a delegated file was in the child's
-artifact tables and never in the parent's, so naming the parent would have
-claimed it worked in a file it never opened.  A delegated touch lands in
-the session's own tables now, so the party is the session and the map is
-one name per agent rather than one per agent plus one per thing it
-delegated to."
+The session's label, and nothing else.  A delegated touch lands in the
+session's own tables, so a party is a session and the map draws one name
+per agent."
   (or (agent-river-state-label state) "?"))
 
 (defvar agent-river--artifact-memo nil
@@ -6171,11 +5947,9 @@ second walk is a second place for them to fall out of step.
 
 `:touches' is the raw cumulative count, straight off the tables, which is
 also what `agent-river--hottest' and `agent-river--artifact-list' render
-as \"6 touches\".  It was an age-weighted reading once, decaying by a
-half-life so that the shading followed the work rather than the history;
-with the shading gone there is nothing left for a weighting to say, and a
-number that aged would have left the panel's disagreeing with itself
-between two redraws with nothing having happened in between."
+as \"6 touches\".  Never aged or weighted: a number that changed with time
+alone would disagree with itself between two redraws with nothing having
+happened in between."
   (let ((key (or scope 'task)))
     (if (and agent-river--artifact-memo (eq (car agent-river--artifact-memo) key))
         (cdr agent-river--artifact-memo)
@@ -6197,11 +5971,11 @@ each caller sorts a list of its own instead."
              (cwd (agent-river-state-cwd state))
              (anchors (agent-river-state-anchors state)))
          (maphash (lambda (path entry)
-                    ;; Nothing resolves a key to an absolute path here any
-                    ;; more: the map lists artifact records without
-                    ;; resolving them, and what still needs a resolved
-                    ;; path asks `agent-river--artifact-absolute' for one
-                    ;; key at a time (`agent-river--artifact-gone-p').
+                    ;; The cwd and the anchor ride along; no key is placed
+                    ;; here.  What needs a key as a path on disk asks
+                    ;; `agent-river--artifact-absolute' for one at a time
+                    ;; (`agent-river--artifact-gone-p'), and the map lists
+                    ;; records without placing them at all.
                     (push (list :party party
                                 :cwd cwd
                                 :anchor (and anchors (gethash path anchors))
@@ -6226,10 +6000,10 @@ ever opened.
 
 A key that is a bare name is resolved as a file sitting directly in the
 cwd, which is what it almost always is.  `agent-river--rel' degrades a
-file *outside* the cwd to the same shape, and resolving those against the
-cwd used to draw them inside a tree they have nothing to do with; they
-carry an `:anchor' instead, the directory they were really folded from,
-and it wins over the cwd here."
+file *outside* the cwd to the same shape, and resolving one of those
+against the cwd would place it in a tree it has nothing to do with -- so
+those carry an `:anchor', the directory they were really folded from, and
+it wins over the cwd here."
   (let ((cwd (or (plist-get entry :anchor) (plist-get entry :cwd)))
         (file (plist-get entry :file)))
     (and cwd (not (string-empty-p cwd)) file (not (string-empty-p file))
@@ -6247,7 +6021,7 @@ and it wins over the cwd here."
 ;; The view of `agent-river-artifacts': one section per domain, one line
 ;; per record, each annotated with whoever has reached it.  Derived from
 ;; the tables on every redraw, so it accumulates nothing of its own and
-;; cannot drift from the panel.
+;; can say nothing the tables do not.
 ;;
 ;; **The listing is the artifact table.** There is no listing function to
 ;; write and nothing is read off disk: a record carries its own name,
@@ -6262,8 +6036,8 @@ and it wins over the cwd here."
 ;;
 ;; Nothing here is a path.  A section root is `inc:', an identity built
 ;; from the domain, and a line is the artifact key itself -- so there is
-;; no placing, no anchor and no cwd on this side.  Zooming is by section
-;; (RET on a heading, `^' back out) rather than by directory.
+;; no placing, no anchor and no cwd on this side.  Zooming is by section:
+;; RET on a heading goes in, `^' comes back out.
 
 (defcustom agent-river-map-scope 'session
   "Which artifact frame the parties on a map line are read from.
@@ -6353,10 +6127,10 @@ never been touched is."
 ;; its name, whether it has ended, and whatever context its producer put
 ;; on it.
 ;;
-;; Registering a domain is therefore optional, and is only ever about
-;; presentation: a producer that passes `:domain' gets a section whether
-;; or not anybody registered one, because a thing that has arrived must
-;; not need configuration before it can be seen.
+;; A domain is therefore declared by arriving and by nothing else: a
+;; producer that passes `:domain' gets a section headed by that name,
+;; because a thing that has arrived must not need configuration before it
+;; can be seen.
 
 (defun agent-river--key-domain (key)
   "Return the domain KEY was declared with, or nil when nobody declared it.
@@ -6370,11 +6144,10 @@ the artifact table itself is drawn on.
 **Nil is the whole of what an undeclared key is**, and the callers read it
 that way: a key nothing declared is a path relative to the session cwd, so
 it is the one kind `agent-river--artifact-absolute' will resolve and the
-one kind that heads no section.  It used to answer `file' for that case --
-a pseudo-domain standing for the absence of a record, which could also be
-*declared*, at which point a record meant the same as no record: invisible
-on the map and counted in `agent-river-domains' all the same.  A domain is
-what somebody said; nothing said is nil."
+one kind that heads no section.  Never a pseudo-domain standing for the
+absence of a record, which could itself be declared and would then mean
+exactly what no record means.  A domain is what somebody said; nothing
+said is nil."
   (let ((artifact (and key (not (string-empty-p key))
                        (gethash key agent-river-artifacts))))
     (and artifact (agent-river-artifact-domain artifact))))
@@ -6403,11 +6176,8 @@ a caller outside a draw is asking about.")
 
 The one derivation behind both readings below, and the one walk of
 `agent-river-artifacts\=' that either of them costs.  `agent-river--map-domain\='
-asked this question once per node per draw and answered it by walking the
-whole table, building a root string per domain on the way: measured on
-2026-09-17 over 3000 artifacts and 200 records, one draw asked it 697
-times.  Held as an alist the lookup is an `assoc\=' and the roots are built
-once."
+asks this question once per node per draw, so held as an alist the lookup
+is an `assoc\=' and the roots are built once rather than per node."
   (let ((box agent-river--section-memo))
     (if (and box (car box))
         (cdr box)
@@ -6430,15 +6200,11 @@ run git over somebody's incident queue."
 (defun agent-river--domain-label (domain)
   "Return DOMAIN's section heading: the domain, as it was declared.
 
-There was a table to register a prettier one in, `:label' in
-`agent-river-map-domains', and it went the way `agent-river-domains' went
-one grain up -- a declared second name for something the table already
-holds, right only while somebody keeps the two in step.  Nobody ever set
-it, and its own default was quietly wrong for the domains that did
-arrive: capitalised, `pr' headed a section called `Pr'.  The domain
-itself is what every key in the section is prefixed with and what
-\[agent-river-link-artifact] asks for, so it is the one name a reader has
-already seen."
+There is nothing to register a prettier name in, because a declared second
+name for something the table already holds is right only while somebody
+keeps the two in step.  The domain itself is what every key in the section
+is prefixed with and what \\[agent-river-link-artifact] asks for, so it is
+the one name a reader has already seen."
   (symbol-name domain))
 
 (defun agent-river--map-domain-roots (&optional scope)
@@ -6477,12 +6243,8 @@ which is precisely backwards for the case this exists for."
 (defun agent-river--domain-parties (domain scope)
   "Return a hash of artifact key to the parties that reached it, in DOMAIN.
 
-Heaviest first within a key.  The whole of the aggregation now: there was
-a `agent-river--parties-by\' between this and the walk, taking a function
-that said which key an entry counted under, because a directory tree
-counted under a path relative to its root and a domain counts under the
-key itself.  With the trees off the map there is one bucket left, and a
-function to choose it with is an indirection standing where a `when\' is.
+Heaviest first within a key, and the whole of the aggregation: an entry
+counts under the key itself.
 
 SCOPE is `session\' or `task\', which decides nothing here beyond which of
 the two frames the entries were walked from."
@@ -6529,12 +6291,9 @@ anything last happened to it.
 
 **The listing is the artifact table itself**, which is why there is no
 listing function beside this one: a record already carries its name,
-whether it is over and whatever context its producer put on it.  The map
-used to list directories as well, reading the disk for what was in them
-and annotating each entry with what had been reached beneath it, and it is
-gone -- a file is a thing an agent *did* something to, and the session's
-own tables say that already; what this view is for is the thing that
-arrived on its own and has nobody on it yet.
+whether it is over and whatever context its producer put on it.  Nothing
+is read off disk -- what this view is for is the thing that arrived on its
+own and has nobody on it yet.
 
 Every record in the domain, whether or not any agent has reached it: an
 unreached record is a thing nobody has picked up, which is the single most
@@ -6594,9 +6353,9 @@ the lookup misses for every ordinary line on the map."
         (when artifact
           (dolist (cell (agent-river-artifact-context artifact))
             (push (list :key (format "context/%s" (car cell))
-                        ;; Ahead of the parties and the tree: for a record that
-                        ;; arrived on its own, what it *is* is the question, and
-                        ;; who has since been near it is the follow-up.
+                        ;; Ahead of the parties: for a record that arrived on
+                        ;; its own, what it *is* is the question, and who has
+                        ;; since been near it is the follow-up.
                         :rank 0
                         :face 'agent-river-note
                         :text (format "%s: %s" (car cell) (cdr cell)))
@@ -6615,9 +6374,9 @@ the lookup misses for every ordinary line on the map."
 
 (defun agent-river--map-merge-parties (nodes)
   "Return the parties of NODES summed into one list, heaviest first.
-How a directory's reading is made: it is the aggregate of what lies
-beneath it and never a tally of its own, so the entry and the files under
-it can never disagree about who has been where."
+How a section heading's reading is made: it is the aggregate of the
+records listed under it and never a tally of its own, so the heading and
+its records can never disagree about who has been where."
   (let ((table (make-hash-table :test 'equal)))
     (dolist (node nodes)
       (dolist (party (plist-get node :parties))
@@ -6653,9 +6412,7 @@ fold would spring open on each one.
 
 Keyed on the path rather than the name, because the overview shows
 several roots at once and `src' under one of them is not `src' under
-another.  Being absolute, the keys also survive descending, where a
-name-keyed fold had to be thrown away on the way in or it would have
-folded whatever entry in the new listing happened to share a name.")
+another.  Being absolute, the keys also survive zooming into a section.")
 
 (defvar agent-river--map-drawn nil
   "When the map was last drawn, or nil before the first time.
@@ -6681,26 +6438,20 @@ for a line that differs from the ones around it."
 (defun agent-river--map-name (name)
   "Return NAME as one line of the map, marked as the name on that line.
 
-Bare text, where this was a measured code span
-\(`agent-river--md-code') for as long as the fence was thought to be what
-kept a name readable.  Measured again against the grammar this buffer
-actually has, it was not: `markdown-ts-hide-markup' is nil here -- the
-marker is the indentation, so nothing in this buffer is ever hidden --
-and with nothing hidden, inline markup can only put a face on a name.  It
-cannot eat a character of one.  The italics the fence was written against
-never happened either: tree-sitter reads CommonMark, where an underscore
-inside a word opens nothing, so `foo_bar_baz.el' draws plain without any
-help from us.  What the fence did do was put two backticks on screen
-around every name in the view, which is the one thing here nobody asked
-for.
+Bare text, not a code span.  `markdown-ts-hide-markup' is nil here -- the
+marker is the indentation, so nothing in this buffer is ever hidden -- and
+with nothing hidden, inline markup can only put a face on a name, never
+eat a character of one.  An underscore inside a word opens no emphasis in
+CommonMark either, so `foo_bar_baz.el' draws plain unaided.
 
 So what is left to prevent is structural, and the marker already prevents
 it: a name never starts a line, so no name can become a heading, a rule or
 a setext underline whatever it holds.  `## injected' in a record title
 lands mid-line and stays text.  What that argument rests on is the line
 staying one line (`agent-river--map-one-line', the same rule a contributed
-row owes) -- a newline made one entry and one stray, and the stray carried
-none of the properties the motions and `agent-river--map-here' read.
+row owes) -- a newline makes one entry and one stray, and the stray
+carries none of the properties the motions and `agent-river--map-here'
+read.
 
 The `agent-river-map-point' property is what
 `agent-river--map-beginning-of-name' lands on, and it is a property rather
@@ -6766,7 +6517,7 @@ answer landing after the redraw timer retired would otherwise reach a
 cache and never the screen.
 
 Editing this list is the off switch, the way it is for
-`agent-river-observers\='.  The three it starts with are built on the
+`agent-river-observers\='.  The ones it starts with are built on the
 same mechanism a foreign one would use, so there is no privileged path
 through here for a contributor that happens to ship with the package.
 
@@ -6793,10 +6544,9 @@ that arrive together -- a contributor that stores twice, a few
 milliseconds apart, would otherwise draw the map twice for one read and
 move the text under whoever is reading it.
 
-A floor on how *recently* the map was drawn was tried first and was
-exactly backwards: a read is started by a draw and answers a few
-milliseconds later, so every answer there has ever been arrives inside the
-floor and none of them drew.")
+A delay, never a floor on how recently the map was drawn: a read is
+started by a draw and answers a few milliseconds later, so every answer
+would fall inside such a floor and none would ever be drawn.")
 
 (defvar agent-river--map-soon nil
   "One-shot timer for a draw a contributor's answer asked for.")
@@ -6903,10 +6653,10 @@ the least worth keeping, rather than whoever was registered last."
 (defun agent-river--rows-parties (_root nodes)
   "Return one row per party on each of NODES: the names that left the line.
 
-What a bracket could never say.  The line still marks contention, because
-that is scannable down the listing; the row adds what only makes sense
-once you are looking at this one node -- whose touches they were, how long
-ago, and how many of them changed the file rather than read it.
+The line marks contention, because that is scannable down the listing; a
+row adds what only makes sense once you are looking at this one node --
+whose touches they were, how long ago, and how many of them changed the
+file rather than read it.
 
 Ordered by the parties themselves, which `agent-river--domain-parties\='
 has already sorted heaviest first, so the row order is the same reading
@@ -6920,10 +6670,9 @@ the line is ordered by and cannot contradict it."
                  (let ((writes (or (plist-get party :writes) 0))
                        (last (plist-get party :last)))
                    (list :key (concat "party/" (plist-get party :party))
-                         ;; Behind the step above: who has been here outlasts
-                         ;; what is happening this second, and the step row is
-                         ;; the only one that stops being true while you read
-                         ;; it.
+                         ;; Behind the rows that say what the record is: who
+                         ;; has been on it is the follow-up to that question,
+                         ;; not the headline.
                          :rank 1
                          :face 'agent-river-stale
                          :text (concat
@@ -6948,9 +6697,7 @@ rows a contributor puts there.  A line with nothing under it ever passes
 and the empty-map line, which must not be headings that swallow whatever
 follows them.  The overview pushes the records down a level to make room
 for the section headings, which is why a number is the wrong thing for a
-line that is a leaf whatever level it is drawn at.  It was spelled `file'
-while the map drew files, which left the one symbol in this package that
-is not a domain looking exactly like the domain that has since gone.
+line that is a leaf whatever level it is drawn at.
 
 The markup is left visible.  Hiding it is `markdown-ts-view-mode's own
 default and it looks better on prose, but here the marker is the
@@ -6965,23 +6712,22 @@ that faces this line: struck through, it cannot be mistaken for a place
 an agent is still working in.
 
 PARTIES are not named on the line, only counted and marked: their names
-are rows beneath it (`agent-river--rows-parties').  The brackets were the
-one ragged thing here, which is why nothing scannable could ever be put
-after them -- and a row says what a bracket never could: how long ago, and
-how much of it was writing rather than reading.
+are rows beneath it (`agent-river--rows-parties'), where a row can also
+say how long ago and how much of it was writing rather than reading.
+Names on the line would be ragged, and nothing scannable could then
+follow them.
 
 ROWS is `open' or `closed' when this node has contributed rows, nil when
-it has none.  A folded node used to look exactly like a node with nothing
-under it, which made the fold a way of losing things quietly."
+it has none -- so a folded node cannot look like a node with nothing
+under it, which would make the fold a way of losing things quietly."
   (let* ((marker (agent-river--map-marker level))
          ;; The one thing a name is marked for.  Who is here is the gutter's
          ;; and the rows' to say.
          (face (and missing 'agent-river-gone))
          (shown (agent-river--map-name name))
          ;; The gutter: everything about this line, in one fixed-width
-         ;; place before the name.  At the end of the line these were
-         ;; held away from what they mark by the name's own width, the
-         ;; opposite of what a marker is for.
+         ;; place before the name, so each marker sits next to what it
+         ;; marks and the whole column reads straight down the listing.
          (gutter
           (concat (pcase rows ('open agent-river-map-open-marker)
                          ('closed agent-river-map-closed-marker)
@@ -7076,37 +6822,24 @@ and asking again per entry would put its work behind a keystroke."
 (defun agent-river--map-header (root &optional sections)
   "Return the map's own heading for ROOT.
 
-The name of what is being shown, and nothing else.  Two readings have
-come off this line and both for the same kind of reason.  It captioned
-the view -- which frame the numbers were read from -- and that is a
-legend: a fact that holds whatever happens, redrawn every few seconds
-onto a line that is read once.  It belongs where the frame is decided
-\(`agent-river-map-scope'), not where a reader is looking at the
-listing.
+The name of what is being shown, and nothing else.  No legend -- which
+frame the numbers come from belongs where the frame is decided
+\(`agent-river-map-scope'), not redrawn every few seconds onto a line that
+is read once -- and no count of the agents in view, which the listing
+already gives per line through the contention marker, the party rows and
+the `agent-river-map-active' property
+`\\[agent-river-map-next-active]' walks by.
 
-And it counted the agents in view, `2 agents' or else `quiet'.  That was
-a second account of the parties, which the listing already gives per
-line: a record somebody has reached carries the contention marker the
-view is scannable down, the names in its rows, and the
-`agent-river-map-active' property that `\\[agent-river-map-next-active]'
-walks by.  Summed into the header the same reading lost the only part
-worth having -- which line -- and answered with a number the motion
-answers with point.  What it read as, besides, was wrong for the case
-this view exists for: the line nobody has picked up is why the map is
-open, and `quiet' put that emptiness in the headline, every redraw, as
-though it were the view's subject rather than its contents.
-
-ROOT is nil in the overview, which spans SECTIONS domains and has no one
-of them to be named after.  Titling it with any of them -- the most
-recent, say -- is what this replaced: the heading then read as though that
-one were the subject and the others were somewhere inside it."
+ROOT is nil in the overview, which spans SECTIONS domains and is named by
+their number: no one of them may stand for the rest, or the heading would
+read as though that one were the subject and the others were inside it."
   (concat (agent-river--map-marker 1)
           (agent-river--map-mark (if root
                                      ;; Through `agent-river--map-name' like
                                      ;; the lines below it: a label is a
-                                     ;; name too, and rendering it
-                                     ;; differently would leave the one
-                                     ;; name here that nothing else fences.
+                                     ;; name too, so it is held to one line
+                                     ;; and carries the point the name
+                                     ;; motions land on.
                                      (agent-river--map-name
                                       (agent-river--domain-label
                                        (agent-river--map-domain root)))
@@ -7128,9 +6861,9 @@ off every time."
 
 (defun agent-river--map-goto (here)
   "Put point back where HERE was, by name if the line is still there.
-By line number otherwise, rather than at the top: an entry that cooled
-out of the listing should not send whoever was reading it back to the
-start of the buffer."
+By line number otherwise, rather than at the top: a line that has left
+the listing should not send whoever was reading it back to the start of
+the buffer."
   (goto-char (point-min))
   (let ((found nil))
     (when (nth 0 here)
@@ -7150,16 +6883,13 @@ start of the buffer."
 (defun agent-river--map-draw ()
   "Redraw the map buffer from the state, if it is still alive.
 
-With `agent-river--map-root' set the map is zoomed into that one tree.
-With it nil -- which is what the map opens on -- it shows every tree the
-agents have touched.  The state spans whatever directories the sessions
-were started in and there is no reference project among them, so naming
-one of them as the root and hiding the rest was a view of the state that
-the state does not have.
+With `agent-river--map-root' set the map is zoomed into that one section.
+With it nil -- which is what the map opens on -- it shows every domain
+with something in it, since no one of them may stand for the rest.
 
-One tree is drawn without a heading of its own: the header already names
-it, and a second line repeating it would indent the whole listing to say
-nothing."
+A single section is drawn without a heading of its own: the header
+already names it, and a second line repeating it would indent the whole
+listing to say nothing."
   (let ((buffer (get-buffer agent-river-map-buffer-name)))
     (when buffer
       (with-current-buffer buffer
@@ -7274,8 +7004,9 @@ nothing."
 
 ;;; Moving about the map
 ;;
-;; Dired's gestures, since the map answers dired's question over a wider
-;; area.  Point belongs on the name, not column zero: that's the Markdown
+;; Dired's gestures, since this is a listing and those are the keys a
+;; listing is walked with.  Point belongs on the name, not column zero:
+;; that's the Markdown
 ;; marker, and a cursor on `#' reads as though the markup were the content.
 ;;
 ;; Three motions, since the map has three grains of "next thing": every
@@ -7291,7 +7022,7 @@ makes them the lines no motion should ever stop on."
   (get-text-property (line-beginning-position) 'agent-river-map-path))
 
 (defun agent-river--map-entry-line-p ()
-  "Return non-nil on a line naming a file or a directory."
+  "Return non-nil on a line naming a record or a section."
   (and (agent-river--map-line-path) t))
 
 (defun agent-river--map-row-line-p ()
@@ -7365,18 +7096,18 @@ job is to be trusted about where things are, that is worse than a beep."
       t)))
 
 (defun agent-river-map-next-line (&optional n)
-  "Move to the Nth next file or directory on the map."
+  "Move to the Nth next line of the map that names something."
   (interactive "p")
   (or (agent-river--map-scan (or n 1) #'agent-river--map-entry-line-p)
       (user-error "No further entry")))
 
 (defun agent-river-map-previous-line (&optional n)
-  "Move to the Nth previous file or directory on the map."
+  "Move to the Nth previous line of the map that names something."
   (interactive "p")
   (agent-river-map-next-line (- (or n 1))))
 
 (defun agent-river-map-next-entry (&optional n)
-  "Move to the Nth next entry of the listing, past any files shown under it."
+  "Move to the Nth next entry of the listing, past any rows under it."
   (interactive "p")
   (or (agent-river--map-scan (or n 1) #'agent-river--map-top-line-p)
       (user-error "No further entry")))
@@ -7412,12 +7143,10 @@ first thing anyone does with a new buffer is press one of them."
   "Redraw the map now, and ask every contributor again while doing it.
 
 Everything read from the state is recomputed on every draw anyway.  What
-this adds is the throttle: `agent-river--map-refreshed' decides whether a
-contributor is even *offered* the root, and one left standing meant `g'
-redrew without asking anybody anything -- the offer declined until the
-throttle aged out, and the draw that would have made it again comes from
-the redraw timer, which retires while nothing is happening.  Asking again
-is what a refresh by hand means."
+this adds is clearing the throttle: `agent-river--map-refreshed' decides
+whether a contributor is even *offered* the root, so left standing it
+would have `g' redraw without asking anybody anything.  Asking again is
+what a refresh by hand means."
   (interactive)
   (clrhash agent-river--map-refreshed)
   (agent-river--map-draw))
@@ -7466,10 +7195,11 @@ is what a refresh by hand means."
 (defun agent-river--actions-file (subject)
   "Offer to open the file SUBJECT names, when there is one on disk.
 
-The map's old `find-file' branch, as an ordinary action.  It is the
-default entry in `agent-river-artifact-action-functions' and the smallest
-example of one: it reads `:path', which is set only where the line names
-something absolute, and answers nil for everything else."
+The default entry in `agent-river-artifact-action-functions' and the
+smallest example of one: it reads `:path', which is set only where the
+line names something absolute, and answers nil for everything else.
+Opening a file is an action like any other rather than a branch of the
+command."
   (let ((path (plist-get subject :path)))
     (when (and path (file-exists-p path))
       (list (list :name "Open file"
@@ -7491,17 +7221,17 @@ predicate to register and no domain to be listed under, so something that
 has arrived is offered whatever these have for it without waiting to be
 configured.
 
-One offer is run without asking, so a line with a single action behaves
-as it always did; several are offered by name.  A thunk that wants
-confirming asks for it itself -- `agent-river-launch-artifact' does,
-because starting a process is the one gesture here with nothing on the
-far side that can take it back.
+One offer is run without asking, so a line with a single action takes one
+keystroke; several are offered by name.  A thunk that wants confirming
+asks for it itself -- `agent-river-launch-artifact' does, because starting
+a process is the one gesture here with nothing on the far side that can
+take it back.
 
 The order is this list's own, and nothing sorts it: the menu is a
 `completing-read', where order decides what is read first and not what is
 worth reading -- which is why a contributed row has a `:rank' and this
-has not.  What the two shipped registrations append is therefore in load
-order, and reordering them is a `setq'.")
+has not.  What a registration appends is therefore in load order, and
+reordering is a `setq'.")
 
 (defun agent-river--artifact-actions (subject)
   "Return everything offered for SUBJECT, in the order the functions are asked.
@@ -7573,11 +7303,8 @@ is offered, so the caller -- which is the one holding what the line names
 (defun agent-river--map-subject (key)
   "Return what the map line naming KEY is about, for an action function.
 
-The artifact record, which is all a map line ever names now: the listing
-*is* the table, so there is no line whose key the table does not have.
-There was a branch for that case -- the line named a file, `file' being
-what a key is when nobody said otherwise, and the subject was a bare
-`:domain' -- and it was unreachable from the moment the tree listing went.
+The artifact record, which is all a map line ever names: the listing *is*
+the table, so there is no line whose key the table does not have.
 
 `:path' is set only where KEY is itself an absolute name, which is the
 producer\'s doing rather than ours: a record may be keyed by a path (a log,
@@ -7616,8 +7343,7 @@ is the thing the eye chose."
   "Show every domain again, from a map zoomed into one of them.
 
 There is nothing above a section: a domain is an identity rather than a
-path, so `^\' is the way back out and not a step towards a parent.  It
-used to climb a directory at a time, because the map listed trees."
+path, so `^\' is the way back out and not a step towards a parent."
   (interactive)
   (if (null agent-river--map-root)
       (user-error "Already showing every domain")
@@ -7651,12 +7377,12 @@ then quietly stay in the fallback for the whole session."
 
 (defun agent-river--map-setup ()
   "Set the buffer-local state both map modes need."
-  ;; A path is what the line is for, so it is never wrapped into a second
-  ;; line the annotation column cannot survive.
+  ;; One record, one screen line: the gutter and the name are read straight
+  ;; down the listing, and a wrapped tail would break that column.
   (setq-local truncate-lines t)
   (setq-local header-line-format nil)
-  ;; Hiding the markup collapses the indentation the tree is drawn with --
-  ;; see `agent-river--map-marker' -- and this must not depend on what the
+  ;; Hiding the markup collapses the indentation the listing is drawn with
+  ;; -- see `agent-river--map-marker' -- and this must not depend on what the
   ;; user set the Markdown default to.
   (setq-local markdown-ts-hide-markup nil)
   ;; Outline's own cycling has to go: it puts a `keymap' property on every
@@ -7679,8 +7405,7 @@ then quietly stay in the fallback for the whole session."
   "Major mode for the artifact map, rendered as Markdown.
 
 Dired-like on purpose: RET zooms into a section, `^' comes back out, TAB
-opens what is under a line.  The gestures outlived the listing -- this was
-a lens over dired for most of its life."
+opens what is under a line."
   (agent-river--map-setup))
 
 (define-derived-mode agent-river-map-plain-mode special-mode "Agent-Map"
@@ -7705,8 +7430,8 @@ makes this a degradation rather than a second view to keep in step."
   ;; off it; here there is something to revert to.
   (define-key map (kbd "g") #'agent-river-map-refresh)
   ;; n/p are outline's in `markdown-ts-view-mode' and unbound in the
-  ;; fallback, so in one mode they skipped every row and in the other there
-  ;; was no entry motion at all.
+  ;; fallback, so left to the parents they would skip every row in one mode
+  ;; and do nothing at all in the other.
   (define-key map (kbd "n") #'agent-river-map-next-line)
   (define-key map (kbd "p") #'agent-river-map-previous-line)
   (define-key map (kbd "SPC") #'agent-river-map-next-line)
@@ -7744,13 +7469,10 @@ redrawn from the tables either way, so the event is only ever news that
 something moved.  A consumer that does look at SUBJECT belongs on one
 hook or the other, and this is not the precedent for putting it on both.
 
-Subscribing to `agent-river-observers' alone is what this fixes.  An
-artifact declared from outside folds into `agent-river-artifacts' and
-then went nowhere: the timer retires once nothing is dirty, so an
-incident arriving while no agent was working sat in the table until
-somebody pressed `g'.  That is the case the artifact table
-exists for -- something matters most when no session is running -- so it
-was also the case the view was blindest to."
+Both hooks, because the timer retires once nothing is dirty: on the
+session hook alone, an incident arriving while no agent was working would
+sit in the table until somebody pressed `g' -- which is the case the
+artifact table exists for."
   (agent-river--map-invalidate))
 
 (defvar agent-river--map-timer nil
@@ -7765,9 +7487,9 @@ was also the case the view was blindest to."
 (defun agent-river--map-tick ()
   "Redraw the map, or stop the timer once there is nothing left to draw.
 
-Nothing on this map changes on its own any more, so the only thing worth
-a redraw is dirt: an event marked it, a contributor answered, or a
-record arrived.  The timer retires on the first tick that finds none,
+Nothing on this map changes on its own, so the only thing worth a redraw
+is dirt: an event marked it, a contributor answered, or a record
+arrived.  The timer retires on the first tick that finds none,
 which is also why the relative times in the rows stand still while
 nothing is happening -- they move again on the next event, or on `g'.
 
@@ -7819,10 +7541,8 @@ a function that will throw again the moment an artifact arrives."
 
 One section per domain of `agent-river-artifacts', one line per record,
 each annotated with whoever has reached it -- and the line this view is
-for is the one nobody has.  It was a lens over dired for most of its life,
-listing a directory and what had been reached beneath each entry; that is
-gone: what an agent did to a file is counted in the session tables and
-named by no view.
+for is the one nobody has.  No files: what an agent did to one is counted
+in the session tables and named by no view.
 
 Opens on every domain that has a record.  RET on a section zooms into it
 and `^' comes back out.
@@ -7850,11 +7570,11 @@ takes the map off the event stream."
             agent-river--map-folds nil)
       (add-hook 'kill-buffer-hook #'agent-river--map-teardown nil t))
     (add-hook 'agent-river-observers #'agent-river--map-observe)
-    ;; And the artifact stream, the half with no session behind it and now
-    ;; the half the whole listing comes from: an incident arriving changes
-    ;; this map with no session event at all, and without this hook the
-    ;; record would sit in the table, drawn by nobody, until somebody
-    ;; pressed `g'.  Quiet is exactly when this view has the most to say.
+    ;; And the artifact stream, which is where the whole listing comes
+    ;; from: an incident arriving changes this map with no session event at
+    ;; all, and without this hook the record would sit in the table, drawn
+    ;; by nobody, until somebody pressed `g'.  Quiet is exactly when this
+    ;; view has the most to say.
     (add-hook 'agent-river-artifact-observers #'agent-river--map-observe)
     (agent-river--map-draw)
     (agent-river--ensure-map-timer)

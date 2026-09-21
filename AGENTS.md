@@ -2381,6 +2381,12 @@ together:
   two. Skip incident records, measurements, and rejected alternatives — state
   the current rule and reason, not its history. A change that removes a guard
   should remove its comment.
+- **Never explain a thing by contrasting it with an arrangement that is
+  gone.** "X rather than Y", where Y was removed, is the same history in a
+  shorter form: a reader has never seen Y, so the sentence only lands for
+  somebody who remembers it. Describe the subject on its own terms, and where
+  cutting the comparison leaves only the summary line, that line is the whole
+  docstring. Same rule for docstrings as for comments.
 - Tests are named as sentences (`agent-river-test-waiting-outranks-blocked`) and
   assert the reason, not just the value. Helpers: `agent-river-test--with-session`,
   `--fail`, `--acts`, `--payload`, `--with-shell`.

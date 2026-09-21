@@ -31,16 +31,8 @@
 ;;     > $d/x.tmp
 ;;   mv $d/x.tmp $d/x.json
 ;;
-;; There used to be more here -- a candidate with an occasion-shaped key, a
-;; durable ledger in `queued/' and `done/', rules, gates, a chain cap, a
-;; decision log and a queue buffer -- and taking it out is what left this
-;; file the size it is.  Nearly every part of it was the price of deciding
-;; **unattended**, and with a person pressing the key each one either
-;; disappears or turns out to be something `agent-river-artifacts' already
-;; does: it answers nil for a key it has, its map section lists what nobody
-;; has picked up, and `agent-river-ended' is what `done/' was for.  One
-;; sentence pays for the deletion -- a repeat is a line, not an agent -- and
-;; issue #37 is what would have to come back to lose that sentence.
+;; A delivery that is taken in is deleted: the artifact table is the record,
+;; and nothing here launches anything or keeps a ledger of its own.
 
 ;;; Code:
 
@@ -63,27 +55,19 @@ The only door.  A GitHub poller, a webhook, an agent writing a file, and
 you with `echo' all write the same shape to the same place -- so a new kind
 of source is a new writer and never a new mechanism.
 
-Deliberately not under `user-emacs-directory', which is where a package's
-data would otherwise go.  Everything else this package writes is written
-by Emacs; this is written *to* Emacs, by processes that should not have to
-know how an Emacs configuration is laid out -- and it is a working
-directory rather than state anyone would keep.  It is also somewhere
-people symlink package checkouts into, which on the first run of this put
-a spool full of JSON inside a git repository.
+Deliberately not under `user-emacs-directory': everything else this
+package writes is written by Emacs, where this is written *to* Emacs by
+processes that should not have to know how an Emacs configuration is laid
+out, and it is a working directory rather than state anyone would keep.
 
 One subdirectory underneath, and it is for what could not be read:
 
   <spool>/            the inbox: delivered, not yet taken in
   <spool>/failed/     unreadable, kept for you to look at
 
-There used to be `queued/' and `done/' as well, and they were a durable
-record of what had already been acted on -- which mattered when a machine
-was doing the acting and a second launch was the cost of forgetting.
-Nothing is launched from here any more without somebody asking, so a
-delivery that arrives twice is a line that is already on the map, which
-`agent-river-appeared' answers for by itself.  A second account of that on
-disk would only be a way for the two to disagree.  A file that has been
-taken in is therefore deleted.
+A file that has been taken in is deleted: the artifact table is the
+record, and a delivery that arrives twice is a line already on the map,
+which `agent-river-appeared' answers for by itself.
 
 A writer must build the file elsewhere and `rename' it in.  The watcher
 sees a file the moment it appears, and a half-written one would be read as
@@ -106,13 +90,12 @@ on a directory that is almost always empty."
 (defcustom agent-river-spool-settle 2
   "Seconds a file that will not parse is given before it is called broken.
 
-The contract is write-then-rename, and a poller can be held to it.  A
-writer that is not a program cannot be: an agent told to report something
-reaches for `Write', which creates the file where the watch can already
-see it, so its JSON is briefly half there.  Filing that under `failed/'
-would throw the delivery away over a contract nobody told the writer
-about, and throw it away *quietly* -- nothing tells a writer that what it
-wrote was discarded.
+The contract is write-then-rename, and a poller can be held to it; a
+writer that is not a program cannot be -- an agent told to report
+something reaches for `Write', which creates the file where the watch can
+already see it, so its JSON is briefly half there.  Filing that under
+`failed/' would throw the delivery away, quietly, over a contract nobody
+told the writer about.
 
 So a file too young to be trusted is simply left for the next scan.  The
 cost is that a genuinely broken file is filed a couple of seconds late."
@@ -158,22 +141,17 @@ no context rather than a record shaped like its mistake."
   "Read DATA, already in the normalised shape, as a spec.
 
 The built-in reader, and the fallback for a source with no adapter
-registered -- which is why the adapter protocol below is not speculative.
-A source that can write this shape directly needs no adapter at all, and
-one that cannot has exactly one place to be taught.
+registered.  A source that can write this shape directly needs no adapter
+at all, and one that cannot has exactly one place to be taught.
 
 `key' is the identity and should carry its domain, the way
 `inc:INC-444' does: two producers that both number things from one would
 otherwise collide on a bare number.
 
 `domain' is required, and refused here rather than two layers down so
-that the message names the field the delivery is missing.  It used to be
-optional and a delivery without one made a record in the `file' domain --
-which was this package's word for a key nobody had declared, so the
-record was indistinguishable from no record at all: listed by no section
-and drawn on no line.  A delivery that cannot say what kind of thing it
-is carrying is a delivery nothing can show, and it goes to `failed/'
-where its author can see it.
+that the message names the field the delivery is missing.  A delivery
+that cannot say what kind of thing it is carrying is a delivery nothing
+can show, and it goes to `failed/' where its author can see it.
 
 `session' is the one field that is not about the artifact at all.  A
 producer that knows which session caused the thing it is delivering says
@@ -199,14 +177,14 @@ so, and that is noted on *that session* -- see
 
 READER is called with the source name and the parsed JSON as an alist,
 and returns a spec plist or signals.  It is the one place that knows a
-source's dialect -- exactly the role `agent-river--event' plays for the
-hosts, and for the same reason: a poller should move bytes and understand
+source's dialect -- the role `agent-river--event' plays for the hosts,
+and for the same reason: a poller should move bytes and understand
 nothing, so `gh's raw JSON is what lands in the spool and the knowledge of
 what `gh' calls things lives in Elisp, under test.
 
 A reader that throws costs its own file and nothing else: that file is
 filed under `failed/' and never read again, so there is no runaway to
-retire it from.  Unlike an observer, it cannot fail repeatedly.")
+retire it from.")
 
 (defun agent-river-spool--spec (file)
   "Read FILE as a spec, or signal saying why it is not one."
@@ -253,16 +231,10 @@ This cannot be allowed to signal, and the reason is where it is called
 from: both call sites are inside a `condition-case' *handler*, and an
 error raised in a handler is not caught by its own `condition-case'.  So a
 `rename-file' that fails here escapes the scan, leaving the file in the
-inbox -- which `--inbox' sorts oldest-first, so every later scan reads the
-same file and dies in the same place.  One delivery nobody can file stops
-every delivery behind it, for good, while the safety net logs one
-identical line a minute.  Measured: `failed/' at mode 500, and the good
-delivery behind the broken one was never declared.
-
-Two ways to get there and neither is exotic -- `failed/' not writable (a
-spool on a mount, a root-owned directory a cron-run poller left behind),
-and the file going away between the listing and the rename, which is the
-in-place rewriting `agent-river-spool-settle' exists to tolerate.
+inbox -- which `--inbox' sorts oldest-first, so one delivery nobody can
+file stops every delivery behind it, for good.  Two ordinary ways to get
+there: `failed/' not writable, and the file going away between the listing
+and the rename.
 
 Where it cannot be filed it is deleted, which is the lesser of the two
 losses on offer: `failed/' is there so a source's author can look at what
@@ -291,9 +263,8 @@ written straight onto a slot.
 
 What is noted is the *fact*, never the claim.  A note is a measurement
 and may therefore feed a signal, so folding in the agent's own words
-would launder a claim into an observation about the world -- the very
-loop the `intent*' slots are kept apart to prevent.  The words stay in
-the artifact's context, where they are shown and read by nobody."
+would launder a claim into an observation about the world.  The words
+stay in the artifact's context."
   (let* ((session (plist-get spec :session))
          (state (and session (gethash session agent-river-registry))))
     (when state
@@ -307,16 +278,11 @@ the artifact's context, where they are shown and read by nobody."
 
 Nothing is declared for a **first sighting that is already over**.  The
 ending being worth folding and the record being worth creating are two
-different questions, and one call used to answer both: a source that
-polls a world it did not watch re-sees everything that changed, so the
-first wide poll declared a record for every thing that had ended since
-the window opened, purely in order to strike it through.  The domain
-section is the queue of what nobody has picked up, and an artifact
-record does not fade the way a reached name does -- it stays until
-`agent-river-drop-artifact\=' -- so those lines are permanent and there
-are more of them than there are live ones.  Measured on one repository:
-nine deliveries, seven of them over before anything here had heard of
-the thing.
+different questions: a source that polls a world it did not watch re-sees
+everything that changed, and an artifact record does not fade the way a
+reached name does -- it stays until `agent-river-drop-artifact\=' -- so a
+record created purely in order to strike it through would sit in the
+domain section, the queue of what nobody has picked up, for good.
 
 Which of the two it is, is a question the *table* answers, the way
 `agent-river-observe-artifact\=' answers it for a producer that would
@@ -327,9 +293,7 @@ about.
 No log line, and that is the rule applied rather than a gap in it: the
 spool logs failures, this is not one, and `artifact\=' is a notable kind
 -- `>' stops on it -- where a thing that was over before anybody here
-heard of it is the definition of a line that does not want attention.
-A first sighting that is already over is not-news in the strongest
-sense there is."
+heard of it is the definition of a line that does not want attention."
   (if (and (plist-get spec :gone)
            (not (agent-river-artifact-at (plist-get spec :key))))
       nil
@@ -350,9 +314,8 @@ Three outcomes, and each gets the file out of the inbox, because a file
 left there is a file the next scan reads again.  Unreadable goes to
 `failed/' and is never read again -- kept rather than deleted, since the
 only way to fix a source is to look at what it wrote.  Anything read is
-declared and the file is *deleted*: the artifact table is the record now,
-and a copy on disk beside it would only be a second account of what
-arrived."
+declared and the file is *deleted*: the artifact table is the record, and
+a copy on disk beside it would only be a second account of what arrived."
   (let ((spec (condition-case err
                   (agent-river-spool--spec file)
                 (error
@@ -438,11 +401,10 @@ many deliveries were taken in."
 
 For the watch only.  The safety net calls `agent-river-spool--scan-safely'
 directly: the debounce is an *idle* timer, and an Emacs that never goes
-idle for a third of a second -- a long synchronous process, a tight loop
--- would never scan, which would make the one guarantee
-`agent-river-spool-poll-interval' offers conditional on something it never
-mentions.  A burst is what there is to coalesce, and the safety net has no
-burst."
+idle for a third of a second would never scan, which would make the one
+guarantee `agent-river-spool-poll-interval' offers conditional on
+something it never mentions.  A burst is what there is to coalesce, and
+the safety net has no burst."
   (unless agent-river-spool--soon
     (setq agent-river-spool--soon
           (run-with-idle-timer

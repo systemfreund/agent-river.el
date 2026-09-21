@@ -72,8 +72,8 @@ context, for a brief to start a session in."
 
 Both by default.  The map's domain section is the queue of what nobody
 has picked up, and a pull request waiting for review is the plainest
-instance of one there is; the cost of having it on the map is a second
-API call per repository per poll.
+instance of one there is; the cost is a second API call per repository
+per poll.
 
 Each kind is asked for in every state rather than only the open ones, so
 a thing that ends is delivered once more on the tick it ended in and its
@@ -81,11 +81,11 @@ record is struck through.  Asked for the open ones alone it would simply
 stop arriving, and sit in the section for ever as something to pick up.
 
 Bound into the poller's environment by `agent-river-gh--poll-1' rather
-than left to the script's own default, for exactly the reason
-`AGENT_RIVER_SPOOL' is: two defaults that agree today are two places to
-change, and the day they stop agreeing the mode quietly polls for
-something other than what is configured here.  The symptom is an empty
-section on the map, which is indistinguishable from a quiet week."
+than left to the script's own default, for the reason `AGENT_RIVER_SPOOL'
+is: two defaults that agree today are two places to change, and the day
+they stop agreeing the mode quietly polls for something other than what
+is configured here.  The symptom is an empty section on the map, which is
+indistinguishable from a quiet week."
   :type '(set (const issue) (const pr)))
 
 (defcustom agent-river-gh-search nil
@@ -96,34 +96,27 @@ An alist of KIND (`issue' or `pr') to a search string such as
 qualifiers documented at
 <https://docs.github.com/search-github/searching-on-github/searching-issues-and-pull-requests>
 accept.  A kind absent from the alist, or present with nil, asks about
-every object in the window, which is the whole of the default: nil here
-changes nothing for any existing deployment.
+every object in the window, which is the default.
 
-Per kind rather than one string shared across them, which is what this
-used to be and was too blunt: `review-requested:@me' and `draft:false'
-are pull-request concepts, and a search naming either does not error
-against `gh issue list' -- it answers with nothing, every poll, silently,
-which is the \"quiet week\" `agent-river-gh-kinds' already worries about
-in its own docstring, reached this time by a configuration nobody
-mistyped rather than one that was. It also costs nothing extra against
-the rate limit either way: each kind already runs its own `gh $kind
-list', so its own qualifier goes into the search string that call
-already builds, sharing `since' rather than opening a further query --
-which was the right reason to refuse a *third* query and, on reflection,
-never a reason to prefer one shared string over two kind-specific ones.
+Per kind, because the qualifiers are: `review-requested:@me' and
+`draft:false' are pull-request concepts, and a search naming either does
+not error against `gh issue list' -- it answers with nothing, every poll,
+silently, which is the \"quiet week\" `agent-river-gh-kinds' already
+worries about in its own docstring.  It costs nothing extra against the
+rate limit: each kind already runs its own `gh $kind list', so its own
+qualifier goes into the search string that call already builds.
 
 Filtering `pr' to `review-requested:@me' changes what \":gone\" can
-mean. The poll relies on an object still matching the query one more
+mean.  The poll relies on an object still matching the query one more
 time, with a closed or merged state, to strike its record through --
 that is how a merged pull request stops sitting in the domain section
-forever. A review request is commonly withdrawn the moment you submit a
+forever.  A review request is commonly withdrawn the moment you submit a
 review, which drops the object out of a `review-requested:@me' search
 without its state ever changing in a delivery this poller sees: the
-record then sits on the map exactly as if nobody had looked at it,
-because from this poller's side nobody-looked-at-it and somebody-
-reviewed-it-and-moved-on now read alike. `agent-river-forget-artifacts'
-is the existing answer for a record that has stopped being news; a
-narrowed search asks for it more often than the unfiltered default does."
+record then sits on the map exactly as if nobody had looked at it.
+`agent-river-forget-artifacts' is the answer for a record that has
+stopped being news, and a narrowed search asks for it more often than the
+unfiltered default does."
   :type '(alist :key-type (choice (const issue) (const pr))
                 :value-type (choice (const :tag "Every object" nil) string)))
 
@@ -159,11 +152,11 @@ mistake `agent-river--key-domain' refuses one subject over: a thing
 belongs to a domain because something said so, never because its
 spelling suggested one.
 
-And one reader rather than two, because everything else is shared.  A
-pull request and an issue answer the same question here -- what is this
-GitHub object as an artifact -- and each is a number, a title, a body
-somebody else wrote and a state that can be over.  They differ in this
-symbol, which is also the key's prefix, and in nothing a reader does.")
+And one reader for both, because everything else is shared: a pull
+request and an issue answer the same question here -- what is this GitHub
+object as an artifact -- and each is a number, a title, a body somebody
+else wrote and a state that can be over.  They differ in this symbol,
+which is also the key's prefix, and in nothing a reader does.")
 
 (defun agent-river-gh--labels (object)
   "Return OBJECT's labels as one string, for the context.
@@ -246,9 +239,7 @@ thing that differs between an issue and a pull request here.
 The key names the **object** -- `issue:owner/repo#42', `pr:owner/repo#7'
 -- because that is what an artifact is.  It carries its domain, so two
 producers that both number things from one cannot collide on a bare
-number; that GitHub happens to number issues and pull requests out of
-one sequence, so these two could not have collided anyway, is luck and
-not a reason to spend it."
+number."
   (let* ((domain (or (cdr (assoc source agent-river-gh--domains))
                      (error "Not a gh source: %s" source)))
          (repo (agent-river-spool--string (alist-get 'repo data)))
@@ -294,9 +285,9 @@ is not an instruction, and only what the agent is being asked to *do*
 with it differs -- an issue is a request to weigh, a pull request is a
 change to read.
 
-Anything else falls back to the issue's framing, which is the more
-careful of the two: it is the one that describes what follows as a
-stranger's request rather than as work already under way."
+Anything else falls back to the issue's framing, the more careful of the
+two: it describes what follows as a stranger's request rather than as
+work already under way."
   (pcase domain
     ('pr
      (list (concat "A pull request is open on this repository and someone "
@@ -327,12 +318,11 @@ everything from the title down is inside the quotation and is described
 as somebody else's words, because the one thing it must not read as is
 an instruction that arrived with the same standing as its operator's.
 
-The branch names are inside it too, and that is the rule rather than
-caution: a branch name is a stranger's text exactly as a body is, and a
-pull request from a fork can spell one however it likes.  What is ours
-and stays outside is the framing, the note that a pull request is a
-draft -- a fact read off a boolean, interpolating nothing -- and the
-state the export renders.
+The branch names are inside it too: a branch name is a stranger's text
+exactly as a body is, and a pull request from a fork can spell one
+however it likes.  What is ours and stays outside is the framing, the
+note that a pull request is a draft -- a fact read off a boolean,
+interpolating nothing -- and the state the export renders.
 
 With a person pressing the key, that framing is a courtesy to the agent
 rather than the whole defence -- the defence is the person, who read the
@@ -379,7 +369,7 @@ rather than in a user's config because this is the file that put the url
 in the context.  `agent-river.el' never reads a value out of one -- that
 is what lets a record carry a severity, a body and a URL without the core
 learning about any of them -- so what a cell means is known only beside
-the reader that wrote it, which is the same line a source adapter is on.
+the reader that wrote it.
 
 Gated on the domain rather than on a url being there at all.  Any
 producer may call a cell `url', and offering to open somebody's incident
@@ -415,8 +405,7 @@ Checked here rather than left to the script, because an empty answer has
 to stop the poll rather than reach it: the script spells its default
 with `:-', which fires on an empty value as readily as on an unset one,
 so handing it a list that came to nothing would ask for both kinds --
-the drift `agent-river-gh-kinds' exists to shut, arrived at from the
-inside."
+the drift `agent-river-gh-kinds' exists to shut."
   (seq-filter (lambda (kind) (rassq kind agent-river-gh--domains))
               agent-river-gh-kinds))
 
@@ -424,11 +413,10 @@ inside."
   "Return one `AGENT_RIVER_GH_SEARCH_ISSUE'/`_PR' string per configured kind.
 
 Reads `agent-river-gh-search', a KIND-to-string alist, and answers with
-nothing for a kind that is absent or nil there -- the same `absent
-rather than empty' rule the setting used to observe as one string is now
-kept per entry: a customisation nobody made for a kind must reach the
-script as nobody having made one for it, not as an empty qualifier that
-happens to search for everything the same way."
+nothing for a kind that is absent or nil there: a customisation nobody
+made for a kind must reach the script as nobody having made one for it,
+not as an empty qualifier that happens to search for everything the same
+way."
   (let (env)
     (dolist (kind '(issue pr))
       (let ((search (alist-get kind agent-river-gh-search)))
@@ -445,8 +433,7 @@ Line-buffered, because a filter is handed whatever arrived rather than
 whatever was written: a report split across two chunks would otherwise
 be logged as two half-lines, and the log is line-based.  The remainder
 is kept in the closure and a report the process dies mid-way through is
-dropped, which is the same bargain `agent-river--say-runs' makes one
-mechanism over -- half a sentence said is worse than nothing said."
+dropped: half a sentence said is worse than nothing said."
   (let ((pending ""))
     (lambda (_process chunk)
       (setq pending (concat pending chunk))
@@ -476,14 +463,12 @@ when the mode is switched on, is the whole of the repair.
 
 Does nothing where there is no kind to ask for: see `agent-river-gh--kinds'.
 
-Everything is inside the guard, the bindings included.  They were above
-it, and this runs on a *repeating* timer: a non-string in
-`agent-river-gh-repos', or an `agent-river-gh-kinds' that is not a
-sequence, threw out of `agent-river-gh-poll' before the guard could
-catch it -- the shape `agent-river-launch--resolve-pending' is guarded
-against, at a five-minute period rather than a one-second one.  PUSHED
-rather than DIR in the handler, because the handler must not assume the
-binding that threw ever completed."
+Everything is inside the guard, the bindings included, because this runs
+on a *repeating* timer: a non-string in `agent-river-gh-repos', or an
+`agent-river-gh-kinds' that is not a sequence, would otherwise throw out
+of `agent-river-gh-poll' every interval.  PUSHED rather than DIR in the
+handler, because the handler must not assume the binding that threw ever
+completed."
   (let (pushed)
     (condition-case err
         (let ((dir (expand-file-name dir))
