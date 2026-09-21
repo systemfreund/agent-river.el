@@ -5327,7 +5327,6 @@ first."
   `(let ((agent-river-registry (make-hash-table :test 'equal))
          (agent-river-artifacts (make-hash-table :test 'equal))
          (agent-river-auto-display nil)
-         (agent-river-map-domains nil)
          ;; The default alone.  Requiring the launcher and the GitHub source
          ;; appends theirs, and a test about what a line offers must not be
          ;; answering for whatever else happens to be loaded.
@@ -5378,27 +5377,19 @@ it clears them."
     (should (eq (agent-river--key-domain "c:/tmp/x") 'file))
     (should (eq (agent-river--key-domain nil) 'file))))
 
-(ert-deftest agent-river-test-a-domain-gets-a-section-without-being-registered ()
+(ert-deftest agent-river-test-a-domain-heads-a-section-under-its-own-name ()
   (agent-river-test--with-domain
     (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444 disk full")
     (let ((map (agent-river-test--domain-map)))
-      ;; Something that has arrived must not wait for configuration before it
-      ;; can be seen, which is the failure mode of every dashboard that has to
-      ;; be taught about a new source.
-      (should (string-match-p "Inc" map))
+      ;; Nothing to register and nothing to name it: something that has
+      ;; arrived must not wait for configuration before it can be seen, which
+      ;; is the failure mode of every dashboard that has to be taught about a
+      ;; new source.  The heading is the domain as declared -- the prefix on
+      ;; every key in the section -- and not a capitalisation of it, which
+      ;; made `pr' into `Pr'.
+      (should (let ((case-fold-search nil)) (string-match-p "`inc`" map)))
+      (should-not (let ((case-fold-search nil)) (string-match-p "Inc`" map)))
       (should (string-match-p "INC-444 disk full" map)))))
-
-(ert-deftest agent-river-test-a-registered-domain-is-named-its-own-way ()
-  (agent-river-test--with-domain
-    (setq agent-river-map-domains
-          (list (cons 'inc (list :label "Incidents"))))
-    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
-    ;; The whole of what registering a domain now buys.  What may be *done*
-    ;; to one of its entries is asked of the line, not declared here: an
-    ;; issue is a thing to read and a thing to start an agent on, and a
-    ;; single `:visit' had to be one or the other.
-    (should (string-match-p "Incidents" (agent-river-test--domain-map)))
-    (should-not (plist-get (alist-get 'inc agent-river-map-domains) :visit))))
 
 (ert-deftest agent-river-test-an-unreached-artifact-is-still-listed ()
   (agent-river-test--with-domain

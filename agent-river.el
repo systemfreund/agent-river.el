@@ -1652,13 +1652,12 @@ mirror of the session tables, so a file reached by an agent needs no
 record here and one made anyway would say nothing its session's own table
 does not already say.
 
-The candidates are `agent-river-domains', which is what the table has,
-and pointedly not `agent-river-map-domains', which is what somebody
-configured.  That one is documented as purely presentational, so reading
-it here would make a view's settings decide what a producer may declare
--- and it would offer a domain nothing has ever arrived under while the
-domains that did arrive went unlisted, which is the wrong way round for a
-list whose job is to save typing."
+The candidates are `agent-river-domains', which is what the table has.
+There was a presentational list beside it once, `agent-river-map-domains',
+and reading *that* here would have made a view's settings decide what a
+producer may declare -- offering a domain nothing has ever arrived under
+while the domains that did arrive went unlisted, which is the wrong way
+round for a list whose job is to save typing."
   (let ((answer (string-trim
                  (completing-read
                   "Domain: " (mapcar #'symbol-name
@@ -6811,27 +6810,6 @@ never been touched is."
 ;; anybody registered one, because a thing that has arrived must not need
 ;; configuration before it can be seen.
 
-(defvar agent-river-map-domains nil
-  "How the map presents a non-file domain, when the default will not do.
-
-An alist of DOMAIN (the symbol an artifact was declared with) to a plist:
-
-  :label  the section heading.  The domain name capitalised, by default
-
-Purely presentational, and now literally so: it carried a `:visit' for
-RET as well, which made it the second place answering \"what may be done
-to this thing\" -- a question that is not the domain's to answer once,
-because an issue is something to read and something to start an agent on
-at the same time.  That is
-`agent-river-artifact-action-functions' now, where a line is asked and
-may be offered several things.
-
-A domain absent from this list is still drawn --
-`agent-river--map-domain-roots' reads the artifact table, not this -- and
-that is deliberate: something that has arrived should not have to wait for
-configuration before it can be seen, which is the failure mode of every
-dashboard that needs teaching about a new source.")
-
 (defun agent-river--key-domain (key)
   "Return the domain KEY belongs to: the symbol it was declared with, or `file'.
 
@@ -6906,9 +6884,18 @@ differently."
   (mapcar #'cdr (agent-river--domain-sections)))
 
 (defun agent-river--domain-label (domain)
-  "Return DOMAIN's section heading."
-  (or (plist-get (alist-get domain agent-river-map-domains) :label)
-      (capitalize (symbol-name domain))))
+  "Return DOMAIN's section heading: the domain, as it was declared.
+
+There was a table to register a prettier one in, `:label' in
+`agent-river-map-domains', and it went the way `agent-river-domains' went
+one grain up -- a declared second name for something the table already
+holds, right only while somebody keeps the two in step.  Nobody ever set
+it, and its own default was quietly wrong for the domains that did
+arrive: capitalised, `pr' headed a section called `Pr'.  The domain
+itself is what every key in the section is prefixed with and what
+\[agent-river-link-artifact] asks for, so it is the one name a reader has
+already seen."
+  (symbol-name domain))
 
 (defun agent-river--map-domain-roots (&optional scope)
   "Return one (ROOT . LAST) per live non-file domain, newest first.
@@ -8199,7 +8186,7 @@ goes on being what a fresh map opens with."
 ;;
 ;; Opening a thing is one of the things that can be done to it, and it used to
 ;; be the only one a line could offer: a file was opened, and a domain named a
-;; single `:visit' in `agent-river-map-domains' that RET called.  What that
+;; single `:visit' of its own that RET called.  What that
 ;; cannot express is the ordinary case -- an issue on the map is something to
 ;; read *and* something to start an agent on, and which of the two is wanted is
 ;; not a property of the domain, it is a question for the person looking at the
@@ -8212,10 +8199,10 @@ goes on being what a fresh map opens with."
 ;; subject answers nil, and a producer that invents a domain gets whatever the
 ;; registered functions offer without registering anything itself.
 ;;
-;; Two consequences worth naming.  The domain table is `:label' and nothing
-;; else now, which is what its docstring always claimed it was -- one mechanism
-;; answers "what may RET do here" and it is this one, where a `:visit' beside
-;; it would be a second.  And opening a file is an action like any other
+;; Two consequences worth naming.  A domain declares nothing at all now --
+;; the table that held that `:visit' is gone with the label beside it -- so one
+;; mechanism answers "what may RET do here" and it is this one.  And opening a
+;; file is an action like any other
 ;; (`agent-river--actions-file') rather than a branch of the command, because a
 ;; file line answering that question somewhere else is exactly the second
 ;; mechanism this collapses.  With one offer nothing is asked, so a plain file

@@ -575,17 +575,14 @@ observer.
 
 ## Domains
 
-Registering a domain in `agent-river-map-domains` is optional and only ever
-about presentation — a `:label` for the section:
-
-```elisp
-(add-to-list 'agent-river-map-domains
-             (cons 'inc (list :label "Incidents")))
-```
-
-A domain absent from it is still drawn: something that has arrived should not
-have to wait for configuration before it can be seen, which is the failure mode
-of every dashboard that has to be taught about a new source.
+There is nothing to register. Pass `:domain` when you declare an artifact and
+it heads a section of the map under that name — something that has arrived
+should not have to wait for configuration before it can be seen, which is the
+failure mode of every dashboard that has to be taught about a new source.
+There was a table for a prettier section heading (`agent-river-map-domains`,
+`:label`) and it is gone: a second name for something the artifact table
+already holds is right only for as long as somebody keeps the two in step, and
+the heading is now the domain itself — the prefix on every key in the section.
 
 ## Actions — what RET may do
 

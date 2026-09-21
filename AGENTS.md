@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (422 tests). -L . is required: the tests require all four .el files.
+# Full suite (421 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -811,11 +811,11 @@ performed the dispatch, and nothing in this package performs one. A user does.
   worth the one time it is not, and the one time it is not is the failure the
   invariant above describes. `file` is refused for every caller and not only
   at the prompt, because the table is not a mirror. The candidates come from
-  `agent-river-domains` -- what the table has -- and pointedly not from
-  `agent-river-map-domains`, which is documented as purely presentational: a
-  view's settings must not decide what a producer may declare, and reading it
-  would have offered domains nothing ever arrived under while the ones that
-  did went unlisted.
+  `agent-river-domains` -- what the table has. There was a presentational
+  list beside it once, `agent-river-map-domains`, and reading *that* would
+  have let a view's settings decide what a producer may declare: it would
+  have offered domains nothing ever arrived under while the ones that did
+  went unlisted.
 - **Everything is checked before anything is folded.** Declaring and then
   failing to reach leaves a record nobody asked for, which only
   `agent-river-drop-artifact` takes back -- so the session is looked up while
@@ -1840,20 +1840,25 @@ Four things about the map are load-bearing:
   swallowed. An empty listing says which kind of empty it is: a filtered tree
   full of files nobody has been near would otherwise read as a map that had
   lost them.
-- **A section need not be a directory** (`agent-river-map-domains`,
-  `agent-river--map-domain`). A non-file domain heads a section of its own,
+- **A section need not be a directory** (`agent-river--map-domain`). A
+  non-file domain heads a section of its own,
   and **the section's listing is the artifact table itself** -- which is why
   there is no per-domain listing function to write: a record already carries
   its name, whether it has ended, and whatever context its producer put on
   it, and asking a domain to answer those again would be the second account
-  that table exists to avoid. Four things it owes. **Registering one is
-  optional and only about presentation** -- `:label`, and now nothing else:
-  it carried a `:visit` for RET as well, which made it a second place
-  answering what may be *done* to a thing, and that is not the domain's to
-  answer once (see the actions section below). A domain
-  absent from the list is still drawn, because something that has arrived
+  that table exists to avoid. Four things it owes. **There is nothing to
+  register** (`agent-river--domain-label`, which is now `symbol-name`). The
+  table that did it, `agent-river-map-domains`, held a `:visit` for RET --
+  a second place answering what may be *done* to a thing, which is not the
+  domain's to answer once (see the actions section below) -- and then held
+  only a `:label`, which is the failure `agent-river-domains` had one grain
+  up: a declared second name for something the table already holds, kept in
+  step by nobody. Its default was quietly wrong for what actually arrived,
+  capitalising `pr` into a section called `Pr`. A domain nothing knows about
+  was always drawn anyway, because something that has arrived
   must not wait for configuration before it can be seen, which is the failure
-  mode of every dashboard that has to be taught about a new source. **An
+  mode of every dashboard that has to be taught about a new source -- and now
+  that holds for its name as well as for its existence. **An
   unreached record is still listed**, which is the opposite of what
   `agent-river-map-untouched` decides for a tree and deliberately so: there
   the unreached entries are the rest of the disk and swamp the few that
