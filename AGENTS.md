@@ -2073,26 +2073,39 @@ step. Four things the Markdown base forces:
   view mode's default and reads better on prose, but here the marker *is* the
   indentation — hidden, a directory and the files under it start in the same
   column and the tree stops being one.
-- **Names are code spans, fenced and on one line**
-  (`agent-river--map-name`). A path is what a code span is for, and inline
-  markup does not apply inside one; bare, `foo_bar_baz.el` renders with `bar`
-  in italics and the underscores eaten. That holds only for as long as the
-  name cannot close the span it sits in, and **a name stopped being ours the
-  moment a record could carry one**: an artifact's is a ticket title from
-  whoever declared it, and `Fix ``foo`` in *bar*` ended the span at its first
-  backtick and italicised the rest of the line. So the fence is measured
-  (`agent-river--md-code`, the export's answer) and the text is held to one
-  line (`agent-river--map-one-line`, the rule a contributed row already
-  owes) — a newline made one entry and one stray, and the stray carried none
-  of the properties the motions and `agent-river--map-here` read. Fixed in
-  the one place every name goes through rather than beside the record that
-  made it likely, so a path with a backtick in it is covered by the same
-  change; `agent-river--map-beginning-of-name` steps over the whole fence
-  for the same reason, or point lands on markup in exactly the case the
-  longer fence exists for. The **rows** were escaped from the start
-  (`agent-river--md-escape`) and the **name was the hole beside them** —
-  when the next piece of foreign text arrives on this buffer, this is the
-  question to ask of it first.
+- **Names are bare, on one line, and marked where they begin**
+  (`agent-river--map-name`). They were code spans, fenced long enough to
+  hold a backtick, and the whole of what that bought was measured against
+  the wrong Markdown. Two claims held it up and neither survives this
+  buffer. The italics: `foo_bar_baz.el` was said to render with `bar`
+  emphasised and the underscores eaten — but the grammar here is
+  tree-sitter's CommonMark, where an underscore *inside a word* opens no
+  emphasis at all, so that name draws plain with no help from us. And the
+  eating: **nothing in this buffer is ever hidden**, because
+  `markdown-ts-hide-markup` is nil one bullet up — the marker is the
+  indentation. With nothing hidden, the worst a name that really does open
+  markup (`__init__.py`, `a*b*c.txt`, a ticket title with an asterisk in
+  it) can suffer is a *face*. Every character stays on screen. What the
+  fence did do, every draw, was put two backticks around every name in the
+  view — markup being the one thing this buffer shows rather than hides.
+  What is still owed is **structural**, and the marker already owes it: a
+  name never starts a line, so `## injected` in a record's title lands
+  mid-line and stays text, whatever else it holds. That argument rests
+  entirely on the line staying one line (`agent-river--map-one-line`, the
+  rule a contributed row already owes) — a newline made one entry and one
+  stray, and the stray carried none of the properties the motions and
+  `agent-river--map-here` read. **Where a name begins is a property, not a
+  search** (`agent-river-map-point`, read by
+  `agent-river--map-beginning-of-name`), which is this view's own rule one
+  grain up: the prefix is a Markdown marker followed by a gutter of glyphs
+  the user can set, and a name may itself begin with a dash or a hash, so
+  nothing reading the rendered text can tell the two apart. Its own
+  property and not the line's `agent-river-map-name`, which carries the
+  node's name across the whole line and therefore cannot say where on that
+  line the name starts. The **rows** are escaped (`agent-river--md-escape`)
+  and the name is not, which is the asymmetry to keep straight: a row is
+  prose that may say anything, a name is one line whose only remaining
+  hazard is how it is coloured.
 - **`outline-minor-mode-cycle` is off.** It puts a `keymap` text property on
   every heading that wins over the mode map and swallows TAB — but the real
   reason is that its fold lives in overlays, and this buffer is rebuilt every
