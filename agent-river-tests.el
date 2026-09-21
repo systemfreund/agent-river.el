@@ -5058,7 +5058,7 @@ it clears them."
           (list #'agent-river--actions-file)))
      ,@body))
 
-(ert-deftest agent-river-test-a-file-line-offers-opening-and-nothing-asks ()
+(ert-deftest agent-river-test-a-record-on-disk-offers-opening-and-nothing-asks ()
   (agent-river-test--with-actions
     (let* ((path (make-temp-file "agent-river-action"))
            (subject (agent-river--map-subject path))
@@ -5067,8 +5067,10 @@ it clears them."
           (progn
             ;; The old `find-file' branch, as an action like any other -- and
             ;; the whole point of collapsing it into the protocol is that a
-            ;; reader cannot tell: one offer runs, so RET still opens the file
-            ;; with one keystroke and no menu.
+            ;; reader cannot tell: one offer runs, so RET still opens it with
+            ;; one keystroke and no menu.  The map drew a line per file once
+            ;; and this was for those; what is left for it is a record whose
+            ;; producer keyed it by a path.
             (should (equal (mapcar (lambda (a) (plist-get a :name))
                                    (agent-river--artifact-actions subject))
                            '("Open file")))
@@ -5080,7 +5082,7 @@ it clears them."
             (should (equal opened path)))
         (delete-file path)))))
 
-(ert-deftest agent-river-test-a-file-that-is-gone-offers-nothing ()
+(ert-deftest agent-river-test-a-path-that-is-gone-offers-nothing ()
   (agent-river-test--with-actions
     (let ((subject (agent-river--map-subject "/nowhere/at/all.el")))
       ;; Nil rather than an offer that fails when it is taken, and nil rather
@@ -5093,21 +5095,23 @@ it clears them."
   (agent-river-test--with-actions
     (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444"
                           :context '((severity . "P1")))
+    (agent-river-appeared "/var/log/checkout.log" :domain 'log :name "checkout")
     (let ((record (agent-river--map-subject "inc:INC-444"))
-          (file (agent-river--map-subject "/repo/a.el")))
+          (ondisk (agent-river--map-subject "/var/log/checkout.log")))
       ;; A key cannot say where it is, and a non-file key resolved against a
       ;; directory becomes a file in a tree it has nothing to do with -- the
-      ;; mistake the anchors were folded to stop.  So `:path' is set from what
-      ;; the map already had, and only where that is genuinely absolute.
+      ;; mistake the anchors were folded to stop.  So `:path' is never
+      ;; resolved, only carried where the key is already absolute.
       (should (equal (plist-get record :key) "inc:INC-444"))
       (should (eq (plist-get record :domain) 'inc))
       (should-not (plist-get record :path))
       (should (equal (alist-get 'severity (plist-get record :context)) "P1"))
-      ;; A file line names no record, so the domain is what a key is when
-      ;; nobody said otherwise, and the absolute name is all an action gets.
-      (should (equal (plist-get file :path) "/repo/a.el"))
-      (should (eq (plist-get file :domain) 'file))
-      (should-not (plist-get file :key)))))
+      ;; And that is the producer's doing rather than the map's: a record
+      ;; keyed by a path is still a record, and it is the one case left in
+      ;; which `agent-river--actions-file' has anything to offer.
+      (should (equal (plist-get ondisk :path) "/var/log/checkout.log"))
+      (should (equal (plist-get ondisk :key) "/var/log/checkout.log"))
+      (should (eq (plist-get ondisk :domain) 'log)))))
 
 (ert-deftest agent-river-test-several-offers-are-chosen-between-by-name ()
   (agent-river-test--with-actions

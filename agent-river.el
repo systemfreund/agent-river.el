@@ -7849,25 +7849,25 @@ is offered, so the caller -- which is the one holding what the line names
         (funcall (plist-get action :act)))
       t)))
 
-(defun agent-river--map-subject (path)
-  "Return what the map line naming PATH is about, for an action function.
+(defun agent-river--map-subject (key)
+  "Return what the map line naming KEY is about, for an action function.
 
-An artifact record where the table has one: the key is the identity, and
-the record already carries the name and whatever context its producer put
-on it.  Where the table has none the line names a file -- `file' is what a
-key is when nobody said otherwise -- and what an action needs of that is
-the absolute name.
+The artifact record, which is all a map line ever names now: the listing
+*is* the table, so there is no line whose key the table does not have.
+There was a branch for that case -- the line named a file, `file' being
+what a key is when nobody said otherwise, and the subject was a bare
+`:domain' -- and it was unreachable from the moment the tree listing went.
 
-It travels as `:path', beside the key rather than inside it, which is the
-rule `agent-river--artifact-absolute' states one subject over: a key
-cannot say where it is, and a non-file key resolved against a directory
-becomes a file in a tree it has nothing to do with.  Here the absolute
-name is what the map already had, so there is nothing to resolve and
-nothing to get wrong -- and it is set only when it is genuinely absolute,
-which is never true of a domain key."
-  (let ((record (agent-river-artifact-at path)))
-    (append (and (file-name-absolute-p path) (list :path path))
-            (or record (list :domain (agent-river--key-domain path))))))
+`:path' is set only where KEY is itself an absolute name, which is the
+producer\'s doing rather than ours: a record may be keyed by a path (a log,
+a report on disk) and `agent-river--actions-file' offers to open that one.
+It travels beside the key rather than inside it, which is the rule
+`agent-river--artifact-absolute' states one subject over -- a key cannot
+say where it is, and a non-file key resolved against a directory becomes a
+file in a tree it has nothing to do with.  Nothing is resolved here; the
+name is either already absolute or there is none."
+  (append (and (file-name-absolute-p key) (list :path key))
+          (agent-river-artifact-at key)))
 
 (defun agent-river-map-visit ()
   "Do what the line at point offers, asking which when it offers more than one.

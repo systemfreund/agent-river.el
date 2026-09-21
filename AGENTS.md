@@ -857,11 +857,16 @@ are collected (`agent-river--artifact-actions`) and either run or offered
 - **Opening a file is an action like any other** (`agent-river--actions-file`,
   the default entry). It was a branch of `agent-river-map-visit` and leaving
   it there would be exactly the second mechanism this collapses: a file line
-  answering the question somewhere else. Nothing about it reads differently
-  to a user, which is the point of the next bullet.
+  answering the question somewhere else. It was written for the file lines
+  the map used to draw, and what is left for it is narrower and is the
+  producer\'s doing rather than the map\'s: a record whose *key* is an
+  absolute name — a log, a report on disk — which `agent-river--map-subject`
+  passes through as `:path`. That function had a second half for a line with
+  no record behind it, and the moment the listing became the artifact table
+  it was unreachable: every line the map draws is a record.
 - **One offer is run without asking.** A menu with one entry is a question
-  with no alternative, so RET on a plain file still opens it with one
-  keystroke. The friction a sharp action needs is the action's own, and
+  with no alternative, so RET on a record that is a file on disk still opens
+  it with one keystroke. The friction a sharp action needs is the action's own, and
   **whether it is still worth asking for is what `agent-river-artifact-chosen`
   answers**: bound around the thunk when the user picked it by name out of
   several, nil when the line's one offer was run outright. A menu entry
