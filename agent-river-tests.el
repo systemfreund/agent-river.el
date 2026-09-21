@@ -1481,8 +1481,7 @@ stubbed here so the tests do not depend on agent-shell being installed."
         ;; from one that never had one.
         (kill-buffer (agent-river--shell-buffer "gone"))
         (should (agent-river--active-p live))
-        (should-not (agent-river--active-p closed))
-        (should (agent-river--gone-p closed))))))
+        (should-not (agent-river--active-p closed))))))
 
 (ert-deftest agent-river-test-a-terminal-session-keeps-the-ttl ()
   ;; What the sticky flag cost: once agent-shell had hosted anything here it
@@ -1496,10 +1495,8 @@ stubbed here so the tests do not depend on agent-shell being installed."
       (let ((cli (agent-river-state "cli" "repo")))
         (should-not (agent-river--shell-hosted "cli"))
         (should (agent-river--active-p cli))
-        (should-not (agent-river--gone-p cli))
         (setf (agent-river-state-last-seen cli) (time-subtract (current-time) 9999))
-        (should-not (agent-river--active-p cli))
-        (should-not (agent-river--gone-p cli))))))
+        (should-not (agent-river--active-p cli))))))
 
 (ert-deftest agent-river-test-a-session-is-looked-for-again-for-a-while ()
   ;; A negative remembered forever is cheaper and is a trap: a session whose
@@ -1525,48 +1522,6 @@ stubbed here so the tests do not depend on agent-shell being installed."
                      agent-river--shell-sessions)
             (should (eq (agent-river--shell-buffer "late") buffer)))
         (kill-buffer buffer)))))
-
-(ert-deftest agent-river-test-gone-is-narrower-than-inactive ()
-  ;; Inactive is an estimate wherever the TTL answers it, and a view that
-  ;; withdraws a name or a marker has to act on facts: a buffer that was
-  ;; killed, or a SubagentStop.  A session that has merely gone quiet is
-  ;; quiet, not gone.
-  (let ((agent-river-registry (make-hash-table :test 'equal))
-        (agent-river-session-ttl 300))
-    (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
-      ;; What the first event through `agent-river-observe' does: the one
-      ;; session with a buffer here is recorded as having had one.
-      (agent-river--ensure-shell-teardown "s1")
-      (let ((hosted (agent-river-state "s1" "repo"))
-            (elsewhere (agent-river-state "cli" "repo")))
-        (should-not (agent-river--gone-p hosted))
-        ;; A session run from a terminal never had a buffer to lose, so its
-        ;; silence says nothing -- where `agent-river--active-p', which takes
-        ;; agent-shell for the authority over every root once it has seen
-        ;; one, calls it inactive.
-        (setf (agent-river-state-last-seen elsewhere) (time-subtract (current-time) 9999))
-        (should-not (agent-river--active-p elsewhere))
-        (should-not (agent-river--gone-p elsewhere))
-        ;; Subagents no longer appear here at all: they are a tally on the
-        ;; session rather than an entry beside it, so there is nothing for
-        ;; this to retire on their behalf.
-        (kill-buffer (agent-river--shell-buffer "s1"))
-        ;; The kill hook the registration installed schedules a block redraw
-        ;; there is no buffer for here.
-        (cancel-function-timers #'agent-river--redraw-block)
-        (should (agent-river--gone-p hosted))))))
-
-(ert-deftest agent-river-test-a-killed-session-marks-the-map-dirty ()
-  ;; Nothing else can say so.  A killed session sends no further events, so
-  ;; with no other agent running the map would have gone on naming it and
-  ;; pointing at it until someone pressed `g'.
-  (let ((agent-river--map-dirty nil))
-    (unwind-protect
-        (with-temp-buffer
-          (agent-river--shell-died (current-buffer))
-          (should agent-river--map-dirty))
-      ;; The block redraw it also schedules has no buffer to draw into here.
-      (cancel-function-timers #'agent-river--redraw-block))))
 
 (ert-deftest agent-river-test-session-line-is-visitable ()
   (let ((agent-river-registry (make-hash-table :test 'equal))
@@ -3936,35 +3891,17 @@ file an artifact key names is still there."
            ,@body)
        (delete-directory ,var t))))
 
-(defun agent-river-test--cool (state path seconds)
-  "Back-date STATE's touches of PATH by SECONDS, in both frames.
-`:last' is read on every draw, so aging a touch is how a test asks what
-the view looks like once the work has moved on."
-  (dolist (table (list (agent-river-state-artifacts state)
-                       (agent-river-state-task-artifacts state)))
-    (let ((entry (gethash path table)))
-      (when entry
-        (puthash path
-                 (list :touches (plist-get entry :touches)
-                       ;; Carried, not dropped: a write does not stop having
-                       ;; happened because the touch is being aged, and the
-                       ;; landed marker is read from it.
-                       :writes (plist-get entry :writes)
-                       :last (time-subtract (plist-get entry :last) seconds))
-                 table)))))
-
-(ert-deftest agent-river-test-a-gone-file-is-struck-through ()
-  ;; Grey is the map's word for several things at once -- stale, cold,
-  ;; elided.  "This file is not there" is worth saying exactly, and once the
-  ;; line reads as gone it can no longer be mistaken for a place an agent is
-  ;; still working in.
-  (should (let ((line (agent-river--map-line 2 "scratch.el"
+(ert-deftest agent-river-test-a-record-that-is-over-is-struck-through ()
+  ;; Grey is the map's word for several things at once -- stale, elided.
+  ;; "This is over" is worth saying exactly, and once the line reads as
+  ;; over it can no longer be mistaken for something anyone is still on.
+  (should (let ((line (agent-river--map-line 2 "INC-444"
                                      '((:party "alpha" :touches 3)) t)))
     (text-property-any 0 (length line) 'agent-river-map-face
                        'agent-river-gone line)))
-  ;; And a name that is on disk keeps its shading, which is a reading about
-  ;; weight and must not be crowded out by one about existence.
-  (should-not (let ((line (agent-river--map-line 2 "there.el"
+  ;; And a record that is still open is not marked at all: the strike is
+  ;; the only reading on the name, so it cannot be spent on anything else.
+  (should-not (let ((line (agent-river--map-line 2 "INC-501"
                                        '((:party "alpha" :touches 9)))))
       (text-property-any 0 (length line) 'agent-river-map-face
                          'agent-river-gone line))))
@@ -4341,36 +4278,26 @@ the view looks like once the work has moved on."
       ;; by it -- the overview shows several roots at once.
       (should-not (agent-river--map-folded-p "/other/a.el" nil)))))
 
-(ert-deftest agent-river-test-the-map-header-is-a-name-and-a-count ()
-  ;; It used to caption the view as well -- which frame the numbers came
-  ;; from.  That is still true and is documented where it is decided; a
-  ;; legend redrawn every few seconds on a line that is read once is not
-  ;; where a reader looks it up.
+(ert-deftest agent-river-test-the-map-header-is-a-name-and-nothing-else ()
+  ;; Two readings have come off this line and both were second accounts.
+  ;; The frame the numbers were read from is a legend -- true whatever
+  ;; happens, and documented where the frame is decided.  The agent count
+  ;; was the parties again: who is on a record is on that record's line,
+  ;; and `>' walks exactly the lines the number was summing, with the one
+  ;; part a sum cannot keep -- which line.
   (agent-river-test--with-domain
     (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
-    (let ((header (agent-river--map-header "inc:" nil)))
+    ;; Reached, so there is a party to count and the header still does not.
+    (agent-river-state "s1" "alpha")
+    (agent-river-reach "inc:INC-444" "s1")
+    (let ((header (agent-river--map-header "inc:")))
       (should (string-match-p "inc" header))
-      (should-not (string-match-p "frame" header)))
+      (should-not (string-match-p "frame" header))
+      (should-not (string-match-p "agent\\|quiet" header)))
     ;; And the overview is named after how many sections it spans, since no
     ;; one of them may stand for the rest.
-    (should (string-match-p "2 domains" (agent-river--map-header nil nil 2)))
-    (should (string-match-p "1 domain " (agent-river--map-header nil nil 1)))))
-
-(ert-deftest agent-river-test-the-map-header-counts-the-agents-that-are-left ()
-  ;; A name outlives its session on purpose, because the file was still
-  ;; touched and that stays true.  Counting names would then report an
-  ;; audience that has left as though it were still there, which is the one
-  ;; thing this number is for.
-  (agent-river-test--with-shell '(("Claude Agent @ repo" "s1"))
-    (agent-river-test--with-session state
-      (agent-river--ensure-shell-teardown "s1")
-      (let ((entries (list (list :parties
-                                 (list (list :party (agent-river--party-label state)
-                                             :touches 4))))))
-        (should (string-match-p "1 agent\\'" (agent-river--map-header "/repo" entries)))
-        (kill-buffer (agent-river--shell-buffer "s1"))
-        (cancel-function-timers #'agent-river--redraw-block)
-        (should (string-match-p "quiet\\'" (agent-river--map-header "/repo" entries)))))))
+    (should (string-match-p "2 domains\\'" (agent-river--map-header nil 2)))
+    (should (string-match-p "1 domain\\'" (agent-river--map-header nil 1)))))
 
 ;;; Moving about the map
 ;;
@@ -4961,7 +4888,7 @@ it clears them."
       ;; Names are drawn bare, so it is the word itself -- on the header,
       ;; since one domain needs no section heading under a header that
       ;; already names it.
-      (should (let ((case-fold-search nil)) (string-match-p "^# +inc " map)))
+      (should (let ((case-fold-search nil)) (string-match-p "^# +inc$" map)))
       (should-not (let ((case-fold-search nil)) (string-match-p "Inc" map)))
       (should (string-match-p "INC-444 disk full" map)))))
 
