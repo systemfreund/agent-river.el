@@ -361,16 +361,11 @@ text unclipped.")
 (cl-defstruct (agent-river-state (:constructor agent-river--state-create))
   id                ; registry key: "SESSION" or "SESSION/AGENT"
   label             ; human-readable: working directory, or the agent type
-  ;; The absolute working directory the hook reported; the anchor
-  ;; `artifacts' is keyed against.  Kept beside the keys rather than folded
-  ;; into them, so a key stays relative and one file reached from a worktree
-  ;; and from the main checkout is still one artifact.
+  ;; The absolute working directory the hook reported; what `artifacts' is
+  ;; keyed relative to.  Kept beside the keys rather than folded into them,
+  ;; so a key stays relative and one file reached from a worktree and from
+  ;; the main checkout is still one artifact.
   cwd
-  ;; hash: artifact key -> the absolute directory it really sits in, for keys
-  ;; `cwd' cannot place (a file outside the cwd degrades to a bare basename).
-  ;; Only the strays are recorded: a key under the cwd is anchored by the cwd
-  ;; already, and storing it twice would let the two disagree.
-  anchors
   ;; hash: agent_id -> (:type TYPE :steps N :failures N :started T :last T
   ;; :done BOOL), for the work this session delegated.  A tally on the
   ;; session rather than a peer in the registry: a subagent has no prompt, no
@@ -587,7 +582,6 @@ that changes directory does not keep a stale name."
                              :started (current-time)
                              :artifacts (make-hash-table :test 'equal)
                              :task-artifacts (make-hash-table :test 'equal)
-                             :anchors (make-hash-table :test 'equal)
                              :tools (make-hash-table :test 'equal)
                              :fail-streak 0
                              :fail-runs 0
@@ -746,33 +740,11 @@ rather than \"what has been opened all afternoon\".  Reporting one while
 labelling it the other is how a panel starts misleading people.
 
 Both are counted for every path.  No view names a file: what still reads a
-*file* entry is `agent-river--hottest', `agent-river--artifact-list' and
-`agent-river--gone-artifacts'.  What reads a *declared* key is the map."
+*file* entry is `agent-river--hottest' and `agent-river--artifact-list'.
+What reads a *declared* key is the map."
   (when (and path (not (string-empty-p path)))
     (agent-river--touch-1 (agent-river-state-artifacts state) path wrote)
     (agent-river--touch-1 (agent-river-state-task-artifacts state) path wrote)))
-
-(defun agent-river--anchor (state key path)
-  "Record where KEY really sits, given the absolute PATH it was folded from.
-
-Only for the keys the cwd cannot place.  `agent-river--rel' leaves a file
-outside the session's cwd as a bare basename, which a view then resolves
-against the cwd and draws inside a tree the file has nothing to do with.
-The directory is kept here instead of in the key so the key stays
-normalised -- one file reached from a worktree and from the main checkout
-is still one artifact, and only the question of *where* consults this.
-
-A key that has moved back under the cwd drops its anchor rather than
-keeping the old one: the same basename can be reached both ways, and a
-stale anchor would go on claiming the outside directory forever."
-  (let ((table (agent-river-state-anchors state))
-        (cwd (agent-river-state-cwd state)))
-    (when (and table key (not (string-empty-p key))
-               path (not (string-empty-p path)))
-      (if (and cwd (not (string-empty-p cwd))
-               (string-prefix-p (file-name-as-directory cwd) path))
-          (remhash key table)
-        (puthash key (directory-file-name (file-name-directory path)) table)))))
 
 (defun agent-river--delegate (state agent type &optional step failed done)
   "Record what subagent AGENT of TYPE did, on STATE's own tally.
@@ -816,13 +788,12 @@ replaying a session's events from the start."
   (let ((kind (plist-get event :kind))
         (tool (plist-get event :tool))
         (file (plist-get event :file))
-        (path (plist-get event :path))
         (ms   (plist-get event :ms)))
     ;; Folded rather than set where the state is addressed, so replaying the
-    ;; events reproduces the anchor too.  Refreshed on every event that
-    ;; carries a cwd; only the agent-shell path actually moves it, reading the
-    ;; buffer's `default-directory' per event.  Events made inside Emacs --
-    ;; a note, a signal -- carry none and leave it alone.
+    ;; events reproduces where the session was working.  Refreshed on every
+    ;; event that carries a cwd; only the agent-shell path actually moves it,
+    ;; reading the buffer's `default-directory' per event.  Events made
+    ;; inside Emacs -- a note, a signal -- carry none and leave it alone.
     (let ((cwd (plist-get event :cwd)))
       (when (and cwd (not (string-empty-p cwd)))
         (setf (agent-river-state-cwd state) (directory-file-name cwd))))
@@ -869,7 +840,6 @@ replaying a session's events from the start."
                             (agent-river-state-recent state))))
         (when window (setcdr window nil)))
       (agent-river--touch state file (agent-river--writing-p tool))
-      (agent-river--anchor state file path)
       ;; Counted on the session, not beside it: a delegated step is a step
       ;; this session took, and the file it touched lands in the session's
       ;; own frames.
@@ -912,11 +882,10 @@ replaying a session's events from the start."
 
      ;; The edge on its own: a session reached something without a tool call
      ;; this package could see -- see `agent-river-reach'.  Updates both
-     ;; artifact frames and the anchor, nothing else.  No tool ran, so this
-     ;; counts no step.
+     ;; artifact frames and nothing else: no tool ran, so this counts no
+     ;; step.
      ((equal kind "touch")
-      (agent-river--touch state file (plist-get event :wrote))
-      (agent-river--anchor state file path))
+      (agent-river--touch state file (plist-get event :wrote)))
 
      ;; What the agent said, once the turn it said it in was over.  As narrow
      ;; as `touch' above: no tool ran, so no step is counted and no artifact
@@ -959,22 +928,8 @@ replaying a session's events from the start."
       ;; The artifact tables emptied, nothing else: steps and failures still
       ;; count.  Folded rather than cleared where the command is written,
       ;; since the fold owns the state.
-      ;;
-      ;; The anchors go with them -- keyed on artifact keys, so without the
-      ;; artifacts they address nothing.
-      ;;
-      ;; `:files' narrows the same transition to the keys it names, for
-      ;; `agent-river-forget-gone-files': one branch rather than two, since
-      ;; the state change is identical and only its subject differs.
-      (let ((files (plist-get event :files)))
-        (if files
-            (dolist (file files)
-              (remhash file (agent-river-state-artifacts state))
-              (remhash file (agent-river-state-task-artifacts state))
-              (remhash file (agent-river-state-anchors state)))
-          (clrhash (agent-river-state-artifacts state))
-          (clrhash (agent-river-state-task-artifacts state))
-          (clrhash (agent-river-state-anchors state)))))
+      (clrhash (agent-river-state-artifacts state))
+      (clrhash (agent-river-state-task-artifacts state)))
 
      ((equal kind "intent")
       (setf (agent-river-state-intent state) (plist-get event :text)
@@ -1331,10 +1286,9 @@ where you can.
 **Declare a key before you reach it.**  A domain is read off
 `agent-river-artifacts\=', so a key reached before its record exists is
 undeclared, and undeclared is a path: resolved against the session cwd,
-`inc:INC-444\=' becomes `/repo/inc:INC-444\=', which
-`agent-river-forget-gone-files\=' then offers to sweep as a name that is not
-on disk.  The window closes by itself -- the domain is read at every draw,
-so `agent-river-appeared\=' landing later repairs the placement -- but the
+`inc:INC-444\=' becomes `/repo/inc:INC-444\=', a name in a tree it has
+nothing to do with.  The window closes by itself -- the domain is read at
+every draw, so `agent-river-appeared\=' landing later repairs it -- but the
 order is still wrong: nobody can say who is on a subject they have not
 named yet.  Declaring is not done here because the table is not a mirror
 of the session tables, and because two calls declaring a domain would be
@@ -1450,10 +1404,8 @@ artifact gets declared, which is the whole of what this reading is for."
 Asked every time rather than defaulted, because there is no default that
 is right often enough to be worth the one time it is not, and because an
 undeclared key is not a kind of thing -- it is a path relative to the
-session cwd, which `agent-river--artifact-absolute' resolves and
-`agent-river-forget-gone-files' may then sweep.  Reading the domain off
-the key's own spelling instead is the prefix rule
-`agent-river--key-domain' exists to refuse.
+session cwd.  Reading the domain off the key's own spelling instead is
+the prefix rule `agent-river--key-domain' exists to refuse.
 
 No match is required: a domain nothing here has heard of is still drawn,
 and something that has arrived must not wait for configuration before it
@@ -1591,11 +1543,12 @@ supposed to own alone."
 (defun agent-river-drop-artifact (key)
   "Forget artifact KEY entirely.
 
-For when an ending has stopped being news -- the same moment
-`agent-river-forget-gone-files' is for, one subject over.  Removing the
-record is not a second writer to a state the fold owns: it removes the
-subject rather than putting a transition in it, which is what
-`agent-river-reset' does to every session and nobody calls that a write.
+For when an ending has stopped being news.
+`agent-river-drop-gone-artifacts' is the same gesture over every record at
+once; this one names its own, so it asks nothing.  Removing the record is
+not a second writer to a state the fold owns: it removes the subject
+rather than putting a transition in it, which is what `agent-river-reset'
+does to every session and nobody calls that a write.
 
 The sessions that reached it keep their tables.  Those are the edge, they
 are true whatever became of the thing at the other end, and clearing them
@@ -1620,15 +1573,61 @@ this apart from `agent-river-artifacts-reset\=' below."
     key))
 
 ;;;###autoload
+(defun agent-river-drop-gone-artifacts ()
+  "Forget every artifact record that has ended.
+
+A record that is over is struck through rather than dropped, because the
+ending is itself a thing that happened -- which is right while it is news
+and wrong once a section has filled up with lines nobody is going to pick
+up.  Only you know when that moment came, so this is a command and not a
+rule: `agent-river-drop-artifact' for one of them, this for all of them
+at once.
+
+The sessions that reached them keep their tables.  Those are the edge and
+are true whatever became of the thing at the other end.
+
+Read off the record\='s own `gone\=', which a producer set by saying the
+thing was over.  Nothing here asks the disk: a record is over because
+something reported it over, and a file behind a key that cannot be found
+is a file elsewhere as readily as a file deleted.
+
+Asks first, for the reason `agent-river-artifacts-reset\=' does and in the
+same shape: nothing undoes this, and what it throws away is the half of
+the state no event can rebuild.  Bound to `C\=' in the map, which is the one
+forget that is: its subject is already over, so what goes is the record of
+an ending rather than the record of any work.
+
+Returns how many were dropped, and nil when there was nothing to drop or
+the question was declined."
+  (interactive)
+  (let (keys)
+    (maphash (lambda (key artifact)
+               (when (agent-river-artifact-gone artifact) (push key keys)))
+             agent-river-artifacts)
+    (let ((n (length keys)))
+      (cond
+       ((zerop n)
+        (message "agent-river: no artifact record has ended") nil)
+       ((not (y-or-n-p (format "Forget %d record%s that had ended? "
+                               n (if (= n 1) "" "s"))))
+        (message "agent-river: kept") nil)
+       (t
+        (dolist (key keys) (remhash key agent-river-artifacts))
+        (agent-river--forget-reported
+         (format "forgot %d record%s that had ended" n (if (= n 1) "" "s"))
+         "artifact")
+        n)))))
+
+;;;###autoload
 (defun agent-river-artifacts-reset ()
   "Forget every artifact, keeping the sessions.
 The artifact-side `agent-river-forget-artifacts\=': what was being worked
 on is dropped, and who was working is left alone.
 
-Asks first, for the reason `agent-river-forget-gone-files\=' does and in the
-same shape: nothing undoes this, and what it throws away is the half of
-the state no event can rebuild.  A session folds again from its next hook
-call; a record that arrived from a webhook an hour ago arrived once.
+Asks first, for the reason `agent-river-drop-gone-artifacts\=' does and in
+the same shape: nothing undoes this, and what it throws away is the half
+of the state no event can rebuild.  A session folds again from its next
+hook call; a record that arrived from a webhook an hour ago arrived once.
 
 Always, rather than only when a person typed it: this is a gesture, and
 `clrhash\=' on `agent-river-artifacts\=' is what code that means it should
@@ -2171,18 +2170,17 @@ what keeps that from folding as a success."
           :session (or (alist-get 'session_id payload) "unknown")
           :label (file-name-nondirectory (directory-file-name cwd))
           ;; The directory `:file' is relative to, folded so the state can
-          ;; say where its keys are anchored -- the label is only its last
-          ;; component and two checkouts of one project are labelled alike.
+          ;; say where it is working -- the label is only its last component
+          ;; and two checkouts of one project are labelled alike.
           :cwd cwd
           :agent (alist-get 'agent_id payload)
           :agent-type (alist-get 'agent_type payload)
           :tool (alist-get 'tool_name payload)
           :file (and file (agent-river--rel file cwd))
-          ;; The absolute name, for views that have to reach the file on
-          ;; disk.  Carried beside `:file' and never folded *into a key*:
-          ;; the artifact tables key on the normalised form, so an absolute
-          ;; path there would make a worktree and main-checkout file count
-          ;; as two again -- see `agent-river--anchor'.
+          ;; The absolute name, for a consumer that has to reach the file on
+          ;; disk.  On the event, not the fold: the artifact tables key on
+          ;; the normalised form, so an absolute path folded in would make
+          ;; a worktree and a main-checkout file count as two again.
           :path file
           ;; Which tool call this is, so the line it opened can be completed
           ;; in place.  Paired with the session because call-id uniqueness
@@ -2661,15 +2659,13 @@ first sentence, which is where this parts company with the `◇' lines: what
 they show is an aside, and clipping an aside loses an aside.
 
 No cwd, deliberately, which puts this with the events made inside Emacs
-rather than with the steps: the fold refreshes the anchor from every event
+rather than with the steps: the fold refreshes the cwd from every event
 that carries one, and a `say' reached no file.  Carrying the shell
-buffer\='s `default-directory' would have every turn end re-anchor a
-session the hooks anchored, and the two spellings need not agree since
+buffer\='s `default-directory' would have every turn end move a cwd the
+hooks had set, and the two spellings need not agree since
 `expand-file-name' does not resolve a symlink and a host\='s reported cwd
-may.  What that costs is a session folded from this path *alone* -- no
-hooks, `agent-river-watch-mode' off -- which then has no cwd and so no
-place in the block; it has no artifact keys either, which is the only
-thing an anchor is for."
+may -- after which the keys relativised against one would no longer sit
+under the other."
   (let ((chunks (gethash session agent-river--say-runs)))
     (remhash session agent-river--say-runs)
     (let ((text (apply #'concat (nreverse chunks))))
@@ -5477,9 +5473,8 @@ record of where the work was is dropped.
 
 Deliberately left off the map's keymap.  It throws measurements away with
 no way back, and a single keystroke in a view buffer is the wrong gesture
-for that.  `agent-river-forget-gone-files' is the one that is bound
-there, and the difference is its subject: it drops only what is about a
-file that no longer exists."
+for that.  `agent-river-drop-gone-artifacts' is the one that is bound
+there, and the difference is its subject: what it drops is already over."
   (interactive)
   (let ((n 0))
     (maphash (lambda (_key state)
@@ -5513,78 +5508,6 @@ subject rather than fold it, so no observer hook hears about them."
   (agent-river--redraw-block)
   (agent-river--map-draw)
   (message "agent-river: %s" text))
-
-(defun agent-river--artifact-gone-p (state key)
-  "Return non-nil when STATE's artifact KEY names a file that is not there.
-
-Placed the way every other view places a key -- through
-`agent-river--artifact-absolute', so the anchor wins over the cwd for a file
-that was reached from outside it, and so this cannot decide a file is
-gone by looking for it in a directory no agent ever opened.
-
-A key that cannot be placed at all is not gone but unplaceable, and is
-kept: a state folded without a cwd would otherwise have every artifact it
-ever recorded swept away by a command that never found any of them."
-  (let ((abs (agent-river--artifact-absolute
-              (list :cwd (agent-river-state-cwd state)
-                    :anchor (let ((anchors (agent-river-state-anchors state)))
-                              (and anchors (gethash key anchors)))
-                    :file key))))
-    (and abs (not (file-exists-p abs)))))
-
-(defun agent-river--gone-artifacts (state)
-  "Return STATE's artifact keys whose files are no longer on disk.
-
-Read from the session frame, which is the wider of the two: a file
-deleted during an earlier task is just as gone, and sweeping only the
-task frame would leave the session frame naming it -- and the map, which
-reads the session frame by default, still drawing it."
-  (let (gone)
-    (maphash (lambda (key _entry)
-               (when (agent-river--artifact-gone-p state key)
-                 (push key gone)))
-             (agent-river-state-artifacts state))
-    gone))
-
-;;;###autoload
-(defun agent-river-forget-gone-files ()
-  "Forget the artifacts naming files that are no longer on disk.
-
-The map strikes those names through rather than dropping them, because a
-deletion is a thing the agent did and losing it would make the view
-flicker through every branch switch.  That is right while the deletion is
-news and wrong once it is history -- after a merge or a cleanup the
-struck-through lines are a list of files nobody is looking for, and only
-you know when that moment has come.  So this is a command and not a
-rule.
-
-Measured against the disk, not against the strike-through.  An entry is
-also drawn as missing when it was reached through an anchor the root
-being listed has nothing to do with, and that file is not gone but
-elsewhere -- sweeping it would throw away a measurement about a file that
-still exists.  Such a line therefore stays struck through afterwards,
-which looks like the command missing one and is the command refusing one.
-
-It asks first, because nothing undoes it."
-  (interactive)
-  (let ((found nil) (n 0))
-    (maphash (lambda (_key state)
-               (let ((gone (agent-river--gone-artifacts state)))
-                 (when gone
-                   (push (cons state gone) found)
-                   (setq n (+ n (length gone))))))
-             agent-river-registry)
-    (cond
-     ((null found)
-      (message "agent-river: no artifact names a file that is gone"))
-     ((not (y-or-n-p (format "Forget %d artifact%s naming files that are gone? "
-                             n (if (= n 1) "" "s"))))
-      (message "agent-river: kept"))
-     (t
-      (dolist (cell found)
-        (agent-river-fold (car cell) (list :kind "forget" :files (cdr cell))))
-      (agent-river--forget-reported
-       (format "forgot %d gone file%s" n (if (= n 1) "" "s")))))))
 
 ;;;###autoload
 (defun agent-river-status ()
@@ -5905,9 +5828,9 @@ is drawn before this is called, so the marks are already the answer."
 ;;
 ;; The keys deliberately cannot address a file on disk: `agent-river--rel'
 ;; normalises them relative to the session cwd, a bare basename outside
-;; it, so one file reached from two checkouts is one key.
-;; `agent-river--artifact-absolute' puts a key and its anchor back
-;; together, and answers nil for a key nothing can place.
+;; it, so one file reached from two checkouts is one key.  A consumer that
+;; needs a real name reads `:path' off the raw event, which carries it
+;; beside the key it was normalised into.
 
 (defun agent-river--party-label (state)
   "Return the name STATE goes by in a view that shows several of them.
@@ -5933,12 +5856,10 @@ asking about a second later.")
 (defun agent-river--artifact-entries (&optional scope)
   "Return one plist per artifact of every folded session.
 
-Each carries `:party' (`agent-river--party-label'), `:cwd' (the anchor its
-`:file' is relative to), `:file', the cumulative `:touches', `:writes'
-and `:last'.  `:anchor' is the real directory for a `:file' the cwd cannot
-place, and nil for everything under it -- see `agent-river--anchor'.
-SCOPE is `session' for the whole session, `task' or nil for the current
-task.
+Each carries `:party' (`agent-river--party-label'), `:file' (the artifact
+key, exactly as it was folded), and the cumulative `:touches', `:writes'
+and `:last'.  SCOPE is `session' for the whole session, `task' or nil for
+the current task.
 
 The one derivation every view of the artifact tables is built from,
 rather than each walking the registry for itself: the map's roots, its
@@ -5967,18 +5888,12 @@ each caller sorts a list of its own instead."
   (let (entries)
     (maphash
      (lambda (_id state)
-       (let ((party (agent-river--party-label state))
-             (cwd (agent-river-state-cwd state))
-             (anchors (agent-river-state-anchors state)))
+       (let ((party (agent-river--party-label state)))
          (maphash (lambda (path entry)
-                    ;; The cwd and the anchor ride along; no key is placed
-                    ;; here.  What needs a key as a path on disk asks
-                    ;; `agent-river--artifact-absolute' for one at a time
-                    ;; (`agent-river--artifact-gone-p'), and the map lists
-                    ;; records without placing them at all.
+                    ;; The key as it was folded, and never a path: nothing
+                    ;; downstream places one, and the map lists records
+                    ;; rather than files.
                     (push (list :party party
-                                :cwd cwd
-                                :anchor (and anchors (gethash path anchors))
                                 :file path
                                 :touches (or (plist-get entry :touches) 0)
                                 :writes (or (plist-get entry :writes) 0)
@@ -5989,32 +5904,6 @@ each caller sorts a list of its own instead."
                     (agent-river-state-task-artifacts state)))))
      agent-river-registry)
     entries))
-
-(defun agent-river--artifact-absolute (entry)
-  "Return ENTRY's file as an absolute name, or nil when nothing anchors it.
-
-Nil for a state folded with no cwd -- one restored from before the slot
-existed, or reported by a source that names none.  The answer is then
-unknown, and guessing at it would place files in directories no agent
-ever opened.
-
-A key that is a bare name is resolved as a file sitting directly in the
-cwd, which is what it almost always is.  `agent-river--rel' degrades a
-file *outside* the cwd to the same shape, and resolving one of those
-against the cwd would place it in a tree it has nothing to do with -- so
-those carry an `:anchor', the directory they were really folded from, and
-it wins over the cwd here."
-  (let ((cwd (or (plist-get entry :anchor) (plist-get entry :cwd)))
-        (file (plist-get entry :file)))
-    (and cwd (not (string-empty-p cwd)) file (not (string-empty-p file))
-         ;; A key somebody declared is not a path: resolving it here would
-         ;; turn `inc:INC-444' into `/repo/inc:INC-444', a name in a tree
-         ;; it has nothing to do with.  Nil is what the caller does the
-         ;; right thing with -- a key that cannot be placed is left alone.
-         ;; Undeclared is the only kind resolved, per
-         ;; `agent-river--key-domain' answering nil.
-         (null (agent-river--key-domain file))
-         (expand-file-name file (file-name-as-directory cwd)))))
 
 ;;; The map -- what has arrived, and who is on it
 ;;
@@ -6035,8 +5924,8 @@ it wins over the cwd here."
 ;; the queue of what nobody has picked up is the line it exists to carry.
 ;;
 ;; Nothing here is a path.  A section root is `inc:', an identity built
-;; from the domain, and a line is the artifact key itself -- so there is
-;; no placing, no anchor and no cwd on this side.  Zooming is by section:
+;; from the domain, and a line is the artifact key itself -- so nothing on
+;; this side is ever placed on disk.  Zooming is by section:
 ;; RET on a heading goes in, `^' comes back out.
 
 (defcustom agent-river-map-scope 'session
@@ -6104,15 +5993,10 @@ never been touched is."
 
 ;;; Domains -- what a section of the map is a section of
 ;;
-;; A key an agent reached is a path: `agent-river--rel' made it relative to
-;; the session cwd, and `agent-river--artifact-absolute' puts the two back
-;; together -- against the anchor where the cwd cannot.
-;;
-;; An artifact declared from outside has no such answer.  `inc:INC-444' is
-;; a perfectly good key, but resolved against a cwd it becomes
-;; `/repo/inc:INC-444', a file that does not exist in a tree it has
-;; nothing to do with -- the same mistake the anchors were folded to
-;; stop, one domain over.
+;; A key an agent reached is a path, made relative to the session cwd by
+;; `agent-river--rel'.  A key declared from outside is not: `inc:INC-444'
+;; is a perfectly good key, and reading it as a path would put a file in
+;; a tree it has nothing to do with.
 ;;
 ;; So: a key is either **declared** -- it has a record, and therefore a
 ;; domain, read off the artifact table (`agent-river--key-domain') and
@@ -6138,9 +6022,8 @@ this answers for what a producer actually said.  Which is the same line
 the artifact table itself is drawn on.
 
 **Nil is the whole of what an undeclared key is**, and the callers read it
-that way: a key nothing declared is a path relative to the session cwd, so
-it is the one kind `agent-river--artifact-absolute' will resolve and the
-one kind that heads no section.  Never a pseudo-domain standing for the
+that way: a key nothing declared is a path relative to the session cwd,
+and the one kind that heads no section.  Never a pseudo-domain standing for the
 absence of a record, which could itself be declared and would then mean
 exactly what no record means.  A domain is what somebody said; nothing
 said is nil."
@@ -7305,11 +7188,10 @@ the table, so there is no line whose key the table does not have.
 `:path' is set only where KEY is itself an absolute name, which is the
 producer\'s doing rather than ours: a record may be keyed by a path (a log,
 a report on disk) and `agent-river--actions-file' offers to open that one.
-It travels beside the key rather than inside it, which is the rule
-`agent-river--artifact-absolute' states one subject over -- a key cannot
-say where it is, and a non-file key resolved against a directory becomes a
-file in a tree it has nothing to do with.  Nothing is resolved here; the
-name is either already absolute or there is none."
+It travels beside the key rather than inside it, because a key cannot say
+where it is and a non-file key resolved against a directory becomes a file
+in a tree it has nothing to do with.  Nothing is resolved here; the name
+is either already absolute or there is none."
   (append (and (file-name-absolute-p key) (list :path key))
           (agent-river-artifact-at key)))
 
@@ -7441,7 +7323,13 @@ makes this a degradation rather than a second view to keep in step."
   (define-key map (kbd "M-n") #'agent-river-map-next-entry)
   (define-key map (kbd "M-p") #'agent-river-map-previous-entry)
   (define-key map (kbd ">") #'agent-river-map-next-active)
-  (define-key map (kbd "<") #'agent-river-map-previous-active))
+  (define-key map (kbd "<") #'agent-river-map-previous-active)
+  ;; The one command here that throws state away, and it is bound because
+  ;; its subject is already over: what goes is the record of an ending
+  ;; rather than the record of any work.  The wholesale forgets that drop
+  ;; live records are `M-x' commands, since a single keystroke in a view
+  ;; buffer is the wrong gesture for those.
+  (define-key map (kbd "C") #'agent-river-drop-gone-artifacts))
 
 (defun agent-river--map-invalidate ()
   "Say the map is out of date and make sure something will redraw it.

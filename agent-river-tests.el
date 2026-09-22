@@ -2412,7 +2412,7 @@ CALL overrides fields of the tool call record."
       (should (equal (agent-river-state-said (gethash "s1" agent-river-registry))
                      "Fresh answer.")))))
 
-(ert-deftest agent-river-test-what-was-said-does-not-move-a-session-the-hooks-anchor ()
+(ert-deftest agent-river-test-what-was-said-does-not-move-a-session-the-hooks-placed ()
   (agent-river-test--with-say
     (agent-river-test--with-shell '(("*alpha*" "s1"))
       (should (agent-river--claim "s1" 'hooks))
@@ -2426,20 +2426,16 @@ CALL overrides fields of the tool call record."
                      "/private/tmp/repo"))
       ;; ...and the shell buffer sits on the spelling the user typed.  A
       ;; `say' reached no file, so it carries no cwd at all and the fold has
-      ;; nothing to re-anchor from: keys are relativised against the hooks'
-      ;; anchor, and a turn end flipping it to the other spelling would have
-      ;; `agent-river--artifact-absolute' resolve them where no file is.
+      ;; nothing to move it with: the keys are relative to the hooks'
+      ;; spelling, and a turn end flipping the cwd to the other would leave
+      ;; them sitting under a directory they were never relative to.
       (with-current-buffer (agent-river--shell-buffer "s1")
         (setq default-directory "/tmp/repo/")
         (agent-river--listen (agent-river-test--chunk "done"))
         (agent-river--listen (agent-river-test--turn-complete)))
       (let ((state (gethash "s1" agent-river-registry)))
         (should (equal (agent-river-state-said state) "done"))
-        (should (equal (agent-river-state-cwd state) "/private/tmp/repo"))
-        ;; And the one key it folded still resolves where the file is.
-        (should (equal (agent-river--artifact-absolute
-                        (list :cwd (agent-river-state-cwd state) :file "a.el"))
-                       "/private/tmp/repo/a.el"))))))
+        (should (equal (agent-river-state-cwd state) "/private/tmp/repo"))))))
 
 (ert-deftest agent-river-test-a-turn-that-did-not-finish-is-marked ()
   (agent-river-test--with-say
@@ -3767,21 +3763,20 @@ first line from a survey."
       (should-not (agent-river-markdown "s1/a1")))))
 
 
-;;; The anchor -- where a session's keys are relative to
+;;; The cwd -- what a session's keys are relative to
 ;;
 ;; The artifact keys stay relative on purpose, so a worktree and its main
-;; checkout read as one file.  That makes them unable to say *which* tree
-;; they are in, and a view that has to place a key in a real directory needs
-;; both halves.  The anchor is the other half.
+;; checkout read as one file.  The cwd is the half that says which tree,
+;; and it is folded from the events rather than assigned beside them.
 
 (ert-deftest agent-river-test-the-cwd-is-folded-with-the-events ()
   (agent-river-test--with-session state
     (agent-river-fold state '(:kind "act" :cwd "/repo" :file "a.el"))
     ;; Folded rather than assigned where the state is addressed, so the
-    ;; fold's promise holds: replay the events and the anchor comes back
-    ;; with them.
+    ;; fold's promise holds: replay the events and the cwd comes back with
+    ;; them.
     (should (equal (agent-river-state-cwd state) "/repo"))
-    ;; A session that changes directory re-anchors, or its later keys would
+    ;; A session that changes directory moves it, or its later keys would
     ;; be read against a directory they were never relative to.
     (agent-river-fold state '(:kind "act" :cwd "/other" :file "b.el"))
     (should (equal (agent-river-state-cwd state) "/other"))
@@ -3808,7 +3803,7 @@ first line from a survey."
   ;; from elsewhere out of this session's tree.
   (should (equal (agent-river--rel "/elsewhere/a.el" "/repo") "a.el")))
 
-(ert-deftest agent-river-test-the-event-carries-the-anchor ()
+(ert-deftest agent-river-test-the-event-carries-the-cwd ()
   (let ((event (agent-river--event
                 "act"
                 (agent-river-test--payload
@@ -3820,49 +3815,6 @@ first line from a survey."
     (should (equal (plist-get event :cwd) "/repo"))
     (should (equal (plist-get event :label) "repo"))))
 
-(ert-deftest agent-river-test-resolving-a-key-needs-an-anchor ()
-  ;; Without one the answer is unknown, and guessing would place files in
-  ;; directories no agent ever opened.
-  (should-not (agent-river--artifact-absolute '(:file "src/a.el")))
-  (should (equal (agent-river--artifact-absolute '(:cwd "/repo" :file "src/a.el"))
-                 "/repo/src/a.el"))
-  ;; A bare key resolves as a file sitting directly in the cwd, which is
-  ;; what it almost always is.
-  (should (equal (agent-river--artifact-absolute '(:cwd "/repo" :file "a.el"))
-                 "/repo/a.el"))
-  ;; Except where the key came from outside the cwd, and an anchor says so:
-  ;; resolving that one against the cwd would draw it inside a project it
-  ;; has nothing to do with.
-  (should (equal (agent-river--artifact-absolute
-                  '(:cwd "/repo" :anchor "/home/u/notes" :file "a.el"))
-                 "/home/u/notes/a.el")))
-
-(ert-deftest agent-river-test-a-file-outside-the-cwd-keeps-its-directory ()
-  (agent-river-test--with-session state
-    ;; Under the cwd the cwd already places the key, and a second copy of
-    ;; that fact is only a way for the two to disagree.
-    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "src/a.el"
-                                  :path "/repo/src/a.el"))
-    (should-not (gethash "src/a.el" (agent-river-state-anchors state)))
-    ;; Outside it `agent-river--rel' has already thrown the path away, so
-    ;; without this the file lands wherever the cwd happens to point.
-    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "MEMORY.md"
-                                  :path "/home/u/notes/MEMORY.md"))
-    (should (equal (gethash "MEMORY.md" (agent-river-state-anchors state))
-                   "/home/u/notes"))))
-
-(ert-deftest agent-river-test-a-key-that-comes-back-inside-drops-its-anchor ()
-  (agent-river-test--with-session state
-    ;; The same basename is reachable both ways, so an anchor that is never
-    ;; cleared goes on claiming the outside directory after the file is
-    ;; being edited in the project itself.
-    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "MEMORY.md"
-                                  :path "/home/u/notes/MEMORY.md"))
-    (should (gethash "MEMORY.md" (agent-river-state-anchors state)))
-    (agent-river-fold state (list :kind "act" :cwd "/repo" :file "MEMORY.md"
-                                  :path "/repo/MEMORY.md"))
-    (should-not (gethash "MEMORY.md" (agent-river-state-anchors state)))))
-
 (ert-deftest agent-river-test-a-party-is-the-session-that-delegated ()
   (agent-river-test--with-session state
     (agent-river-fold state '(:kind "act" :cwd "/repo" :agent "a1"
@@ -3871,28 +3823,7 @@ first line from a survey."
     ;; map shows one name per agent, not one per agent plus its delegates.
     (should (equal (agent-river--party-label state) "alpha"))))
 
-;;; Files on disk, as the state records them
-;;
-;; The one reading here that needs a real directory: the artifact keys are
-;; relative to a session's cwd, and `agent-river-forget-gone-files' is the
-;; only command that asks the disk about them.  No view reads the disk.
-
-(defmacro agent-river-test--with-tree (var &rest body)
-  "Bind VAR to a throwaway project tree and run BODY, then remove it.
-For the one reading here that genuinely needs a directory: whether the
-file an artifact key names is still there."
-  (declare (indent 1))
-  `(let ((,var (make-temp-file "agent-river-map" t)))
-     (unwind-protect
-         (progn
-           (make-directory (expand-file-name "dialog/src/main" ,var) t)
-           (make-directory (expand-file-name "common" ,var) t)
-           (make-directory (expand-file-name "docs" ,var) t)
-           (write-region "" nil (expand-file-name "dialog/src/main/foo.el" ,var))
-           (write-region "" nil (expand-file-name "common/c.el" ,var))
-           (write-region "" nil (expand-file-name "build.gradle.kts" ,var))
-           ,@body)
-       (delete-directory ,var t))))
+;;; Forgetting -- what a command may take away, and what it may not
 
 (ert-deftest agent-river-test-a-record-that-is-over-is-struck-through ()
   ;; Grey is the map's word for several things at once -- stale, elided.
@@ -3918,77 +3849,11 @@ file an artifact key names is still there."
     (agent-river-fold state '(:kind "forget"))
     (should (= (hash-table-count (agent-river-state-artifacts state)) 0))
     (should (= (hash-table-count (agent-river-state-task-artifacts state)) 0))
-    ;; The anchors are keyed on artifact keys, so without them they address
-    ;; nothing.
-    (should (= (hash-table-count (agent-river-state-anchors state)) 0))
     ;; What the session is and how it is going survives -- this forgets
     ;; where the work was, not that there was any.
     (should (equal (agent-river-state-task state) "land the branch"))
     (should (= (agent-river-state-steps state) 1))
     (should (= (agent-river-state-fail-streak state) 2))))
-
-(ert-deftest agent-river-test-forget-can-name-which-files-to-drop ()
-  (agent-river-test--with-session state
-    (agent-river-fold state '(:kind "act" :tool "Edit" :file "a.el"
-                                    :path "/w/elsewhere/a.el" :cwd "/w"))
-    (agent-river-fold state '(:kind "act" :tool "Edit" :file "b.el" :cwd "/w"))
-    ;; One branch, one transition, a smaller subject.  A second kind would be
-    ;; a second place for "what forgetting means" to be decided.
-    (agent-river-fold state '(:kind "forget" :files ("a.el")))
-    (should-not (gethash "a.el" (agent-river-state-artifacts state)))
-    (should (gethash "b.el" (agent-river-state-artifacts state)))
-    (should-not (gethash "a.el" (agent-river-state-task-artifacts state)))
-    ;; The anchor goes with the artifact it addressed, and only that one.
-    (should (= (hash-table-count (agent-river-state-anchors state)) 0))
-    ;; And the session is untouched, as with a whole forget.
-    (should (= (agent-river-state-steps state) 2))))
-
-(ert-deftest agent-river-test-a-gone-file-is-measured-against-the-disk ()
-  (agent-river-test--with-tree root
-    (agent-river-test--with-session state
-      (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
-      (agent-river-fold state (list :kind "act" :cwd root :file "docs/old.md"))
-      ;; Only the one that is not there.  `common/c.el' exists, and a command
-      ;; that swept it would be throwing away a measurement about live work.
-      (should (equal (agent-river--gone-artifacts state) '("docs/old.md")))
-      (delete-file (expand-file-name "common/c.el" root))
-      (should (equal (sort (agent-river--gone-artifacts state) #'string<)
-                     '("common/c.el" "docs/old.md"))))))
-
-(ert-deftest agent-river-test-a-stray-is-looked-for-where-it-really-was ()
-  (agent-river-test--with-tree root
-    (agent-river-test--with-session state
-      ;; `agent-river--rel' degrades a file outside the cwd to a bare
-      ;; basename, so resolving it against the cwd looks for it in a
-      ;; directory no agent ever opened -- and would then call a file that
-      ;; exists gone.  The anchor is what stops that.
-      (agent-river-fold state (list :kind "act" :cwd root
-                                    :file (expand-file-name "common/c.el" root)
-                                    :path (expand-file-name "common/c.el" root)))
-      (should-not (agent-river--gone-artifacts state))
-      ;; A key nothing can place is unplaceable rather than gone: a state
-      ;; folded without a cwd must not have every artifact it ever recorded
-      ;; swept away by a command that never found any of them.
-      (should-not (agent-river--artifact-gone-p
-                   (agent-river--state-create :id "x" :artifacts nil
-                                              :anchors nil)
-                   "c.el")))))
-
-(ert-deftest agent-river-test-cleaning-up-gone-files-asks-first ()
-  (agent-river-test--with-tree root
-    (agent-river-test--with-session state
-      (agent-river-fold state (list :kind "act" :cwd root :file "common/c.el"))
-      (agent-river-fold state (list :kind "act" :cwd root :file "docs/old.md"))
-      ;; A keystroke in a view buffer is easy to hit and nothing undoes this,
-      ;; so the question is part of the command rather than a nicety.
-      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
-        (agent-river-forget-gone-files))
-      (should (gethash "docs/old.md" (agent-river-state-artifacts state)))
-      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
-        (agent-river-forget-gone-files))
-      (should-not (gethash "docs/old.md" (agent-river-state-artifacts state)))
-      ;; Where the work actually is survives it.
-      (should (gethash "common/c.el" (agent-river-state-artifacts state))))))
 
 (ert-deftest agent-river-test-the-map-reads-the-frame-it-is-asked-for ()
   (agent-river-test--with-domain
@@ -4480,8 +4345,7 @@ the text -- which is all the motion reads -- is the same either way."
     (agent-river-appeared "inc:INC-444" :domain 'inc)
     ;; A ticket that was resolved and has been reopened is open.  A record that
     ;; went on saying otherwise would be wrong in the direction that matters,
-    ;; which is why this follows `agent-river--anchor' in dropping the stale
-    ;; answer rather than keeping it.
+    ;; which is why the stale answer is dropped rather than kept.
     (should-not (agent-river-artifact-gone (gethash "inc:INC-444" agent-river-artifacts)))
     (should-not (agent-river-artifact-gone-at (gethash "inc:INC-444" agent-river-artifacts)))))
 
@@ -4809,6 +4673,48 @@ the text -- which is all the motion reads -- is the same either way."
                (lambda (&rest _) (error "Asked about nothing"))))
       (agent-river-artifacts-reset))))
 
+(ert-deftest agent-river-test-dropping-the-endings-spares-what-is-still-open ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (agent-river-appeared "inc:INC-501" :domain 'inc :name "INC-501")
+    (agent-river-ended "inc:INC-444")
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+      (should (= (agent-river-drop-gone-artifacts) 1)))
+    ;; A queue of what nobody has picked up is the line this view exists to
+    ;; carry, so a sweep of the endings must not be able to take one with it.
+    (should-not (gethash "inc:INC-444" agent-river-artifacts))
+    (should (gethash "inc:INC-501" agent-river-artifacts))))
+
+(ert-deftest agent-river-test-dropping-the-endings-asks-first ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (agent-river-ended "inc:INC-444")
+    ;; A keystroke in a view buffer is easy to hit and nothing undoes this,
+    ;; so the question is part of the command rather than a nicety.
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+      (should-not (agent-river-drop-gone-artifacts)))
+    (should (gethash "inc:INC-444" agent-river-artifacts))
+    ;; And nothing to ask about is not asked, the way the wholesale forget
+    ;; beside it is not: the answers would mean the same thing.
+    (agent-river-drop-artifact "inc:INC-444")
+    (agent-river-appeared "inc:INC-501" :domain 'inc :name "INC-501")
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (error "Asked about nothing"))))
+      (should-not (agent-river-drop-gone-artifacts)))))
+
+(ert-deftest agent-river-test-dropping-the-endings-keeps-the-sessions-tables ()
+  (agent-river-test--with-artifacts
+    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
+    (let ((state (agent-river-state "s1" "alpha")))
+      (agent-river-reach "inc:INC-444" "s1")
+      (agent-river-ended "inc:INC-444")
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (agent-river-drop-gone-artifacts))
+      ;; The reaching is the edge, and it stays true whatever became of the
+      ;; thing at the other end -- clearing it from here would reach into a
+      ;; state this command is not about.
+      (should (gethash "inc:INC-444" (agent-river-state-artifacts state))))))
+
 ;;; Domains -- a section that is not a directory
 ;;
 ;; The map's second reading of the artifact tables.  What these hold is the
@@ -4843,24 +4749,6 @@ it clears them."
       (agent-river--map-draw))
     (prog1 (buffer-substring-no-properties (point-min) (point-max))
       (kill-buffer))))
-
-(ert-deftest agent-river-test-a-declared-key-is-not-a-file-in-the-cwd ()
-  (agent-river-test--with-domain
-    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
-    (agent-river-state "s1" "alpha")
-    (agent-river-fold (gethash "s1" agent-river-registry)
-                      '(:kind "touch" :file "inc:INC-444" :cwd "/repo"))
-    (let ((entry (list :cwd "/repo" :file "inc:INC-444")))
-      ;; Resolved against the cwd this would be `/repo/inc:INC-444' -- a name in
-      ;; a tree it has nothing to do with, which every view downstream would
-      ;; then draw, shade and eventually offer to delete as a missing file.
-      (should-not (agent-river--artifact-absolute entry))
-      ;; But it still has an identity -- the key itself -- which is what the
-      ;; map lists it under.
-      (should (equal (plist-get entry :file) "inc:INC-444")))
-    ;; An ordinary key is untouched by any of this.
-    (should (equal (agent-river--artifact-absolute '(:cwd "/repo" :file "a.el"))
-                   "/repo/a.el"))))
 
 (ert-deftest agent-river-test-a-domain-is-read-off-the-table-not-the-key ()
   (agent-river-test--with-domain
@@ -4976,36 +4864,23 @@ it clears them."
       (should (equal (mapcar #'car roots) '("inc:")))
       (should (cdr (car roots))))))
 
-(ert-deftest agent-river-test-declaring-after-a-reach-repairs-the-placement ()
+(ert-deftest agent-river-test-declaring-after-a-reach-repairs-the-domain ()
   (agent-river-test--with-domain
     (let ((state (agent-river-state "s1" "alpha")))
-      (setf (agent-river-state-cwd state) "/repo")
       (agent-river-fold state '(:kind "touch" :file "inc:INC-444" :cwd "/repo"))
       ;; Reached before it was declared, the key is undeclared -- and nothing
-      ;; here may parse a key to decide otherwise -- so it is taken for a path
-      ;; relative to the cwd and resolves into the session's tree as a name
-      ;; that is not on disk.  Which is the order `agent-river-reach' spells
-      ;; out, since only the caller can put the two calls the right way round.
-      (should (equal (agent-river--artifact-absolute
-                      (list :cwd "/repo" :file "inc:INC-444"))
-                     "/repo/inc:INC-444"))
+      ;; here may parse a key to decide otherwise -- so it heads no section
+      ;; and the map has no line for it.  Which is the order
+      ;; `agent-river-reach' spells out, since only the caller can put the
+      ;; two calls the right way round.
+      (should-not (agent-river--key-domain "inc:INC-444"))
+      (should-not (agent-river--domain-sections))
       (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
       ;; And why the window closes by itself rather than needing a repair:
-      ;; the domain is read at every draw, so the record landing late takes
-      ;; the phantom off the tree on the next one.
-      (should-not (agent-river--artifact-absolute
-                   (list :cwd "/repo" :file "inc:INC-444"))))))
-
-(ert-deftest agent-river-test-forgetting-gone-files-spares-a-declared-key ()
-  (agent-river-test--with-domain
-    (agent-river-appeared "inc:INC-444" :domain 'inc :name "INC-444")
-    (let ((state (agent-river-state "s1" "alpha")))
-      (agent-river-fold state '(:kind "touch" :file "inc:INC-444" :cwd "/repo"))
-      ;; Placed against the cwd it would look like a file that is not there, and
-      ;; a command that sweeps missing files would take the incident with it.
-      ;; Unplaceable is not gone, which `agent-river--artifact-gone-p' says
-      ;; in words and says here for a second reason.
-      (should-not (agent-river--artifact-gone-p state "inc:INC-444")))))
+      ;; the domain is read at every draw, so the record landing late puts
+      ;; the key under its section on the next one.
+      (should (eq (agent-river--key-domain "inc:INC-444") 'inc))
+      (should (equal (mapcar #'cdr (agent-river--domain-sections)) '(inc))))))
 
 ;;; Actions -- what RET may do to the thing a line names
 ;;
@@ -5064,9 +4939,9 @@ it clears them."
     (let ((record (agent-river--map-subject "inc:INC-444"))
           (ondisk (agent-river--map-subject "/var/log/checkout.log")))
       ;; A key cannot say where it is, and a non-file key resolved against a
-      ;; directory becomes a file in a tree it has nothing to do with -- the
-      ;; mistake the anchors were folded to stop.  So `:path' is never
-      ;; resolved, only carried where the key is already absolute.
+      ;; directory becomes a file in a tree it has nothing to do with.  So
+      ;; `:path' is never resolved, only carried where the key is already
+      ;; absolute.
       (should (equal (plist-get record :key) "inc:INC-444"))
       (should (eq (plist-get record :domain) 'inc))
       (should-not (plist-get record :path))
@@ -5532,17 +5407,9 @@ line two" "safe tail"))))
 ;;
 ;; The map redraws on a timer into a buffer somebody is reading, so the
 ;; derivation behind it is on a budget.  These are the two shapes that budget
-;; goes on, and both are the kind of thing that comes back: a second reader
-;; added later that resolves keys for itself, or a walk of the registry added
-;; to a draw that already had one.
-
-(ert-deftest agent-river-test-a-hand-built-entry-still-resolves ()
-  (agent-river-test--with-artifacts
-    ;; `agent-river--artifact-gone-p' builds an entry by hand and carries no
-    ;; cached answer.  Resolving must go on working from the entry alone, or
-    ;; a memo a draw happens to bind has quietly become mandatory.
-    (should (equal (agent-river--artifact-absolute '(:cwd "/repo" :file "a.el"))
-                   "/repo/a.el"))))
+;; goes on, and both are the kind of thing that comes back: a walk of the
+;; registry added to a draw that already had one, or a reading of the
+;; artifact table taken per node instead of per draw.
 
 (ert-deftest agent-river-test-one-draw-walks-the-registry-once ()
   (agent-river-test--with-artifacts
