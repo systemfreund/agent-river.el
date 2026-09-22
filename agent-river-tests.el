@@ -4335,7 +4335,7 @@ the text -- which is all the motion reads -- is the same either way."
     ;; TAB there would both complain, and pressing one of them is the first
     ;; thing anyone does with a new buffer.
     (should (agent-river--map-entry-line-p))
-    ;; The reached record first: the listing is heaviest first.
+    ;; The listing is alphabetical, so `Disk full' heads it.
     (should (equal (get-text-property (line-beginning-position)
                                       'agent-river-map-name)
                    "inc:INC-1"))
@@ -4947,6 +4947,23 @@ it clears them."
       ;; struck through, until somebody says otherwise.
       (should (= (length entries) 1))
       (should (plist-get (car entries) :missing)))))
+
+(ert-deftest agent-river-test-a-section-lists-its-records-alphabetically ()
+  (agent-river-test--with-domain
+    ;; Mixed case, since a reader alphabetising a list does not put every
+    ;; capital in front of every lowercase letter.
+    (agent-river-appeared "inc:INC-9" :domain 'inc :name "Zeta")
+    (agent-river-appeared "inc:INC-1" :domain 'inc :name "Alpha")
+    (agent-river-appeared "inc:INC-5" :domain 'inc :name "beta")
+    (agent-river-state "s1" "alpha")
+    ;; Two agents on the last of them by name.  A line is where the reader
+    ;; last saw it whatever the agents are doing, or every record in the
+    ;; section moves whenever one of them is touched.
+    (agent-river-reach "inc:INC-9" "s1")
+    (agent-river-reach "inc:INC-9" "s1")
+    (should (equal (mapcar (lambda (entry) (plist-get entry :shown))
+                           (agent-river--map-entries "inc:" 'session))
+                   '("Alpha" "beta" "Zeta")))))
 
 (ert-deftest agent-river-test-a-domain-sorts-by-what-happened-in-it ()
   (agent-river-test--with-domain

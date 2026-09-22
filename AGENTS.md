@@ -1787,6 +1787,13 @@ Four things about the map are load-bearing:
   and swamped the few that mattered, which is what `agent-river-map-untouched`
   was for; here an unreached record is a thing nobody has picked up, which
   is the single most important line this view can carry.
+- **A section lists its records alphabetically** (`agent-river--map-entries`),
+  by the name the line reads and with case ignored, the key breaking a tie.
+  A line is where the reader last saw it: the listing is redrawn every few
+  seconds while agents are working in it, so an order read off what they
+  are doing moves a record somebody is looking at because something
+  happened on another line. It is also the order a reader can search by
+  eye, which is what a queue of things nobody has picked up is read for.
 - **Nothing leaves this view by getting old.** A record stands until
   `agent-river-drop-artifact` or `agent-river-artifacts-reset` takes it
   away, and a name on it until `agent-river-forget-artifacts` or a new
