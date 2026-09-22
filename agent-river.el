@@ -6084,10 +6084,6 @@ node has to say on its own -- there is more here that you are not being
 shown."
   :type 'string)
 
-(defun agent-river--map-touches (parties)
-  "Return the total touch count across PARTIES."
-  (apply #'+ (mapcar (lambda (party) (plist-get party :touches)) parties)))
-
 (defun agent-river--map-later (a b)
   "Return the later of times A and B, either of which may be nil."
   (cond ((null a) b)
@@ -6283,11 +6279,10 @@ the two frames the entries were walked from."
       out)))
 
 (defun agent-river--map-entries (root &optional scope)
-  "Return the records ROOT's section lists, heaviest first.
+  "Return the records ROOT's section lists, in alphabetical order.
 
 One plist per record: `:name' the key, `:shown' what to call it, `:parties'
-whoever has reached it, `:missing' whether it has ended, `:last' when
-anything last happened to it.
+whoever has reached it and `:missing' whether it has ended.
 
 **The listing is the artifact table itself**, which is why there is no
 listing function beside this one: a record already carries its name,
@@ -6303,9 +6298,11 @@ important line this view can carry.
 was worked on and is over, which is history and worth keeping on screen
 until somebody says otherwise.
 
-Ordered by touch count and then by recency, so the ones being worked on
-rise and a queue with nothing happening in it is in the order things
-arrived."
+Ordered by the name each line reads, so a record is where a reader last
+saw it: nothing in the section moves because an agent took a step on
+another line.  Case is ignored and the locale decides, since that is what
+alphabetical means to whoever is reading it; the key breaks a tie, being
+the one thing in the section that is unique."
   (let* ((domain (agent-river--map-domain root))
          (parties (and domain (agent-river--domain-parties domain scope)))
          entries)
@@ -6318,17 +6315,16 @@ arrived."
                        :missing (and (agent-river-artifact-gone artifact) t)
                        ;; What the line shows, where the key is machinery and
                        ;; the name is what a human calls it.
-                       :shown (agent-river-artifact-name artifact)
-                       :last (agent-river-artifact-last artifact))
+                       :shown (agent-river-artifact-name artifact))
                  entries)))
        agent-river-artifacts))
     (sort entries
           (lambda (a b)
-            (let ((wa (agent-river--map-touches (plist-get a :parties)))
-                  (wb (agent-river--map-touches (plist-get b :parties))))
-              (if (= wa wb)
-                  (time-less-p (plist-get b :last) (plist-get a :last))
-                (> wa wb)))))))
+            (let ((la (or (plist-get a :shown) (plist-get a :name)))
+                  (lb (or (plist-get b :shown) (plist-get b :name))))
+              (if (string-equal-ignore-case la lb)
+                  (string-lessp (plist-get a :name) (plist-get b :name))
+                (string-collate-lessp la lb nil t)))))))
 
 (defun agent-river--rows-artifact (_root nodes)
   "Return one row per thing known about the artifact each of NODES is.
