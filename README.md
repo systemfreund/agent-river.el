@@ -140,9 +140,9 @@ Three calls put it there:
 
 **Declare before you reach.** A domain is read off the artifact table, so a key
 reached before its record exists is *undeclared* — and undeclared is a path:
-`inc:INC-444` resolves against the session's cwd as a name that is not on disk,
-which `agent-river-forget-gone-files` will then offer to sweep, and it gets no
-line on the map, since the map lists records and it has none yet. Declaring
+`inc:INC-444` resolves against the session's cwd as a name in a tree it has
+nothing to do with, and it gets no line on the map, since the map lists records
+and it has none yet. Declaring
 later repairs it — the domain is read at every draw — but the order to write is
 `appeared`, then `reach`.
 
@@ -260,7 +260,8 @@ the way an interrupted tool call is.
 
 A `say` counts no step, touches no artifact table and carries no working
 directory: no tool ran, a file named in a sentence is not a file the agent
-reached, and the anchor belongs to whoever folds the steps.
+reached, and the cwd the keys are relative to belongs to whoever folds the
+steps.
 
 ## One session, one source — per kind
 
@@ -630,20 +631,19 @@ it must keep working that way: stripping only the session's own cwd makes one
 file reached from a worktree and from the main checkout render as two, which
 defeats the contention query.
 
-Three ways out, and each answers a different question:
+Two ways out, and each answers a different question:
 
 | You are asking | Use |
 |---|---|
 | *which* file is this | match on the basename yourself |
 | *where* is the file the event was about | read `:path` off the raw event |
-| *where* does this key sit in a tree | `agent-river--artifact-absolute`, anchor over cwd |
 
-The third is the only one that can place a key in a directory tree and the only
-one that re-splits a worktree from its main checkout. It answers **nil** for a
-key in a non-file domain, which is what every caller already does the right
-thing with — a key that cannot be placed is left alone rather than guessed at.
-Only one thing asks it now (`M-x agent-river-forget-gone-files`): the map used
-to place every key it drew and lists artifact records instead.
+The second is the only one that can reach a real file, and it is on the **raw
+event** rather than in the state: `:path` is the absolute name the host
+reported, carried beside the normalised `:file` the tables key on. Nothing in
+the package places a key — the map lists artifact records and draws no files —
+so a consumer that needs a name on disk takes it off the event as it goes past,
+where it is still there to take.
 
 ---
 
@@ -754,8 +754,14 @@ full, each entry carrying what had been reached beneath it — and that is gone.
 What an agent did to a file is counted in the session tables and named by no
 view: the block says what a session is doing, not which files it is in.
 
-Nothing drops out of this view by getting old. `M-x agent-river-drop-artifact`
-forgets one record, `M-x agent-river-artifacts-reset` forgets them all.
+Nothing drops out of this view by getting old. `C` forgets every record that
+has **ended** — the endings are history once a section has filled up with lines
+nobody is going to pick up, and only you know when that moment came. `M-x
+agent-river-drop-artifact` forgets one record by name and `M-x
+agent-river-artifacts-reset` forgets them all; those two can take a live record
+with them, so they are not on the keymap. None of the three touches the
+sessions' tables: the reaching is an edge, and it stays true whatever became of
+the thing at the other end.
 
 ## The approval queue (`M-x agent-river-approval-queue`)
 

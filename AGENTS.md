@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (393 tests). -L . is required: the tests require all four .el files.
+# Full suite (387 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -296,28 +296,27 @@ These are load-bearing; the tests enforce most of them.
   the session cwd when under it, bare basename otherwise. Stripping only the
   session's own cwd makes one file reached from a worktree and from the main
   checkout render as two, which defeats the contention query.
-- **The anchor lives beside the keys, never inside them** (`agent-river-state-cwd`).
-  A normalised key cannot say which tree it is in, which is the price of the
-  invariant above and not a defect in it. The cwd is folded as a measurement of
-  its own — refreshed by every event carrying one, though on the hook path
-  that never moves it: the payload repeats the directory the agent was started
-  in, and a `cd` inside a Bash call is a different process. Only the
-  agent-shell path can re-anchor a session, since it reads the buffer's
-  `default-directory` per event. A view that needs a real path puts the cwd
-  and the key back together deliberately (`agent-river--artifact-absolute`). Resolving is strictly
-  worse than matching on the name for *identity* questions and strictly better
-  for *placement* ones. Both readings existed and each said which it was;
-  what is left is the placement one, since nothing matches a file by name any
-  more — `agent-river-touching` did, and the map's directory aggregation
-  resolved.
-  A file *outside* the cwd is degraded to a bare basename by the same
-  normalisation, so the cwd cannot place it either — resolving one against the
-  cwd drew a file edited under `~/.claude` inside the project tree. Those keys
-  carry their real directory in `anchors` (`agent-river--anchor`), folded from
-  `:path` and kept only for the strays: a key under the cwd is placed by the
-  cwd already, and a second copy of that fact is only a way for the two to
-  disagree. An anchor is dropped as soon as the key is reached from inside the
-  cwd, because the same basename is reachable both ways.
+- **Nothing places a key on disk, and the absolute name rides the event
+  instead** (`:path`, beside `:file` in `agent-river--event`). A normalised
+  key cannot say which tree it is in, which is the price of the invariant
+  above and not a defect in it — and no reader here pays it: no view names a
+  file, and the map lists artifact records. A consumer that wants a real
+  name takes `:path` off the event as it goes past, which is the only place
+  the answer survives intact. Resolving a key instead means guessing, and
+  guessing wrong twice over: a key *outside* the cwd is a bare basename by
+  the same normalisation, so the cwd places it in a tree it was never in,
+  and a declared key like `inc:INC-444` is not a path at all — against a cwd
+  it becomes `/repo/inc:INC-444`, a file every view would then draw and
+  shade. Anything reaching for a placement reading again wants a second
+  table of real directories to correct the first guess and a domain check to
+  refuse the second, which is two accounts of what the event had in one.
+  `agent-river-state-cwd` is folded as a measurement of its own — refreshed
+  by every event carrying one, though on the hook path that never moves it:
+  the payload repeats the directory the agent was started in, and a `cd`
+  inside a Bash call is a different process. Only the agent-shell path moves
+  it, reading the buffer's `default-directory` per event. Nothing reads it
+  today; it is what the keys are relative to, and what any later placement
+  reading would have to be built from.
 - **An artifact is a subject, and a session reaching it is an edge.**
   What is true of the artifact lives in `agent-river-artifacts`; what is true
   of the *relationship* stays in the session's two tables and is still
@@ -346,9 +345,8 @@ These are load-bearing; the tests enforce most of them.
 - **Declaring comes before reaching, and only the caller can get that
   right.** The domain is read off the table, so a key reached before its
   record exists is *undeclared* -- and undeclared is a path: `inc:INC-444`
-  resolves into the session's tree as a name that is not on disk, which
-  `agent-river-forget-gone-files` then offers to sweep -- the mistake below,
-  reached by doing the two calls in the wrong order. Not
+  resolves into the session's tree as a name in a tree it has nothing to do
+  with, the mistake reached by doing the two calls in the wrong order. Not
   closed in code, and the alternatives are written down rather than merely
   rejected. Declaring from `agent-river-reach` would give a file reached
   that way a record saying nothing the session tables do not already say
@@ -376,12 +374,11 @@ These are load-bearing; the tests enforce most of them.
   requires a domain now** (`agent-river-artifact` signals, and only where it
   would have to create one, so `ended` and `note` go on working for a key
   that is already there).
-  `agent-river--artifact-absolute` answers **nil** for a declared key,
-  which is what every existing caller already does the right thing with:
-  resolved against a cwd, `inc:INC-444` became `/repo/inc:INC-444`, a file in
-  a tree it has nothing to do with, which every view would then draw, shade
-  and eventually offer to delete. That is the mistake the anchors were folded
-  to stop, one domain over. There was a second reading beside it once,
+  Reading a declared key as a path is the mistake the split exists to stop:
+  against a cwd, `inc:INC-444` becomes `/repo/inc:INC-444`, a file in a tree
+  it has nothing to do with, which every view would then draw and shade.
+  Nothing resolves a key at all now, so the guard is the rule rather than a
+  test inside a resolver. There was a second reading beside it once,
   `agent-river--artifact-place` -- "which artifact" where this one says
   "where on disk" -- and it went with the position marker, its last caller:
   a section lists its records by the key itself, which is what a declared
@@ -509,14 +506,14 @@ These are load-bearing; the tests enforce most of them.
   question it never heard, which is the mislabelling the frames exist to stop —
   so it clears with `steps` and `task-artifacts`, and the words themselves stay
   in the log. And no cwd, which puts a `say` with the events made inside Emacs
-  rather than with the steps: the fold refreshes the anchor from every event
-  that carries one, and carrying the shell buffer's `default-directory` had
-  every turn end re-anchor a session the *hooks* had anchored — the two
-  spellings need not agree, since `expand-file-name` does not resolve a symlink
-  and a host's reported cwd may, so keys relativised against one would then
-  resolve against the other. The configuration that loses something by it —
-  listen-mode alone, no hooks, no watch — has no artifact keys either, and an
-  anchor is only ever for those.
+  rather than with the steps: the fold refreshes the cwd from every event that
+  carries one, and carrying the shell buffer's `default-directory` had every
+  turn end move a cwd the *hooks* had set — the two spellings need not agree,
+  since `expand-file-name` does not resolve a symlink and a host's reported
+  cwd may, so keys relativised against one would no longer sit under the
+  other. The configuration that loses something by it — listen-mode alone, no
+  hooks, no watch — has no artifact keys either, and the cwd is only ever what
+  those are relative to.
 - **The stream path builds payloads, not events** (`agent-river--shell-payload`).
   It goes through `agent-river--event` like everything else, so there is one
   place where a file argument can go uncounted rather than two. A tool call is
@@ -563,16 +560,14 @@ What a consumer must respect:
   opinions closes exactly the loop the `intent*` slots are kept apart to
   prevent. Observers run for a note too, but one level deep: a note made while
   a note is being handled is refused and returns nil.
-- **The state cannot address a file on disk** — `agent-river--rel` sees to that,
-  and it must keep doing so. Three ways out. Look the file up *from* the
-  consumer's side by basename (what `agent-river-touching` used to match on,
-  before the views that named files went); read an
-  extra event key the fold keeps out of the artifact keys (`:path`, the
-  absolute name, carried beside `:file`); or resolve a key against
-  `agent-river-state-cwd`, falling back to its `anchors` entry where the cwd
-  cannot place it (`agent-river--artifact-absolute`) — the only one that can place
-  a key in a directory tree and the only one that re-splits a worktree from its
-  main checkout. Reach for the third when the question is *where*, not *which*.
+- **The state cannot address a file on disk** — `agent-river--rel` sees to
+  that, and it must keep doing so. Two ways out. Look the file up *from* the
+  consumer's side by basename, which answers *which*; or read the extra event
+  key the fold keeps out of the artifact keys (`:path`, the absolute name,
+  carried beside `:file`), which answers *where*. The event is the only place
+  the real name survives, so a consumer that wants it takes it as the event
+  goes past rather than reconstructing it afterwards — there is nothing left
+  in the state to reconstruct it from.
 - **Off by default, and the gesture that turns it on is what turns it off.**
   Writing into buffers the user did not point this at needs consent, which is
   what a global minor mode is for. A consumer that draws only into a buffer of
@@ -934,10 +929,10 @@ are collected (`agent-river--artifact-actions`) and either run or offered
   ever names: the listing *is* the table. `:path` is set only where the key
   is itself absolute, which is the producer's doing rather than the map's --
   a record may be keyed by a path (a log, a report on disk). It travels as a
-  separate key for `agent-river--artifact-absolute`'s
-  reason: a key cannot say where it is, and a declared key resolved against a
-  directory becomes a file in a tree it has nothing to do with. Nothing is
-  resolved here; the name is either already absolute or there is none.
+  separate key because a key cannot say where it is, and a declared key
+  resolved against a directory becomes a file in a tree it has nothing to do
+  with. Nothing is resolved here; the name is either already absolute or
+  there is none.
 - **Order is the list's own, and deliberately not a `:rank`.** A contributed
   row has one because which contributor was registered first says nothing
   about which row is worth reading, and every row is on screen at once. A
@@ -1757,9 +1752,13 @@ is), `--rows-step` (a step is on a file and a line is a record, so it could
 never match again), the `:dir` cell on an entry and on a contributor's
 nodes, and the `:abs` derivation in `agent-river--artifact-walk` — nothing
 resolves a key per node any more, and a cache nobody reads is a second
-account waiting to happen. `agent-river-forget-gone-files` lost its `C`
-key with the file lines it was about; the command stays, since the session
-tables still record files.
+account waiting to happen. `agent-river-forget-gone-files` went with them:
+it swept the session tables' file keys by asking the disk about each one,
+which is a reading of lines this view no longer draws, and `C` is now the
+artifact-side sweep described below. Its two helpers
+(`agent-river--gone-artifacts`, `agent-river--artifact-gone-p`) went with
+it, and so did the `:files` narrowing on the `forget` event, which nothing
+else ever passed.
 
 Four things about the map are load-bearing:
 
@@ -1918,33 +1917,28 @@ Four things about the map are load-bearing:
 - **Nothing here is forgotten by itself** (`agent-river-forget-artifacts`).
   Work that has just landed — a merge, a release — is history rather than
   cold, and only the user knows when that moment came. The command empties
-  the artifact tables and the anchors
-  with them, and nothing else: steps, failures and the task survive, so it is
+  the artifact tables and nothing else: steps, failures and the task
+  survive, so it is
   not `agent-river-reset` in a smaller hat. It goes through the fold as a
   `forget` event rather than clearing the tables where the command is
   written, because the fold owns the state. Deliberately not on the map's
   keymap: it throws measurements away, and a single keystroke in a view
   buffer is the wrong gesture for that.
-- **A deletion is news, and then it is history**
-  (`agent-river-forget-gone-files`). It had a key in the map, `C`, on the
-  grounds that its **subject is already gone** — what is lost is the record
-  of an absence rather than the record of the work. The map lists artifact
-  records now and draws no files at all, so the lines it was about are not
-  there and it is an `M-x` command like the one above. The state still
-  records the files, which is why the command stays. Two things hold it. It
-  is **measured against the disk, never against any rendering**: a key
-  reached through an anchor some other tree has nothing to do with is
-  elsewhere rather than gone. And a key **nothing can place is unplaceable,
-  not gone** (`agent-river--artifact-gone-p` goes through
-  `agent-river--artifact-absolute`, so the anchor wins over the cwd), or a state
-  folded without a cwd would have every artifact it ever recorded swept away by
-  a command that found none of them. It narrows the same `forget` event with
-  `:files` rather than adding a kind of its own: the transition is identical
-  and only its subject differs, and a second kind would be a second place for
-  what forgetting means to be decided. It asks first, because nothing undoes
-  it. It is also the last caller of `agent-river--artifact-absolute`: the map
-  used to place every key it drew, which is what the `:abs` derivation in
-  `agent-river--artifact-walk` existed for, and both went together.
+- **An ending is news, and then it is history**
+  (`agent-river-drop-gone-artifacts`, `C` on the map). A record that is over
+  is struck through and stands, because the ending is itself a thing that
+  happened; once a section has filled up with lines nobody is going to pick
+  up, that is over too, and only the user knows when. So a command and not a
+  rule. It is the **one forget with a key**, on the grounds that its subject
+  is already over: what goes is the record of an ending rather than the
+  record of any work. Three things hold it. It reads the record's own `gone`
+  and **asks the disk nothing** -- a record is over because a producer
+  reported it over, and a file behind a key that cannot be found is a file
+  elsewhere as readily as a file deleted. It **asks first**, which is the
+  wholesale rule below: nothing undoes it, and what it throws away is the
+  half of the state no event can rebuild. And it leaves the **sessions'
+  tables** alone, like the other two, since the reaching is an edge and is
+  true whatever became of the thing at the other end.
 - **The artifact-side forgets ask and report on the same terms**
   (`agent-river-drop-artifact`, `agent-river-artifacts-reset`). Wholesale
   asks, like the one above and for a sharper version of its reason: a
