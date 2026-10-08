@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (410 tests). -L . is required: the tests require all four .el files.
+# Full suite (412 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -487,6 +487,18 @@ These are load-bearing; the tests enforce most of them.
   named in a sentence is not a file the agent reached. It is not in
   `agent-river-notable-kinds` — every turn has one, and `>` is for the lines
   that want attention.
+- **A turn that said nothing still ended, and folds as a `turn`**
+  (`agent-river--say-ended`, the silent branch; #59). A kind of its own
+  rather than a `say` with nothing in it: `say` means the agent said
+  something and fills `said`, where this fills nothing and counts nothing.
+  What it carries is the stop reason, which only this stream has — so a
+  turn ending in silence, `end_turn` with no word or cancelled before one,
+  is as observable as one ending in an answer, and whoever waits for a turn
+  to end (#61) hears both kinds. Ungated like `say`, for the per-kind rule
+  of `agent-river--claim`. Not `idle`, which is claim-gated and carries no
+  stop reason on the hook path. Marked `✗` on any reason but `end_turn`,
+  the way an interrupted answer is. Not notable: every answerless turn has
+  one.
 - **A run that is not said is dropped, and there are three ways to get one**
   (`agent-river--listen`). The accumulator's own docstring names the hazard:
   chunks left in the table are flushed by a turn that is not theirs, glued onto

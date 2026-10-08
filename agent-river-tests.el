@@ -2253,18 +2253,42 @@ CALL overrides fields of the tool call record."
       ;; answer from an interrupted one; nothing here folds it.
       (should (equal (plist-get (car seen) :stop-reason) "end_turn")))))
 
-(ert-deftest agent-river-test-a-turn-that-said-nothing-folds-nothing ()
+(ert-deftest agent-river-test-a-turn-that-said-nothing-folds-no-say ()
   (agent-river-test--with-say
     ;; An agent that answers with tool calls alone has said nothing, and a
-    ;; line in the log for the absence of one is worse than no line.
+    ;; `say' with nothing in it would claim otherwise.
     (should-not (agent-river--say-ended "s1" "end_turn"))
-    (should-not (gethash "s1" agent-river-registry))
     (agent-river--say-arrived "s1" "   ")
     (should-not (agent-river--say-ended "s1" "end_turn"))
     ;; A block that is not text -- an image -- carries no chunk at all.
     (agent-river--say-arrived "s1" nil)
     (should-not (agent-river--say-ended "s1" "end_turn"))
-    (should-not (gethash "s1" agent-river-registry))))
+    (should-not (agent-river-state-said (gethash "s1" agent-river-registry)))))
+
+(ert-deftest agent-river-test-a-turn-that-said-nothing-still-ended ()
+  (agent-river-test--with-say
+    ;; A turn ending in silence is as much a turn end as one ending in an
+    ;; answer, and the stop reason is the one fact only this stream has --
+    ;; whoever waits for a turn to end has to hear this one too.
+    (let* ((seen nil)
+           (agent-river-observers (list (lambda (_state event) (push event seen)))))
+      (agent-river--say-ended "s1" "end_turn")
+      (should (equal (plist-get (car seen) :kind) "turn"))
+      (should (equal (plist-get (car seen) :stop-reason) "end_turn"))
+      ;; A kind of its own, not an empty `say': it fills nothing and counts
+      ;; nothing.
+      (let ((state (gethash "s1" agent-river-registry)))
+        (should-not (agent-river-state-said state))
+        (should (= (agent-river-state-steps state) 0)))
+      (should (string-match-p "turn ended, nothing said" (agent-river-test--log-text)))
+      ;; Cancelled before a word: marked, like an interrupted answer.
+      (agent-river--say-ended "s1" "cancelled")
+      (should (string-match-p "turn ended: cancelled ✗" (agent-river-test--log-text))))))
+
+(ert-deftest agent-river-test-a-turn-end-renders-and-is-not-a-landmark ()
+  (should (assoc "turn" agent-river-kinds))
+  ;; Every turn without an answer has one; the log's bulk, not a landmark.
+  (should-not (member "turn" agent-river-notable-kinds)))
 
 (ert-deftest agent-river-test-the-state-keeps-an-excerpt-of-what-was-said ()
   (agent-river-test--with-say
@@ -2361,7 +2385,7 @@ CALL overrides fields of the tool call record."
         ;; with that id flushed them as its own.
         (should-not (gethash "s1" agent-river--say-runs))
         (agent-river--listen (agent-river-test--turn-complete))
-        (should-not (gethash "s1" agent-river-registry))))))
+        (should-not (agent-river-state-said (gethash "s1" agent-river-registry)))))))
 
 (ert-deftest agent-river-test-what-was-said-renders-and-is-not-a-landmark ()
   (should (assoc "say" agent-river-kinds))

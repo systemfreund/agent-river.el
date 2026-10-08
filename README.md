@@ -258,6 +258,10 @@ clears `steps` — the log keeps every `“` line it drew. A turn that ended som
 other way than `end_turn` — cancelled, refused, out of tokens — is marked `✗`,
 the way an interrupted tool call is.
 
+A turn that said nothing folds as a `turn` instead — a kind of its own that
+fills no slot and counts nothing, carrying only the stop reason — so the end
+of every turn is on the stream whether or not the agent spoke.
+
 A `say` counts no step, touches no artifact table and carries no working
 directory: no tool ran, a file named in a sentence is not a file the agent
 reached, and the cwd the keys are relative to belongs to whoever folds the

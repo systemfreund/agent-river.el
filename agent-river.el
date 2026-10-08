@@ -335,6 +335,7 @@ so this works in the plain fallback too.")
     ("think"  "·" agent-river-think)
     ("reason" "◇" agent-river-reason)
     ("say"    "“" agent-river-say)
+    ("turn"   "■" agent-river-idle)
     ("intent" "◈" agent-river-intent)
     ("fail"   "✗" agent-river-fail)
     ("ask"    "?" agent-river-ask)
@@ -2127,6 +2128,12 @@ next reader of the state would be matching against a glyph."
       (concat (agent-river--excerpt (alist-get 'message payload)
                                     agent-river-detail-width)
               (if (agent-river--unfinished-p payload) " ✗" "")))
+     ;; The same mark as a `say', for the same reason: the reason is the
+     ;; whole of what this line has to say.
+     ((equal kind "turn")
+      (if (agent-river--unfinished-p payload)
+          (format "turn ended: %s ✗" (alist-get 'stop_reason payload))
+        "turn ended, nothing said"))
      ((equal kind "done")
       (concat (or (alist-get 'agent_type payload) "subagent") " finished"))
      ;; No inline marker on a failure: the kind already renders ✗ in the
@@ -2651,8 +2658,13 @@ nothing to accumulate from one of those."
 
 Returns the text, or nil for a turn that said nothing -- which is an
 ordinary turn rather than an edge case: an agent that answers with tool
-calls alone has said nothing, and a `say' event carrying an empty string
-would put a line in the log for the absence of one.
+calls alone has said nothing.  That turn folds as a `turn' instead, a
+kind of its own rather than a `say' with nothing in it: `say' means the
+agent said something and fills `said', and this fills nothing and counts
+nothing.  What it carries is the stop reason, which only this stream
+has, so that a turn ending in silence -- `end_turn' with no word, or
+cancelled before one -- is as observable as one ending in an answer.
+Ungated like `say', for the same reason: nothing here counts a step.
 
 The whole of it goes on the event.  A dialogue act cannot be read off a
 first sentence, which is where this parts company with the `◇' lines: what
@@ -2669,7 +2681,12 @@ under the other."
   (let ((chunks (gethash session agent-river--say-runs)))
     (remhash session agent-river--say-runs)
     (let ((text (apply #'concat (nreverse chunks))))
-      (unless (string-empty-p (string-trim text))
+      (if (string-empty-p (string-trim text))
+          (progn
+            (agent-river-observe
+             (agent-river--event "turn" `((session_id . ,session)
+                                          (stop_reason . ,reason))))
+            nil)
         (agent-river-observe
          (agent-river--event "say" `((session_id . ,session)
                                      (message . ,text)
