@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (405 tests). -L . is required: the tests require all four .el files.
+# Full suite (404 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1128,6 +1128,26 @@ before the deletion, so that deferring is not the same as forgetting.
   thrower costs its own offer and not the ones beside it, and the log line
   names it — with several of them, which one threw is the half of the report
   worth having.
+- **What the agent is told is the user's, and no prompt text ships**
+  (`agent-river-launch-expand`, `agent-river-launch--declared-brief`; #60).
+  A prompt the package wrote could only be appended to, and the first real
+  requirement it met was a slash command — `/ship-it` before anything is
+  published — which only works as the *first* thing in a prompt. So a brief
+  is declared: `:prompt` is a template in which `{cell}` is any context
+  cell, by the name its producer gave it, so this layer learns none of
+  them; `{name}`, `{key}`, `{domain}` and `{state}` are the record's and the
+  export. `:domain` and `:when` are a declared brief's answer to "does this
+  apply", not a predicate beside one — there is no function body to give
+  the answer twice — and the rest of the rule is still nil: a prompt that
+  expands to nothing offers nothing, and so does a `:worktree` template
+  that does, since started anyway the agent would write in the tree it was
+  meant to be kept out of. The function-valued `:brief` stays for whatever
+  a template cannot say. Two things the expansion owes: **a missing cell is
+  empty**, because a context is opaque and "absent" and "never delivered"
+  cannot be told apart; and **the splice is guarded with `save-match-data`**,
+  because `replace-regexp-in-string` reads the match data *after* the
+  function returns and the quoting matches strings of its own — unguarded,
+  a quoted cell was spliced into the middle of its own placeholder.
 - **The model is the brief's to name** (`:config`,
   `agent-river-launch--shell-config`). A prompt is worth little without the
   configuration it is said under, and `agent-river-launch-shell-config` is
@@ -1210,22 +1230,16 @@ before the deletion, so that deferring is not the same as forgetting.
   It is **asked about off the menu** (`agent-river-launch--confirm-p` names
   it) and not on it: a menu choice is already the deliberate act, and a
   worktree is cheap and reversible where the process is not.
-- **Quoting producer text is a launch concern, not a GitHub one**
-  (`agent-river-launch-quote`, moved here from `agent-river-gh.el`). A brief
-  that embeds an artifact's own text — a body, a title, a branch a fork
-  spelled however it liked — answers the identical question whatever wrote
-  that text: is this quoted material or is it read as the operator's own
-  instruction. `agent-river-gh-brief` was the only brief when this was
-  written and kept its own copy, but the file's own commentary expects a
-  tracker, a mailbox or a build to follow it, and each would face the same
-  question — which is what the merge rule in the Conventions section is for:
-  sameness of the *question answered* licenses sharing a mechanism, and this
-  is the identical question with different producer text each time. The
-  stakes are sharper than the ordinary case for that rule: the copy that
-  drifts here is not a rendering that looks different, it is an injection
-  defence quietly not applied to the next source's text. It stayed a GitHub
-  function until a second brief needed it, which is the point in
-  "merge only where there is something to merge" at which there is.
+- **Quoting is a mechanism here and a choice in the template**
+  (`agent-river-launch-quote`, reached as `{>cell}`). A brief that embeds an
+  artifact's own text — a body, a title, a branch a fork spelled however it
+  liked — has to decide whether that text is quoted material or read with
+  the operator's standing, and every source puts the same question. So
+  there is one quoting call, which puts the `>` on every line in exactly one
+  place: a field quoted by hand reopens the injection, since a newline in it
+  closes the quotation early. *Whether* to apply it is the template's: the
+  person writing the prompt is the one who knows what it is for, and a
+  mechanism that quoted behind their back is a prompt they did not write.
 - **A launched shell always starts a new session**
   (`:session-strategy 'new` in `agent-river-launch--shell-launch`).
   agent-shell's own default is `prompt`, which puts a modal question about
@@ -1456,32 +1470,11 @@ before the deletion, so that deferring is not the same as forgetting.
   shells out. Unpinned, the script's arms fall through to `return 1` for a
   kind Emacs happily asks for — nothing delivered, nothing logged, an empty
   section that reads as a quiet week.
-- **The prompt is still quoted, and the reason has changed** (`agent-river-gh-brief`).
-  An issue is text written by whoever can open one and it reaches an agent
-  holding tools. With a person in the loop the person is the defence, so the
-  quoting is a courtesy rather than the whole of it — and it is kept anyway,
-  because it is what has to be right on the day #37 is built.
-- **The quoting itself is `agent-river-launch-quote` now, not this file's.**
-  It is where the pull request paid for the lesson that still governs it: the
-  body was split on newlines from the start, and the branch name added
-  beside it was `format`ed into a single line instead, so a name carrying a
-  newline closed the quotation and everything after it read as the
-  operator's own words. Moved to the launch layer for the reason given
-  there — the question it answers has nothing to do with GitHub, and every
-  future source asks it too. What is left here is what genuinely is GitHub's:
-  a branch name is a stranger's text exactly as a body is, a fork spells one
-  however it likes, and both are handed to the shared quoting call rather
-  than interpolated by hand. What stays outside the quotation entirely is
-  ours and interpolates nothing — the framing, the export, and the note that
-  a pull request is a draft, which is a sentence read off a boolean.
-- **Two framings, dispatched on the domain** (`agent-river-gh--framing`),
-  which is the two lines inside one brief that `agent-river-launch-briefs`
-  asks for rather than a brief per domain. They are written side by side
-  because what has to stay parallel is the part that is not about the work:
-  both introduce the same quotation and both say it is not an instruction.
-  Only the ask differs — an issue is a request to weigh, a pull request is a
-  change to read — and anything else falls back to the issue's, the more
-  careful of the two.
+- **This file writes no prompt.** What is said to an agent about an issue
+  or a pull request, and whether GitHub's own text is quoted in it, is the
+  user's template (see the launch section). What is left here is what
+  genuinely is GitHub's: the cells, delivered unread — `body`, `branch`,
+  `fork` and the rest — so a template can ask for any of them by name.
 
 ### One set of motions, every buffer
 

@@ -124,50 +124,47 @@ nil means nothing can be launched at all, whatever else is configured."
 (defcustom agent-river-launch-briefs nil
   "What an agent may be started on, as a list of named briefs.
 
-The other switch, and the sharp one.  Each entry is a plist:
+The other switch, and the sharp one: with no brief nothing can launch.
+Each entry is a plist, and what the agent is told is written here --
+this package ships no prompt text:
 
-  :name   what the menu calls it, and what `agent-river-launch-artifact'
-          takes to pick one without asking
-  :brief  (RECORD) -> (:prompt STRING :cwd DIRECTORY :config FUNCTION
-                       :buffer-name STRING :worktree SPEC
-                       :worktree-fetch REMOTE) or nil
+  :name            what the menu calls it, and what
+                   `agent-river-launch-artifact' takes to pick it
+  :domain          a domain or a list of them the brief is for
+  :when            (RECORD) -> non-nil where the brief applies
+  :prompt          a template, or (RECORD) -> STRING
+  :cwd             a template for where to start, default \"{cwd}\"
+  :worktree        t, or a template naming a branch
+  :worktree-fetch  a template naming a remote to fetch that branch from
+  :buffer-name     a template for the session's buffer
+  :options         an alist for `agent-river-launch-shell-config-with-options'
+  :config          a config function, instead of :options
 
-RECORD is the plist `agent-river-artifacts-list' produces -- `:key',
-`:domain', `:name', `:context' and the rest.  Nil means there is nothing
-to say about this artifact and so nothing to start, which is the arming
-switch: a launcher with no brief can never launch.  There is no
-applicability predicate beside it, which would be a second account of the
-answer the brief already gives.
+A template is a string in which `{cell}' is the context cell of that name
+-- whatever the producer delivered, `{body}', `{url}', `{branch}' -- and
+`{name}', `{key}' and `{domain}' are the record's own; `{state}' is
+`agent-river-markdown'.  `{>cell}' is the value as a blockquote, through
+`agent-river-launch-quote'; `{{' is a literal brace.  See
+`agent-river-launch-expand'.
 
-Several, because a brief is not one thing: the same pull request is a
-thing to review and a thing to rebase, under different prompts and quite
-possibly different models, and which one is wanted is a question for the
-person looking at the line.  Every brief with something to say about a
-record is one entry in the menu RET opens.
+Whether a producer's text is quoted is the template's to say.  A body is
+written by whoever could open the issue, and inserted bare it reads to an
+agent holding tools with the standing of your own words.
 
-`:buffer-name' is optional and names the buffer the session runs in --
-agent-shell's own name for it otherwise.  It is the brief's because two
-briefs on one artifact are two sessions somebody has to tell apart, and
-only the brief knows which of them it is.  A launcher-specific key, like
-`:config': see `agent-river-launch--shell-name'.
+A brief applies to a record when the domain matches, `:when' agrees, the
+prompt expands to something and a declared `:worktree' does too -- a
+brief that asked for a tree of its own and got none would start the agent
+in yours.  Every brief that applies is one entry in the menu RET opens:
+the same pull request is a thing to review and a thing to rebase, under
+different prompts and quite possibly different models.
 
-`:worktree' is optional and starts the session in a git worktree of its
-own, made from the repository `:cwd' is in: t for a new branch off
-`HEAD', a branch name for that branch checked out.  `:worktree-fetch'
-names a remote to fetch that branch from first, which only the brief
-can know is wanted.  Launcher-specific, like `:buffer-name': see
-`agent-river-launch--make-worktree'.
+`:brief', a function (RECORD) -> (:prompt STRING :cwd DIRECTORY ...) or
+nil, takes the place of all of the above for what a template cannot say.
+RECORD is the plist `agent-river-artifacts-list' produces.
 
-`:config' is optional and overrides `agent-river-launch-shell-config' for
-this brief's sessions -- a function of no arguments returning the
-agent-shell config, the same shape the global has.  It is the model and
-session configuration a prompt is worth nothing without.
-
-A brief is also where a context is read.  This package never reads a
-value out of one -- that is what lets a record carry a severity, a body
-and a URL without this file learning about any of them -- so the working
-tree an agent should start in comes out of the context here, in your
-code, which put it there in the first place."
+`:buffer-name', `:worktree', `:worktree-fetch', `:options' and `:config'
+are agent-shell's: see `agent-river-launch--shell-name' and
+`agent-river-launch--make-worktree'."
   :type '(repeat (plist :key-type symbol :value-type sexp)))
 
 (defcustom agent-river-launch-shell-config
@@ -632,6 +629,80 @@ and the session appearing, which is a handful of seconds a day."
     (setq agent-river-launch--resolve-timer
           (run-with-timer 1 1 #'agent-river-launch--resolve-pending))))
 
+(defun agent-river-launch--cell (record name)
+  "Return what the template cell NAME stands for in RECORD, or nil."
+  (let ((value (pcase name
+                 ('name (plist-get record :name))
+                 ('key (plist-get record :key))
+                 ('domain (plist-get record :domain))
+                 ('state (agent-river-markdown))
+                 (_ (alist-get name (plist-get record :context))))))
+    (cond ((null value) nil)
+          ((stringp value) value)
+          (t (format "%s" value)))))
+
+(defun agent-river-launch-expand (template record)
+  "Return TEMPLATE with RECORD's cells put in.
+
+`{cell}' is the cell as it is, `{>cell}' the cell as a blockquote, and a
+cell RECORD does not have is empty.  `{{' is a literal brace.  What is
+quoted is the template's choice: nothing here decides it on the
+template's behalf."
+  (replace-regexp-in-string
+   "{\\(?:\\({\\)\\|\\(>\\)?\\([a-z][a-z0-9-]*\\)}\\)"
+   (lambda (match)
+     (let ((brace (match-string 1 match))
+           (quoted (match-string 2 match))
+           (name (match-string 3 match)))
+       (if brace
+           "{"
+         ;; The splice reads the match data after this returns, and both
+         ;; the quoting and a cell's own reading may match strings.
+         (save-match-data
+           (let ((value (agent-river-launch--cell record (intern name))))
+             (cond ((null value) "")
+                   (quoted (agent-river-launch-quote (list value)))
+                   (t value)))))))
+   template t t))
+
+(defun agent-river-launch--field (spec record)
+  "Return SPEC for RECORD: a template expanded, a function called.
+Nil where it comes to nothing, so an empty expansion reads as absent."
+  (let ((value (cond ((stringp spec) (agent-river-launch-expand spec record))
+                     ((functionp spec) (funcall spec record)))))
+    (and (stringp value) (not (string-empty-p (string-trim value))) value)))
+
+(defun agent-river-launch--declared-brief (entry record)
+  "Return the brief ENTRY declares for RECORD, or nil where it does not apply."
+  (let ((domain (plist-get entry :domain))
+        (applies (plist-get entry :when))
+        (worktree (plist-get entry :worktree))
+        (options (plist-get entry :options)))
+    (when (and (or (null domain)
+                   (memq (plist-get record :domain) (ensure-list domain)))
+               (or (null applies) (funcall applies record)))
+      (let ((prompt (agent-river-launch--field (plist-get entry :prompt) record))
+            (tree (if (eq worktree t)
+                      t
+                    (agent-river-launch--field worktree record))))
+        (when (and prompt (or (null worktree) tree))
+          (append
+           (list :prompt prompt
+                 :cwd (agent-river-launch--field
+                       (or (plist-get entry :cwd) "{cwd}") record))
+           (when tree
+             (list :worktree tree
+                   :worktree-fetch (agent-river-launch--field
+                                    (plist-get entry :worktree-fetch) record)))
+           (when-let* ((name (agent-river-launch--field
+                              (plist-get entry :buffer-name) record)))
+             (list :buffer-name name))
+           (cond ((plist-get entry :config)
+                  (list :config (plist-get entry :config)))
+                 (options
+                  (list :config (agent-river-launch-shell-config-with-options
+                                 options))))))))))
+
 (defun agent-river-launch--offers (record)
   "Return (ENTRY . BRIEF) for every brief with something to say about RECORD.
 
@@ -649,17 +720,18 @@ error here would read as the command being broken rather than the brief."
   (let (offers)
     (dolist (entry agent-river-launch-briefs)
       (let* ((fn (plist-get entry :brief))
-             (brief (and (functionp fn)
-                         (condition-case err
-                             (funcall fn record)
-                           (error
-                            (agent-river-log
-                             "fail"
-                             (agent-river--log-text
-                              (format "brief %s errored (%s)"
-                                      (or (plist-get entry :name) "?")
-                                      (error-message-string err))))
-                            nil)))))
+             (brief (condition-case err
+                        (if (functionp fn)
+                            (funcall fn record)
+                          (agent-river-launch--declared-brief entry record))
+                      (error
+                       (agent-river-log
+                        "fail"
+                        (agent-river--log-text
+                         (format "brief %s errored (%s)"
+                                 (or (plist-get entry :name) "?")
+                                 (error-message-string err))))
+                       nil))))
         (when (plist-get brief :prompt)
           (push (cons entry brief) offers))))
     (nreverse offers)))
