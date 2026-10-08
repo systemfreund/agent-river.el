@@ -361,6 +361,25 @@ look at rather than a thing to launch on."
                  (or (agent-river-markdown) "")))))))
 
 ;;;###autoload
+(defun agent-river-gh-brief-in-worktree (record)
+  "Return `agent-river-gh-brief' for RECORD, started in a worktree of its own.
+
+An issue gets a new branch off `HEAD'.  A pull request gets its own
+branch checked out, fetched from `origin' first since it usually exists
+only there -- work on a pull request belongs on it, not beside it.  A
+fork's branch is not on `origin' and is not fetched, so its launch fails
+with git's message rather than putting the agent anywhere else."
+  (when-let* ((brief (agent-river-gh-brief record)))
+    (let* ((context (plist-get record :context))
+           (branch (alist-get 'branch context)))
+      (append brief
+              (if (and (eq (plist-get record :domain) 'pr) branch)
+                  (append (list :worktree branch)
+                          (unless (alist-get 'fork context)
+                            (list :worktree-fetch "origin")))
+                (list :worktree t))))))
+
+;;;###autoload
 (defun agent-river-gh--actions (record)
   "Offer to open the GitHub object RECORD names in a browser.
 

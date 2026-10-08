@@ -129,7 +129,8 @@ The other switch, and the sharp one.  Each entry is a plist:
   :name   what the menu calls it, and what `agent-river-launch-artifact'
           takes to pick one without asking
   :brief  (RECORD) -> (:prompt STRING :cwd DIRECTORY :config FUNCTION
-                       :buffer-name STRING) or nil
+                       :buffer-name STRING :worktree SPEC
+                       :worktree-fetch REMOTE) or nil
 
 RECORD is the plist `agent-river-artifacts-list' produces -- `:key',
 `:domain', `:name', `:context' and the rest.  Nil means there is nothing
@@ -149,6 +150,13 @@ agent-shell's own name for it otherwise.  It is the brief's because two
 briefs on one artifact are two sessions somebody has to tell apart, and
 only the brief knows which of them it is.  A launcher-specific key, like
 `:config': see `agent-river-launch--shell-name'.
+
+`:worktree' is optional and starts the session in a git worktree of its
+own, made from the repository `:cwd' is in: t for a new branch off
+`HEAD', a branch name for that branch checked out.  `:worktree-fetch'
+names a remote to fetch that branch from first, which only the brief
+can know is wanted.  Launcher-specific, like `:buffer-name': see
+`agent-river-launch--make-worktree'.
 
 `:config' is optional and overrides `agent-river-launch-shell-config' for
 this brief's sessions -- a function of no arguments returning the
@@ -292,6 +300,165 @@ was started for, and described in the log as one that never started."
                                  (buffer-name buffer) name
                                  (error-message-string err))))))))
 
+;;; Worktrees -- a launched session in a tree of its own
+;;
+;; Two agents launched on two issues of one repository must not write into
+;; one tree, and neither into the one the user is working in.  A brief opts
+;; in with `:worktree', a launcher-specific key like `:config': t is a new
+;; branch off `HEAD', a string is that branch checked out -- a pull request
+;; is worked on in its own branch, not beside it.  Git runs through
+;; `process-file' with an argv, so nothing a producer wrote reaches a shell.
+
+(defcustom agent-river-launch-worktree-directory
+  (lambda (root) (expand-file-name ".agent-shell/worktrees" root))
+  "Function of a repository's main worktree returning where worktrees go.
+
+The default is agent-shell's own location, so the worktrees it makes and
+the ones made here land in one place."
+  :type 'function)
+
+(defconst agent-river-launch--worktree-adjectives
+  '("adoring" "brave" "calm" "eager" "focused" "gentle" "happy" "jolly"
+    "keen" "lucid" "merry" "nifty" "quirky" "serene" "sharp" "tender"
+    "upbeat" "vibrant" "witty" "zealous")
+  "First halves of a worktree's random name.")
+
+(defconst agent-river-launch--worktree-scientists
+  '("bohr" "curie" "darwin" "euler" "fermi" "gauss" "hopper" "hypatia"
+    "kepler" "lovelace" "meitner" "noether" "pascal" "ramanujan" "shannon"
+    "tesla" "turing" "volta" "wright" "yalow")
+  "Second halves of a worktree's random name.")
+
+(defconst agent-river-launch--worktree-slug-width 24
+  "How much of an artifact key a worktree name keeps.")
+
+(defun agent-river-launch--slug (text width)
+  "Return TEXT reduced to `[a-z0-9-]', keeping at most its last WIDTH chars.
+
+The end rather than the start, because that is where a key keeps what
+tells two of them apart -- the number of an issue, not the name of the
+repository it is in.  Mechanical: a key is a name to be made safe, never
+something to be parsed for what it means."
+  (let* ((slug (replace-regexp-in-string "[^a-z0-9]+" "-" (downcase text)))
+         (slug (string-trim slug "-+" "-+")))
+    (when (> (length slug) width)
+      (setq slug (string-trim-left (substring slug (- width)) "-+")))
+    slug))
+
+(defun agent-river-launch--worktree-name (key)
+  "Return a fresh worktree and branch name for the artifact KEY.
+The key's slug, so `git worktree list' says which is which, and a random
+pair, so a second launch on one artifact is a second tree."
+  (let ((slug (agent-river-launch--slug (or key "")
+                                        agent-river-launch--worktree-slug-width))
+        (pair (format "%s-%s"
+                      (seq-random-elt agent-river-launch--worktree-adjectives)
+                      (seq-random-elt agent-river-launch--worktree-scientists))))
+    (if (string-empty-p slug) pair (concat slug "-" pair))))
+
+(defun agent-river-launch--worktree-argv (path name spec)
+  "Return the `git' arguments making a worktree at PATH for SPEC.
+
+SPEC t is a new branch NAME off `HEAD'.  A string is that branch checked
+out, with no `-b': git then makes a local branch tracking the remote one
+where only that exists, and refuses where the branch is already checked
+out elsewhere -- which is the refusal worth showing."
+  (if (stringp spec)
+      (list "worktree" "add" path spec)
+    (list "worktree" "add" "-b" name path "HEAD")))
+
+(defun agent-river-launch--git (dir &rest args)
+  "Run git with ARGS in DIR, returning its trimmed output or signalling.
+The output is in the error, since what git said is the whole of the
+reason a launch did not happen."
+  (let ((default-directory (file-name-as-directory dir)))
+    (with-temp-buffer
+      (let ((status (apply #'process-file "git" nil t nil args)))
+        (unless (eq status 0)
+          (error "git %s: %s" (car args)
+                 (string-trim (buffer-string))))
+        (string-trim (buffer-string))))))
+
+(defun agent-river-launch--worktree-root (cwd)
+  "Return (ROOT . COMMON) for the repository CWD is in, or signal.
+
+The common directory rather than the toplevel, because CWD may itself be
+a worktree, and worktrees made from its toplevel would nest inside it.
+ROOT is the main worktree, the one the common directory belongs to."
+  (unless (file-directory-p cwd)
+    (error "Not a directory: %s" cwd))
+  (let* ((common (expand-file-name
+                  (agent-river-launch--git cwd "rev-parse" "--git-common-dir")
+                  cwd))
+         (root (file-name-directory (directory-file-name common))))
+    (when (equal (agent-river-launch--git cwd "rev-parse" "--is-bare-repository")
+                 "true")
+      (error "A bare repository has no tree to branch from: %s" cwd))
+    (cons root common)))
+
+(defun agent-river-launch--worktree-exclude (root common dir)
+  "Keep DIR out of `git status' in ROOT, through COMMON's info/exclude.
+
+Asked of git rather than read off the file: an entry agent-shell or the
+user already made answers as readily as one made here."
+  (when (file-in-directory-p dir root)
+    (let ((default-directory (file-name-as-directory root)))
+      (unless (eq 0 (process-file "git" nil nil nil "check-ignore" "-q"
+                                  (file-relative-name dir root)))
+        (let ((exclude (expand-file-name "info/exclude" common)))
+          (make-directory (file-name-directory exclude) t)
+          (with-temp-buffer
+            (when (file-exists-p exclude) (insert-file-contents exclude))
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n"))
+            (insert "/" (file-name-as-directory (file-relative-name dir root)) "\n")
+            (write-region nil nil exclude nil 'silent)))))))
+
+(defun agent-river-launch--shown-path (path)
+  "Return PATH short enough to lead a log line, keeping its end.
+The end is the worktree's own name, which is what tells it apart; a log
+line is clipped from the right, which would keep only the repository."
+  (let ((shown (abbreviate-file-name path)))
+    (if (> (length shown) 56)
+        (concat "…" (substring shown -55))
+      shown)))
+
+(defun agent-river-launch--make-worktree (brief)
+  "Make the worktree BRIEF asks for and return its path, or nil if none.
+
+Everything is checked before anything is made, and nothing here falls
+back to `:cwd': a brief that asked for a tree of its own and got the
+user's would be the agent writing exactly where it was told not to."
+  (when-let* ((spec (plist-get brief :worktree)))
+    (unless (or (eq spec t)
+                (and (stringp spec) (not (string-empty-p (string-trim spec)))))
+      (error "`:worktree' is t or a branch, not %S" spec))
+    (pcase-let* ((cwd (expand-file-name (or (plist-get brief :cwd)
+                                            default-directory)))
+                 (`(,root . ,common) (agent-river-launch--worktree-root cwd))
+                 (dir (funcall agent-river-launch-worktree-directory root))
+                 (remote (plist-get brief :worktree-fetch))
+                 (name nil)
+                 (path nil))
+      ;; A fetch is a network call, so only where the brief asked for one.
+      (when (and (stringp spec) (stringp remote))
+        (agent-river-launch--git root "fetch" remote spec))
+      (while (or (null path) (file-exists-p path))
+        (setq name (agent-river-launch--worktree-name (plist-get brief :key))
+              path (expand-file-name name dir)))
+      (make-directory dir t)
+      (agent-river-launch--worktree-exclude root common dir)
+      (apply #'agent-river-launch--git root
+             (agent-river-launch--worktree-argv path name spec))
+      ;; The path leads, since a log line is clipped and it is what nothing
+      ;; else will say once the tree has outlived the session.
+      (agent-river-log "artifact"
+                       (agent-river--log-text
+                        (format "worktree %s (%s)" (agent-river-launch--shown-path path)
+                                (if (stringp spec) spec name)))
+                       (agent-river--log-text (or (plist-get brief :key) "?")))
+      path)))
+
 (defun agent-river-launch--shell-launch (brief)
   "Start an agent-shell session for BRIEF and hand it its prompt.
 
@@ -303,14 +470,31 @@ session existed before the launch and is quite possibly in the registry
 already, so the wait would settle instantly onto something nobody started
 for this thing -- and the brief would land in a conversation about another
 one.  It also stops a modal question arriving between the choice and the
-agent."
-  (let* ((default-directory (or (plist-get brief :cwd) default-directory))
-         (buffer (agent-shell--start
-                  :config (agent-river-launch--shell-config brief)
-                  :session-strategy 'new
-                  :no-focus t :new-session t)))
+agent.
+
+A `:worktree' is made first, so a git failure starts nothing.  One that
+outlives a failed start is left where it is and named in the error: it
+is a working tree, and removing one is not a failed launch's to do."
+  (let* ((worktree (agent-river-launch--make-worktree brief))
+         (default-directory (file-name-as-directory
+                             (or worktree (plist-get brief :cwd)
+                                 default-directory)))
+         (buffer (condition-case err
+                     (agent-shell--start
+                      :config (agent-river-launch--shell-config brief)
+                      :session-strategy 'new
+                      :no-focus t :new-session t)
+                   (error
+                    (if worktree
+                        (error "worktree left at %s: %s"
+                               (agent-river-launch--shown-path worktree)
+                               (error-message-string err))
+                      (signal (car err) (cdr err)))))))
     (unless (buffer-live-p buffer)
-      (error "agent-shell started no buffer"))
+      (error "%sagent-shell started no buffer"
+             (if worktree
+                 (format "worktree left at %s: " (agent-river-launch--shown-path worktree))
+               "")))
     (agent-river-launch--shell-name buffer (plist-get brief :buffer-name))
     (agent-river-launch--shell-send buffer (plist-get brief :prompt)
                                     agent-river-launch-shell-tries)
@@ -497,7 +681,7 @@ line and repeating it would put the question behind the answer."
                              offers)))
         (cdr (assoc (completing-read "Brief: " by-name nil t) by-name))))))
 
-(defun agent-river-launch--confirm-p (record key brief-name)
+(defun agent-river-launch--confirm-p (record key brief-name &optional worktree)
   "Return non-nil when starting BRIEF-NAME on RECORD may go ahead.
 
 Asks, unless the gesture that reached here already named what would run:
@@ -511,12 +695,17 @@ and ran its one action outright.
 Asked otherwise, and that is the ordinary case: starting a process is the
 most expensive thing this package does and the one gesture with nothing
 on the far side that can take it back.  What the question names is what
-will run, the brief included."
+will run, the brief included -- and WORKTREE, the brief's `:worktree',
+since a tree made on disk is a second thing the answer sets in motion."
   (or agent-river-artifact-chosen
-      (y-or-n-p (format "Start %s on %s (%s)? "
+      (y-or-n-p (format "Start %s on %s (%s)%s? "
                         agent-river-launch-launcher
                         (or (plist-get record :name) key)
-                        (or brief-name "?")))))
+                        (or brief-name "?")
+                        (cond ((stringp worktree)
+                               (format " in a worktree of %s" worktree))
+                              (worktree " in a new worktree")
+                              (t ""))))))
 
 (defun agent-river-launch--refusal (record offers)
   "Return why RECORD cannot be launched, given OFFERS, or nil.
@@ -560,7 +749,8 @@ would run -- see `agent-river-launch--confirm-p'."
     (when refusal (user-error "%s" refusal))
     (let* ((offer (agent-river-launch--pick offers brief-name))
            (chosen (plist-get (car offer) :name)))
-      (if (not (agent-river-launch--confirm-p record key chosen))
+      (if (not (agent-river-launch--confirm-p
+                record key chosen (plist-get (cdr offer) :worktree)))
           (message "agent-river: not started")
         (let ((launcher (agent-river-launch--launcher))
               ;; Ours first, so the record's own identity wins: a headless

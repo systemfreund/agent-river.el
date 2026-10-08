@@ -909,6 +909,27 @@ in the menu RET opens, and nil is what keeps the others out of it. There is no
 applicability predicate beside it; that would be a second account of the answer
 the brief already gives.
 
+A brief may also ask for a **worktree** of its own, so two agents launched on
+two issues of one repository do not write into one tree, nor into yours:
+
+```elisp
+:worktree t                ; a new branch off HEAD of the repository :cwd is in
+:worktree "feature-x"      ; that branch checked out -- work on a PR goes on it
+:worktree-fetch "origin"   ; fetch the branch from this remote first
+```
+
+The worktree lands in `<repo>/.agent-shell/worktrees/` (agent-shell's own
+location, `agent-river-launch-worktree-directory`), named after the artifact
+key plus a random pair — `pr-o-r-7-witty-yalow` — and is kept out of the main
+checkout's `git status` through `info/exclude`. It is made before the agent
+starts, so a git failure starts nothing; it is never removed for you, and the
+log names it. `agent-river-gh-brief-in-worktree` is the GitHub brief with this
+filled in: a new branch for an issue, the PR's own branch (fetched from
+`origin`) for a pull request. A worktree carries only tracked files, so hook
+wiring in an untracked `.claude/settings.local.json` does not come along —
+wire the hooks in `~/.claude/settings.json` if launched sessions should have
+them.
+
 `M-x agent-river-launch-artifact` asks before it starts anything, and takes an
 optional brief name so the map can reach a particular one without asking twice.
 Launching from the map needs no configuration at all: this file registers

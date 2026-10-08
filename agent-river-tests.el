@@ -5231,6 +5231,183 @@ it clears them."
           (should (= sent 1)))
       (kill-buffer buffer))))
 
+;;; Worktrees -- git stubbed, so what is asserted is the argv and the order
+
+(defmacro agent-river-launch-test--with-git (&rest body)
+  "Run BODY in a fake repository, recording git calls in `calls'.
+
+`root' is a temporary main worktree whose common dir is `root/.git'.
+`fail' names a git subcommand to fail.  Nothing shells out: git is
+answered here, which is what lets the argv be the thing asserted."
+  (declare (indent 0))
+  `(let* ((root (file-name-as-directory (make-temp-file "agent-river-repo" t)))
+          (calls nil)
+          (fail nil))
+     (make-directory (expand-file-name ".git/info" root) t)
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-river-launch--git)
+                    (lambda (dir &rest args)
+                      (push (cons dir args) calls)
+                      (when (equal (car args) fail)
+                        (error "git %s: fatal: no" (car args)))
+                      (pcase args
+                        ('("rev-parse" "--git-common-dir")
+                         (expand-file-name ".git" root))
+                        ('("rev-parse" "--is-bare-repository") "false")
+                        (_ ""))))
+                   ;; `check-ignore': nothing is ignored yet.
+                   ((symbol-function 'process-file)
+                    (lambda (&rest _) 1)))
+           ,@body)
+       (delete-directory root t))))
+
+(defun agent-river-launch-test--git-calls (calls)
+  "Return the argvs in CALLS, oldest first, without their directories."
+  (mapcar #'cdr (reverse calls)))
+
+(ert-deftest agent-river-launch-test-a-worktree-name-is-the-key-made-safe ()
+  ;; A stranger's text going into a path and a branch name: reduced to what
+  ;; git and a shell can both take, and kept from the end, where the number
+  ;; that tells two issues of one repository apart is.
+  (let ((slug (agent-river-launch--slug "issue:systemfreund/agent-river.el#59" 24)))
+    (should (string-match-p "\\`[a-z0-9][a-z0-9-]*\\'" slug))
+    (should (<= (length slug) 24))
+    (should (string-suffix-p "-59" slug)))
+  (should (equal (agent-river-launch--slug "$(rm -rf /)" 24) "rm-rf"))
+  (let ((name (agent-river-launch--worktree-name "pr:o/r#7")))
+    (should (string-match-p "\\`pr-o-r-7-[a-z]+-[a-z]+\\'" name)))
+  ;; Nothing usable in the key leaves the random pair on its own.
+  (should (string-match-p "\\`[a-z]+-[a-z]+\\'"
+                          (agent-river-launch--worktree-name "#:/"))))
+
+(ert-deftest agent-river-launch-test-a-branch-is-checked-out-not-branched-from ()
+  ;; Work on a pull request belongs on its branch: `-b' would put the
+  ;; agent's commits beside it, and the push would go nowhere.
+  (should (equal (agent-river-launch--worktree-argv "/w/x" "x" "feature")
+                 '("worktree" "add" "/w/x" "feature")))
+  (should (equal (agent-river-launch--worktree-argv "/w/x" "x" t)
+                 '("worktree" "add" "-b" "x" "/w/x" "HEAD"))))
+
+(ert-deftest agent-river-launch-test-no-worktree-asked-for-is-no-git ()
+  (cl-letf (((symbol-function 'agent-river-launch--git)
+             (lambda (&rest _) (error "git ran"))))
+    (should-not (agent-river-launch--make-worktree '(:prompt "go" :cwd "/repo"))))
+  (should-error (agent-river-launch--make-worktree '(:worktree 7 :cwd "/repo"))))
+
+(ert-deftest agent-river-launch-test-a-worktree-is-made-in-the-main-tree ()
+  (agent-river-test--with-artifacts
+    (agent-river-launch-test--with-git
+      (let ((path (agent-river-launch--make-worktree
+                   (list :worktree "feature" :worktree-fetch "origin"
+                         :cwd root :key "pr:o/r#7"))))
+        (should (file-in-directory-p path (expand-file-name ".agent-shell/worktrees"
+                                                            root)))
+        (should (string-match-p "/pr-o-r-7-" path))
+        ;; Fetched first, because asked; then the branch itself checked out.
+        (let ((argvs (agent-river-launch-test--git-calls calls)))
+          (should (member '("fetch" "origin" "feature") argvs))
+          (should (equal (car (last argvs)) (list "worktree" "add" path "feature")))
+          (should (< (seq-position argvs '("fetch" "origin" "feature"))
+                     (1- (length argvs)))))
+        ;; Kept out of the main checkout's `git status'.
+        (should (string-match-p "^/\\.agent-shell/worktrees/$"
+                                (with-temp-buffer
+                                  (insert-file-contents
+                                   (expand-file-name ".git/info/exclude" root))
+                                  (buffer-string))))
+        ;; And the log says where, since nothing removes it afterwards.
+        (should (string-match-p (regexp-quote (file-name-nondirectory path))
+                                (agent-river-test--log-text)))))))
+
+(ert-deftest agent-river-launch-test-a-fetch-is-only-made-when-asked-for ()
+  ;; A network call is a side effect, and only the brief knows it is wanted.
+  (agent-river-test--with-artifacts
+    (agent-river-launch-test--with-git
+      (agent-river-launch--make-worktree (list :worktree "feature" :cwd root))
+      (should-not (assoc "fetch" (agent-river-launch-test--git-calls calls)))
+      (setq calls nil)
+      ;; Nor for a new branch, which has nothing to fetch.
+      (agent-river-launch--make-worktree
+       (list :worktree t :worktree-fetch "origin" :cwd root))
+      (should-not (assoc "fetch" (agent-river-launch-test--git-calls calls))))))
+
+(ert-deftest agent-river-launch-test-a-session-starts-in-its-worktree ()
+  (agent-river-test--with-artifacts
+    (agent-river-launch-test--with-git
+      (let ((started-in nil)
+            (buffer (generate-new-buffer " *agent-river-test-shell*"))
+            (agent-river-launch-shell-config (lambda () 'config)))
+        (unwind-protect
+            (cl-letf (((symbol-function 'agent-shell--start)
+                       (lambda (&rest _) (setq started-in default-directory) buffer))
+                      ((symbol-function 'agent-river-launch--shell-send) #'ignore))
+              (agent-river-launch--shell-launch
+               (list :prompt "go" :cwd root :worktree t :key "issue:o/r#1"))
+              (should (string-prefix-p
+                       (expand-file-name ".agent-shell/worktrees/" root)
+                       started-in)))
+          (kill-buffer buffer))))))
+
+(ert-deftest agent-river-launch-test-a-failed-worktree-starts-nothing ()
+  ;; Worktree first: where git refuses, there is no agent to clean up after,
+  ;; and nothing falls back to the tree the brief said not to write into.
+  (agent-river-test--with-artifacts
+    (agent-river-launch-test--with-git
+      (let ((started nil))
+        (setq fail "worktree")
+        (cl-letf (((symbol-function 'agent-shell--start)
+                   (lambda (&rest _) (setq started t) nil)))
+          (should-error (agent-river-launch--shell-launch
+                         (list :prompt "go" :cwd root :worktree t)))
+          (should-not started))))))
+
+(ert-deftest agent-river-launch-test-a-worktree-outliving-a-failed-start-is-named ()
+  ;; Left where it is -- removing a working tree is not a failed launch's to
+  ;; do -- and the error carries the path, so `launch failed' says where.
+  (agent-river-test--with-artifacts
+    (agent-river-launch-test--with-git
+      (let ((agent-river-launch-shell-config (lambda () 'config)))
+        (cl-letf (((symbol-function 'agent-shell--start)
+                   (lambda (&rest _) (error "no handshake"))))
+          (let ((err (should-error (agent-river-launch--shell-launch
+                                    (list :prompt "go" :cwd root :worktree t)))))
+            (should (string-match-p "\\`worktree left at .*\\.agent-shell/worktrees/.*: no handshake"
+                                    (error-message-string err)))))))))
+
+(ert-deftest agent-river-launch-test-the-question-names-the-worktree ()
+  (let (question)
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (q &rest _) (setq question q) nil)))
+      (agent-river-launch--confirm-p '(:name "Fix") "pr:o/r#7" "Review" "feature")
+      (should (string-match-p "in a worktree of feature" question))
+      (agent-river-launch--confirm-p '(:name "Fix") "issue:o/r#1" "Work" t)
+      (should (string-match-p "in a new worktree" question))
+      (agent-river-launch--confirm-p '(:name "Fix") "issue:o/r#1" "Work")
+      (should-not (string-match-p "worktree" question)))))
+
+(ert-deftest agent-river-gh-test-the-worktree-brief-follows-the-kind ()
+  (cl-letf (((symbol-function 'agent-river-gh-brief)
+             (lambda (_) (list :prompt "go" :cwd "/repo"))))
+    ;; An issue is new work: a new branch.
+    (let ((brief (agent-river-gh-brief-in-worktree
+                  '(:domain issue :context ((url . "u"))))))
+      (should (eq (plist-get brief :worktree) t))
+      (should-not (plist-get brief :worktree-fetch)))
+    ;; A pull request is worked on in its branch, fetched since it is
+    ;; usually only on the remote.
+    (let ((brief (agent-river-gh-brief-in-worktree
+                  '(:domain pr :context ((branch . "feature"))))))
+      (should (equal (plist-get brief :worktree) "feature"))
+      (should (equal (plist-get brief :worktree-fetch) "origin")))
+    ;; A fork's branch is not on `origin': not fetched, and left to fail.
+    (let ((brief (agent-river-gh-brief-in-worktree
+                  '(:domain pr :context ((branch . "feature") (fork . t))))))
+      (should (equal (plist-get brief :worktree) "feature"))
+      (should-not (plist-get brief :worktree-fetch))))
+  ;; Nothing to say is still nothing to say.
+  (cl-letf (((symbol-function 'agent-river-gh-brief) #'ignore))
+    (should-not (agent-river-gh-brief-in-worktree '(:domain issue)))))
+
 (ert-deftest agent-river-launch-test-quoting-a-part-ending-in-a-newline-has-no-tail ()
   ;; `split-string' answers a trailing newline with a final empty string, so
   ;; kept it leaves a lone `>' hanging under the quotation.  Only the trailing

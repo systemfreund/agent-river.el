@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (395 tests). -L . is required: the tests require all four .el files.
+# Full suite (405 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1184,6 +1184,32 @@ before the deletion, so that deferring is not the same as forgetting.
   `--resolve-pending` reads from ever being pushed — a session running,
   unnamed, never linked to the artifact it was started for, and described
   in the log as one that never started.
+- **A launched session may get a tree of its own** (`:worktree`,
+  `agent-river-launch--make-worktree`; #55). Two agents on two issues of one
+  repository must not write into one tree, nor into the user's. Six things
+  it owes. **What `:worktree` names decides the branch**: t is a new branch
+  off `HEAD`, a string is *that* branch checked out with no `-b` — work on a
+  pull request belongs on it, and `-b` would put the agent's commits beside
+  it with the push going nowhere. **A fetch only where the brief asks**
+  (`:worktree-fetch`): a PR branch usually exists only on the remote, but a
+  network call is a side effect only the brief can know is wanted.
+  **Everything is checked before anything is made, and nothing falls back
+  to `:cwd`** — a brief that asked for a tree of its own and got the user's
+  is the agent writing exactly where it was told not to. **The main
+  worktree, found through the common dir**, because `:cwd` may itself be a
+  worktree and trees made from its toplevel would nest; and the exclude is
+  asked of `git check-ignore` rather than read off the file, so an entry
+  agent-shell or the user made counts. **The name is the key slugged, kept
+  from the end**, plus a random pair: mechanical, so nothing parses a key
+  for what it means, and the end because that is where the number is. And
+  **a worktree that outlives a failed start is left and named** — removing
+  a working tree is not a failed launch's to do — with the path *leading*
+  the line, clipped from the left, since a log line is clipped from the
+  right and would otherwise keep only the repository. Git runs through
+  `process-file` with an argv, so nothing a producer wrote reaches a shell.
+  It is **asked about off the menu** (`agent-river-launch--confirm-p` names
+  it) and not on it: a menu choice is already the deliberate act, and a
+  worktree is cheap and reversible where the process is not.
 - **Quoting producer text is a launch concern, not a GitHub one**
   (`agent-river-launch-quote`, moved here from `agent-river-gh.el`). A brief
   that embeds an artifact's own text — a body, a title, a branch a fork
