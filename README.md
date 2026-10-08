@@ -952,7 +952,8 @@ starting an agent **beside a session**, in the directory it works in —
 ```
 
 `M-x agent-river-launch-session` on a block line or in an agent-shell buffer
-starts a *new* session there. Its templates read the session — `{label}`,
+starts a *new* session there, and always asks what it is to do: a menu of
+these briefs, ending in `Own prompt…` for one typed in. Its templates read the session — `{label}`,
 `{session}`, `{cwd}`, `{task}` — and it never makes a worktree, since the
 changes are uncommitted in the session's own tree.
 

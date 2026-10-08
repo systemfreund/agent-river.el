@@ -907,35 +907,56 @@ changes it was started to look at."
             (agent-river-launch--offers record))))
 
 ;;;###autoload
+(defconst agent-river-launch--own-prompt "Own prompt…"
+  "The menu entry `agent-river-launch-session' reads a prompt for.")
+
+(defun agent-river-launch--session-choose (offers record)
+  "Return the offer chosen from OFFERS, or one built from a prompt typed in.
+
+Always a menu, a single brief included: this is a launcher, and what the
+new agent is to do is the question, not a default.  The last entry reads
+a prompt, expanded against RECORD like any template."
+  (let* ((names (append (mapcar (lambda (offer) (plist-get (car offer) :name))
+                                offers)
+                        (list agent-river-launch--own-prompt)))
+         (name (completing-read "Start beside it: " names nil t)))
+    (if (not (equal name agent-river-launch--own-prompt))
+        (agent-river-launch--pick offers name)
+      (let ((prompt (agent-river-launch--field (read-string "Prompt: ") record)))
+        (unless prompt (user-error "Nothing to say"))
+        (cons (list :name agent-river-launch--own-prompt)
+              (list :prompt prompt
+                    :cwd (alist-get 'cwd (plist-get record :context))))))))
+
+;;;###autoload
 (defun agent-river-launch-session (session &optional brief-name)
-  "Start a new agent in the directory SESSION works in, briefed as BRIEF-NAME.
+  "Start a new agent in the directory SESSION works in.
 
 SESSION is the one at point -- a block line, an agent-shell buffer --
-and is asked for anywhere else.  Asks before it starts anything, unless
-the brief was just picked out of several by name, which is the deliberate
-act the question would be asking for."
+and is asked for anywhere else.  What the agent is told is picked from a
+menu of `agent-river-launch-session-briefs' or typed in, and picking it
+is the confirmation.  BRIEF-NAME names a brief from code instead, which
+proves nothing about intent and so is asked about first."
   (interactive (list (or (agent-river-session-at-point)
                          (agent-river--read-session))))
   (let* ((record (agent-river-launch--session-record session))
          (label (plist-get record :name))
-         (cwd (alist-get 'cwd (plist-get record :context)))
-         (offers (agent-river-launch--session-offers record)))
+         (cwd (alist-get 'cwd (plist-get record :context))))
     (cond
      ((null (agent-river-launch--launcher))
       (user-error "%s" (agent-river-launch--refusal record nil)))
-     ((null agent-river-launch-session-briefs)
-      (user-error "Nothing to say: set `agent-river-launch-session-briefs' first"))
-     ;; Started elsewhere, the agent would review some other tree.
-     ((null cwd) (user-error "Where %s works is not known" label))
-     ((null offers) (user-error "No session brief has anything to say about %s" label)))
-    (let* ((picked (and (null brief-name) (cdr offers)))
-           (offer (agent-river-launch--pick offers brief-name))
+     ;; Started elsewhere, the agent would look at some other tree.
+     ((null cwd) (user-error "Where %s works is not known" label)))
+    (let* ((offers (agent-river-launch--session-offers record))
+           (offer (if brief-name
+                      (agent-river-launch--pick offers brief-name)
+                    (agent-river-launch--session-choose offers record)))
            (chosen (plist-get (car offer) :name)))
-      (if (not (or picked
-                   (y-or-n-p (format "Start %s in %s, beside %s (%s)? "
-                                     agent-river-launch-launcher
-                                     (abbreviate-file-name cwd) label
-                                     (or chosen "?")))))
+      (if (and brief-name
+               (not (y-or-n-p (format "Start %s in %s, beside %s (%s)? "
+                                      agent-river-launch-launcher
+                                      (abbreviate-file-name cwd) label
+                                      chosen))))
           (message "agent-river: not started")
         (condition-case err
             (progn
@@ -943,8 +964,7 @@ act the question would be asking for."
                        (append (list :key session :name label) (cdr offer)))
               (agent-river-log "artifact"
                                (agent-river--log-text
-                                (format "started %s in %s"
-                                        (or chosen "?")
+                                (format "started %s in %s" chosen
                                         (agent-river-launch--shown-path cwd)))
                                (agent-river--log-text label))
               (message "agent-river: started"))

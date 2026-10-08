@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (408 tests). -L . is required: the tests require all four .el files.
+# Full suite (410 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1164,6 +1164,10 @@ before the deletion, so that deferring is not the same as forgetting.
   And **which session is asked, never guessed** (`agent-river-session-at-point`,
   else `agent-river--read-session`). Nothing is linked afterwards — there is
   no artifact to reach — so it pushes nothing for `--resolve-pending`.
+  **It is a launcher, so it always asks what** — a menu even for a single
+  brief, with a last entry that reads a prompt (expanded like any
+  template). Picking one is the confirmation; a brief named from code
+  proves nothing about intent and is asked about with `y-or-n-p`.
 - **The model is the brief's to name** (`:config`,
   `agent-river-launch--shell-config`). A prompt is worth little without the
   configuration it is said under, and `agent-river-launch-shell-config` is

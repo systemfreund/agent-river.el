@@ -5496,12 +5496,14 @@ answered here, which is what lets the argv be the thing asserted."
       (list (list :name "Ship it" :prompt "/ship-it"
                   ;; A worktree would not have the uncommitted changes.
                   :worktree t :domain 'pr))
-    (let (asked)
-      (cl-letf (((symbol-function 'y-or-n-p)
-                 (lambda (q &rest _) (setq asked q) t)))
+    (let (offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_ names &rest _) (setq offered names) "Ship it"))
+                ((symbol-function 'y-or-n-p) (lambda (&rest _) (error "asked"))))
         (agent-river-launch-session "s1"))
-      ;; One brief and nothing chosen: starting a process is asked first.
-      (should (string-match-p "beside alpha (Ship it)" asked)))
+      ;; A menu even for one brief -- this is a launcher, and what the agent
+      ;; is to do is the question -- and picking is the confirmation.
+      (should (equal offered (list "Ship it" agent-river-launch--own-prompt))))
     (let ((brief (car agent-river-launch-test--started)))
       (should (equal (plist-get brief :prompt) "/ship-it"))
       (should (equal (plist-get brief :cwd) "/work/tree"))
@@ -5518,6 +5520,32 @@ answered here, which is what lets the argv be the thing asserted."
       (agent-river-launch-session "s1"))
     (should (equal (plist-get (car agent-river-launch-test--started) :prompt)
                    "explain fix the spinner"))))
+
+(ert-deftest agent-river-launch-test-a-prompt-may-be-typed-in ()
+  ;; No brief needed at all: the last entry reads one, and it is a template
+  ;; like any other.
+  (agent-river-launch-test--beside nil
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) agent-river-launch--own-prompt))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) "look again at {task}")))
+      (agent-river-launch-session "s1"))
+    (let ((brief (car agent-river-launch-test--started)))
+      (should (equal (plist-get brief :prompt) "look again at fix the spinner"))
+      (should (equal (plist-get brief :cwd) "/work/tree")))
+    ;; And nothing typed is nothing started.
+    (setq agent-river-launch-test--started nil)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) agent-river-launch--own-prompt))
+              ((symbol-function 'read-string) (lambda (&rest _) "  ")))
+      (should-error (agent-river-launch-session "s1") :type 'user-error))
+    (should-not agent-river-launch-test--started)))
+
+(ert-deftest agent-river-launch-test-a-brief-named-from-code-is-asked-about ()
+  (agent-river-launch-test--beside (list (list :name "Ship it" :prompt "/ship-it"))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+      (agent-river-launch-session "s1" "Ship it"))
+    (should-not agent-river-launch-test--started)))
 
 (ert-deftest agent-river-launch-test-a-session-with-no-known-tree-starts-nothing ()
   ;; Started in `default-directory' instead, the agent would review some
