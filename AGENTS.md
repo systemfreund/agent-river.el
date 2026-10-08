@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (404 tests). -L . is required: the tests require all four .el files.
+# Full suite (408 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1148,6 +1148,22 @@ before the deletion, so that deferring is not the same as forgetting.
   because `replace-regexp-in-string` reads the match data *after* the
   function returns and the quoting matches strings of its own — unguarded,
   a quoted cell was spliced into the middle of its own placeholder.
+- **An agent can be started beside a session, in its tree**
+  (`agent-river-launch-session`, `agent-river-launch-session-briefs`).
+  Local changes have no record — they are wherever a session left them, on
+  a branch or not — so the subject is the session and the place its working
+  directory, and what starts is a *new* session there: a second pair of eyes,
+  `/ship-it` before anything is published. A list of its own rather than an
+  `:on` key in `agent-river-launch-briefs`, because the subject differs: the
+  templates read the session (`{label}`, `{session}`, `{cwd}`, `{task}`), and
+  one list carrying either would have every entry begin by asking which it
+  had. Three things it owes. **No worktree, whatever the entry says**: the
+  changes are uncommitted in the session's own tree, and a fresh one would
+  not have them. **No tree known is no launch**, since `default-directory`
+  in its place is some other tree the agent would review and say nothing of.
+  And **which session is asked, never guessed** (`agent-river-session-at-point`,
+  else `agent-river--read-session`). Nothing is linked afterwards — there is
+  no artifact to reach — so it pushes nothing for `--resolve-pending`.
 - **The model is the brief's to name** (`:config`,
   `agent-river-launch--shell-config`). A prompt is worth little without the
   configuration it is said under, and `agent-river-launch-shell-config` is

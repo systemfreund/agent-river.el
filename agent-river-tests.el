@@ -5470,6 +5470,66 @@ answered here, which is what lets the argv be the thing asserted."
       (should (equal (plist-get (car agent-river-launch-test--started) :prompt)
                      "/ship-it")))))
 
+;;; Starting an agent beside a session
+
+(defmacro agent-river-launch-test--beside (briefs &rest body)
+  "Run BODY with session s1 working in /work/tree and BRIEFS as session briefs."
+  (declare (indent 1))
+  `(agent-river-spool-test--with
+     (let ((agent-river-launch-launchers (list (agent-river-launch-test--launcher)))
+           (agent-river-launch-launcher "fake")
+           (agent-river-launch-session-briefs ,briefs))
+       (agent-river-fold (agent-river-state "s1" "alpha")
+                         (agent-river--event "prompt" '((session_id . "s1")
+                                                        (cwd . "/work/tree")
+                                                        (prompt . "fix the spinner"))))
+       ,@body)))
+
+(ert-deftest agent-river-launch-test-a-session-is-read-as-a-record ()
+  (agent-river-launch-test--beside nil
+    (let ((record (agent-river-launch--session-record "s1")))
+      (should (equal (agent-river-launch-expand "{label} {session} {cwd} {task}" record)
+                     "alpha s1 /work/tree fix the spinner")))))
+
+(ert-deftest agent-river-launch-test-a-new-agent-starts-in-the-sessions-tree ()
+  (agent-river-launch-test--beside
+      (list (list :name "Ship it" :prompt "/ship-it"
+                  ;; A worktree would not have the uncommitted changes.
+                  :worktree t :domain 'pr))
+    (let (asked)
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (q &rest _) (setq asked q) t)))
+        (agent-river-launch-session "s1"))
+      ;; One brief and nothing chosen: starting a process is asked first.
+      (should (string-match-p "beside alpha (Ship it)" asked)))
+    (let ((brief (car agent-river-launch-test--started)))
+      (should (equal (plist-get brief :prompt) "/ship-it"))
+      (should (equal (plist-get brief :cwd) "/work/tree"))
+      (should-not (plist-get brief :worktree)))
+    ;; There is no artifact to link the new session to.
+    (should-not agent-river-launch--launched)))
+
+(ert-deftest agent-river-launch-test-a-brief-picked-from-several-is-not-asked-again ()
+  (agent-river-launch-test--beside
+      (list (list :name "Ship it" :prompt "/ship-it")
+            (list :name "Explain" :prompt "explain {task}"))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Explain"))
+              ((symbol-function 'y-or-n-p) (lambda (&rest _) (error "asked"))))
+      (agent-river-launch-session "s1"))
+    (should (equal (plist-get (car agent-river-launch-test--started) :prompt)
+                   "explain fix the spinner"))))
+
+(ert-deftest agent-river-launch-test-a-session-with-no-known-tree-starts-nothing ()
+  ;; Started in `default-directory' instead, the agent would review some
+  ;; other tree and say nothing of it.
+  (agent-river-spool-test--with
+    (let ((agent-river-launch-launchers (list (agent-river-launch-test--launcher)))
+          (agent-river-launch-launcher "fake")
+          (agent-river-launch-session-briefs (list (list :name "Ship it" :prompt "/ship-it"))))
+      (agent-river-state "s1" "alpha")
+      (should-error (agent-river-launch-session "s1") :type 'user-error)
+      (should-not agent-river-launch-test--started))))
+
 (ert-deftest agent-river-launch-test-quoting-a-part-ending-in-a-newline-has-no-tail ()
   ;; `split-string' answers a trailing newline with a final empty string, so
   ;; kept it leaves a lone `>' hanging under the quotation.  Only the trailing

@@ -42,6 +42,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'agent-river)
 
@@ -849,6 +850,109 @@ would run -- see `agent-river-launch--confirm-p'."
                                       (format "launch failed: %s"
                                               (error-message-string err))))
              (message "agent-river: launch failed, see the log"))))))))
+
+;;; Starting an agent beside a session -- the tree another agent left
+;;
+;; Local changes have no record: they are wherever a session left them, on
+;; a branch or not.  So the subject here is a session and the place is its
+;; working directory, and what starts is a *new* session there -- a second
+;; pair of eyes on the tree, `/ship-it' before anything is published.
+
+(defcustom agent-river-launch-session-briefs nil
+  "What a new agent may be started on beside an existing session.
+
+Entries are the shape of `agent-river-launch-briefs', and the templates
+are read against the session rather than against a record: `{label}'
+and `{name}' are its label, `{session}' and `{key}' its id, `{cwd}' its
+working directory and `{task}' the prompt it is working on.  `:domain'
+does not apply, and neither does `:worktree': the changes are uncommitted
+in the session's own tree, and a fresh worktree would not have them.
+
+  (setq agent-river-launch-session-briefs
+        (list (list :name \"Ship it\" :prompt \"/ship-it\"
+                    :buffer-name \"Ship it @ {label}\")))"
+  :type '(repeat (plist :key-type symbol :value-type sexp)))
+
+(defun agent-river-launch--session-record (session)
+  "Return SESSION as a record the templates can be read against."
+  (let* ((state (gethash session agent-river-registry))
+         (buffer (agent-river--shell-buffer session))
+         (label (or (and state (agent-river-state-label state))
+                    (agent-river--shell-label session)
+                    session))
+         (cwd (or (and state (agent-river-state-cwd state))
+                  (and buffer (buffer-local-value 'default-directory buffer)))))
+    (list :key session :name label
+          :context `((session . ,session) (label . ,label)
+                     ,@(and cwd `((cwd . ,(expand-file-name cwd))))
+                     ,@(when-let* ((task (and state (agent-river-state-task state))))
+                         `((task . ,task)))))))
+
+(defun agent-river-launch--session-offers (record)
+  "Return the session briefs with something to say about RECORD.
+Stripped of any worktree, which would start the agent away from the
+changes it was started to look at."
+  (mapcar (lambda (offer)
+            (let ((brief (copy-sequence (cdr offer))))
+              (cl-remf brief :worktree)
+              (cl-remf brief :worktree-fetch)
+              (cons (car offer) brief)))
+          (let ((agent-river-launch-briefs
+                 (mapcar (lambda (entry)
+                           (let ((entry (copy-sequence entry)))
+                             (cl-remf entry :domain)
+                             (cl-remf entry :worktree)
+                             entry))
+                         agent-river-launch-session-briefs)))
+            (agent-river-launch--offers record))))
+
+;;;###autoload
+(defun agent-river-launch-session (session &optional brief-name)
+  "Start a new agent in the directory SESSION works in, briefed as BRIEF-NAME.
+
+SESSION is the one at point -- a block line, an agent-shell buffer --
+and is asked for anywhere else.  Asks before it starts anything, unless
+the brief was just picked out of several by name, which is the deliberate
+act the question would be asking for."
+  (interactive (list (or (agent-river-session-at-point)
+                         (agent-river--read-session))))
+  (let* ((record (agent-river-launch--session-record session))
+         (label (plist-get record :name))
+         (cwd (alist-get 'cwd (plist-get record :context)))
+         (offers (agent-river-launch--session-offers record)))
+    (cond
+     ((null (agent-river-launch--launcher))
+      (user-error "%s" (agent-river-launch--refusal record nil)))
+     ((null agent-river-launch-session-briefs)
+      (user-error "Nothing to say: set `agent-river-launch-session-briefs' first"))
+     ;; Started elsewhere, the agent would review some other tree.
+     ((null cwd) (user-error "Where %s works is not known" label))
+     ((null offers) (user-error "No session brief has anything to say about %s" label)))
+    (let* ((picked (and (null brief-name) (cdr offers)))
+           (offer (agent-river-launch--pick offers brief-name))
+           (chosen (plist-get (car offer) :name)))
+      (if (not (or picked
+                   (y-or-n-p (format "Start %s in %s, beside %s (%s)? "
+                                     agent-river-launch-launcher
+                                     (abbreviate-file-name cwd) label
+                                     (or chosen "?")))))
+          (message "agent-river: not started")
+        (condition-case err
+            (progn
+              (funcall (plist-get (agent-river-launch--launcher) :launch)
+                       (append (list :key session :name label) (cdr offer)))
+              (agent-river-log "artifact"
+                               (agent-river--log-text
+                                (format "started %s in %s"
+                                        (or chosen "?")
+                                        (agent-river-launch--shown-path cwd)))
+                               (agent-river--log-text label))
+              (message "agent-river: started"))
+          (error
+           (agent-river-log "fail" (agent-river--log-text
+                                    (format "launch failed: %s"
+                                            (error-message-string err))))
+           (message "agent-river: launch failed, see the log")))))))
 
 ;;;###autoload
 (defun agent-river-launch--actions (record)

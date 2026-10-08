@@ -941,6 +941,21 @@ wiring in an untracked `.claude/settings.local.json` does not come along —
 wire the hooks in `~/.claude/settings.json` if launched sessions should have
 them.
 
+Local changes have no artifact behind them, so there is a second list for
+starting an agent **beside a session**, in the directory it works in —
+`/ship-it` on what another agent left before anything is published:
+
+```elisp
+(setq agent-river-launch-session-briefs
+      (list (list :name "Ship it" :prompt "/ship-it"
+                  :buffer-name "Ship it @ {label}")))
+```
+
+`M-x agent-river-launch-session` on a block line or in an agent-shell buffer
+starts a *new* session there. Its templates read the session — `{label}`,
+`{session}`, `{cwd}`, `{task}` — and it never makes a worktree, since the
+changes are uncommitted in the session's own tree.
+
 `M-x agent-river-launch-artifact` asks before it starts anything, and takes an
 optional brief name so the map can reach a particular one without asking twice.
 Launching from the map needs no configuration at all: this file registers
