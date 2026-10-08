@@ -1011,9 +1011,9 @@ disappears or turns out to be something the artifact table already does —
 `agent-river-appeared` answers nil for a key it has, the map's domain
 section is the queue and already lists what nobody has picked up, and
 `agent-river-ended` is what `done/` was for. What pays for all of it is one
-sentence: **a repeat is a line, not an agent.** What would have to come back
-to launch unattended, and what each piece prevents, is issue #37 — written
-before the deletion, so that deferring is not the same as forgetting.
+sentence: **a repeat is a line, not an agent.** Launching unattended is
+deliberately not built: #37 records what would have to come back for it
+and what each piece prevents, and is closed as not planned.
 
 - **The spool is the only door**, and what makes it worth keeping when the
   ledger goes is that it needs no Emacs running: a cron poller, a webhook
@@ -1094,9 +1094,8 @@ before the deletion, so that deferring is not the same as forgetting.
   tick, so `issue:owner/repo#42` and a second sighting is the same line.
   There was an occasion-shaped key here once, pairing the object with the
   moment it moved, and it was for the launcher that would otherwise never
-  act twice on one issue — it went with the launcher. Getting it back is
-  part of #37, and the open question there is where an occasion lives once
-  the subject is the object.
+  act twice on one issue — it went with the launcher, and with unattended
+  launching not being built (#37) there is nothing that needs it back.
 - **There is no `:cwd` on a spec.** Where an agent would be started is not a
   property of the thing it would work on, and this package never reads a
   value out of a context — so a source that knows a working tree puts it in

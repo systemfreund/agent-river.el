@@ -30,9 +30,9 @@
 ;; brief may name its own `:config', so "review this PR" and "rebase this PR"
 ;; can be different prompts under different models.
 ;;
-;; A person decides, every time.  What it would take to decide without one --
-;; a durable ledger, occasion-shaped keys, matches and gates and a budget and
-;; a refusal log to calibrate on -- is issue #37, and none of it is here.
+;; A person decides, every time, and deciding without one is deliberately
+;; not built: a durable ledger, occasion-shaped keys, matches and gates and
+;; a budget would all be its price (issue #37, closed as not planned).
 ;;
 ;; This file requires nothing of `agent-river-spool.el' and is required by
 ;; nothing in it.  They were one file while an agent finishing was the

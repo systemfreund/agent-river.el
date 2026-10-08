@@ -984,8 +984,9 @@ where a headless CLI can be *told* one and answers nil. It is what links the
 session to the artifact it was started for, so the two are related on the
 map without anybody recording it.
 
-There are no rules, gates or budgets here — a person decides every launch.
-What it would take to decide without one is issue #37.
+There are no rules, gates or budgets here — a person decides every launch,
+and that is deliberate: launching unattended is not going to be built (#37,
+closed).
 
 ### GitHub as a source
 
