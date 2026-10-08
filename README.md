@@ -770,6 +770,11 @@ with a thumb — `agent-river-approvals-mode` chains onto agent-shell's
 `agent-shell-permission-responder-function`. A pending approval is a
 current-state fact and is **not folded**: it stops being true the moment
 somebody presses a button in the session buffer, which nothing here would hear.
+What *is* folded is that a question was put and how it ended: each one becomes
+an artifact in the `ask` domain, keyed `ask:SESSION/REQUEST-ID`, with
+`asked-by` in its context and, once it is over, an `outcome` of `answered`
+(plus the `option` taken), `cancelled` or `abandoned`. The domain is the
+direction — what the user owes — so the asking session does not reach it.
 
 This is the one gesture in the package that relays something back to a session
 on the user's behalf; it is off by default, and the gesture that turns it on is

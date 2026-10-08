@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (387 tests). -L . is required: the tests require all four .el files.
+# Full suite (395 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -328,7 +328,10 @@ These are load-bearing; the tests enforce most of them.
   session's table already says everything true of it, and a second copy is
   only a way for the two to disagree. What belongs there is what the event
   stream could never have produced: something declared in from outside, the
-  same rule `agent-river-note` follows one subject over.
+  same rule `agent-river-note` follows one subject over. The `ask` records
+  (below, under Approvals) are derived from the stream and keep the rule's
+  reason rather than its letter: nothing else records a question that has
+  been answered, so they are no second copy of anything.
 - **Appearing is the key entering the table, not the event arriving.**
   `agent-river-observe-artifact` returns the artifact on first sight and nil
   on every repeat, which is the dedup answer given by the table rather than
@@ -687,6 +690,33 @@ them is waiting and for what is the question the HUD exists to answer.
   read, the way `buffer-modified-p` is asked rather than noted. What *is*
   point-in-time is that the question was put, and that gets a log line
   (`ask`, `?`). No struct slot, so a reload does not demand a reset.
+- **What was asked, and how it ended, is an `ask` artifact**
+  (`agent-river--ask-declare`, `agent-river--ask-end`; #31). The offers
+  table forgets a question the moment it is answered, and the two
+  point-in-time halves — put at T, ended at T' by this move — are what a
+  ledger of what is owed is made of. Five things it owes. **The domain is
+  the direction**: `ask` is what the *user* owes, so the asking session goes
+  in the context (`asked-by`) and **reaches nothing** — a reach says who is
+  on a record, and the asker on it would make a question waiting on the user
+  read as picked up, with `>` stopping on a line no agent can act on. The
+  user is not a party and gets no pseudo-session, for the reason a subagent
+  is not a session. **The key carries the session**
+  (`ask:SESSION/REQUEST-ID`), because a request id is unique only within its
+  connection — `agent-river-call`'s reason. **The outcome is measured, never
+  judged**: `answered` with the option's name, `cancelled`, or `abandoned`
+  when `clean-up` takes a session with the question still open — nobody can
+  answer it then, and left open it would stand in the section that says
+  what the user owes. The option's name is read off the offer *before* the
+  entry goes, since the response names it by id alone; where the responder
+  never saw the options the id is the answer. **Declared without a line**,
+  since the `ask` line beside it already says it, and **ended with one**,
+  which the answer never had — which is why `ask` is in
+  `agent-river-notable-kinds`: the ending is an `artifact` line, and `>`
+  stopping on the answer while passing over the question is the wrong way
+  round. And **the live table still wins for anything that acts**: these
+  records say what was asked, `agent-river--offer-live-p` says what may
+  still be answered. A question with no record — put before the mode was on
+  — is not ended, because ending it would have to create it.
 - **Liveness is agent-shell's answer, not ours** (`agent-river--offer-live-p`).
   It clears `:permission-request-id` from the tool call when it answers and
   documents that consumers may read it that way; our table is the second

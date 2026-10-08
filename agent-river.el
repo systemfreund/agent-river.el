@@ -2905,6 +2905,53 @@ request must not be able to stop one being asked."
     (dolist (id stale) (remhash id agent-river--offers))
     stale))
 
+;; The point-in-time halves of a permission request, kept: that it was put
+;; and how it ended.  `agent-river--offers' stays the account of what is
+;; open now, and anything that acts asks that; these records say what was
+;; asked and what became of it.  The domain is the direction -- `ask' is
+;; what the user owes -- so the asking session goes in the context and
+;; reaches nothing: a reach says who is on a record, and nobody but the
+;; user can be on this one.
+
+(defun agent-river--ask-key (session id)
+  "Return the artifact key for SESSION's permission request ID.
+The id is unique only within the session's connection, hence the prefix."
+  (format "ask:%s/%s" session id))
+
+(defun agent-river--ask-declare (session offer)
+  "Declare SESSION's question OFFER as an `ask' artifact.
+No :text: the `ask' line written beside this already says it."
+  (agent-river-appeared (agent-river--ask-key session (plist-get offer :id))
+                        :domain 'ask
+                        :name (or (plist-get offer :title) "?")
+                        :context `((asked-by . ,session))))
+
+(defun agent-river--ask-end (session id outcome &optional option)
+  "End SESSION's question ID with OUTCOME, a symbol, naming OPTION if any.
+
+A question with no record is left alone -- one put before the mode was on
+was never declared, and ending it would have to create it.  So is one
+already ended, so a repeated response cannot write a second verdict."
+  (let ((key (agent-river--ask-key session id)))
+    (when-let* ((artifact (gethash key agent-river-artifacts)))
+      (unless (agent-river-artifact-gone artifact)
+        (agent-river-observe-artifact
+         (list :kind "context" :key key
+               :context `((outcome . ,outcome)
+                          ,@(and option `((option . ,option))))))
+        (agent-river-ended key (if option
+                                   (format "%s: %s" outcome option)
+                                 (symbol-name outcome)))))))
+
+(defun agent-river--offer-option-name (offer option-id)
+  "Return the name OFFER gives OPTION-ID, or OPTION-ID where it gives none.
+The responder may never have seen the options; the id still says which."
+  (or (alist-get :option (seq-find (lambda (option)
+                                     (equal (alist-get :option-id option)
+                                            option-id))
+                                   (plist-get offer :options)))
+      option-id))
+
 (defun agent-river--attend (event)
   "Track the permission requests of the current buffer's session from EVENT.
 
@@ -2932,6 +2979,7 @@ most sessions in it."
            ;; which reads the table above.
            (agent-river-log "ask" (agent-river--offer-text offer)
                             (agent-river--shell-label session))
+           (agent-river--ask-declare session offer)
            ;; The block carries the open question ahead of everything
            ;; measured on the line, so it has to be redrawn for one.
            (agent-river--redraw-block)
@@ -2942,11 +2990,25 @@ most sessions in it."
            (agent-river--approval-refresh))))
       ('permission-response
        (when-let* ((id (alist-get :request-id data)))
-         (remhash id agent-river--offers)
+         ;; Read before it goes: the event names the option by id alone.
+         (let* ((offer (gethash id agent-river--offers))
+                (asker (or (plist-get offer :session) session)))
+           (remhash id agent-river--offers)
+           (when asker
+             (if (alist-get :cancelled data)
+                 (agent-river--ask-end asker id 'cancelled)
+               (agent-river--ask-end
+                asker id 'answered
+                (agent-river--offer-option-name
+                 offer (alist-get :option-id data))))))
          (agent-river--redraw-block)
          (agent-river--approval-refresh)))
       ('clean-up
-       (when (and session (agent-river--forget-offers session))
+       ;; The session is going, so nobody can answer what it still asks.
+       (when-let* ((session session)
+                   (stale (agent-river--forget-offers session)))
+         (dolist (id stale)
+           (agent-river--ask-end session id 'abandoned))
          (agent-river--redraw-block)
          (agent-river--approval-refresh))))))
 
@@ -4878,11 +4940,15 @@ actually has."
 ;; line is built -- not matched by a regexp over the rendered text, which
 ;; is customisable and would let a rendering change what `n' stops on.
 
-(defcustom agent-river-notable-kinds '("fail" "signal" "note" "artifact")
+(defcustom agent-river-notable-kinds '("fail" "signal" "ask" "note" "artifact")
   "Event kinds `agent-river-next-notable\=' stops on.
 
 The lines someone scanning a long log is looking for: what broke, what the
-agent was told, and what was seen outside the hook stream.  Reasoning and
+agent was told, what it is waiting to be allowed, and what was seen outside
+the hook stream.  `ask\=' has to be here because its answer is: an answer
+ends an `ask\=' artifact, which logs an `artifact\=' line, and a motion that
+stopped on the answer and passed over the question would have it the wrong
+way round.  Reasoning and
 tool calls are the log\='s bulk rather than its landmarks, which is the whole
 distinction this motion exists to make.
 

@@ -2605,6 +2605,7 @@ ID names the request; RESPOND is what its `:respond' calls."
 (ert-deftest agent-river-test-an-open-question-reaches-the-panel ()
   (agent-river-test--with-shell '(("*alpha*" "s1" client))
     (let ((agent-river-registry (make-hash-table :test 'equal))
+          (agent-river-artifacts (make-hash-table :test 'equal))
           (agent-river--offers (make-hash-table :test 'equal))
           (agent-river--responder-before nil))
       (let ((state (agent-river-state "s1" "alpha")))
@@ -2637,6 +2638,7 @@ ID names the request; RESPOND is what its `:respond' calls."
   ;; answers, expressly so consumers can tell the two apart.
   (agent-river-test--with-shell '(("*alpha*" "s1" client))
     (let ((agent-river--offers (make-hash-table :test 'equal))
+          (agent-river-artifacts (make-hash-table :test 'equal))
           (agent-river--responder-before nil)
           (answers nil))
       (agent-river--responder
@@ -2657,6 +2659,122 @@ ID names the request; RESPOND is what its `:respond' calls."
                     (cons (cons :tool-calls (list (cons "call-1" nil)))
                           agent-shell--state)))
       (should-not (agent-river--offer-live-p (gethash "req-1" agent-river--offers))))))
+
+
+;;; What was asked, kept -- the `ask' artifacts
+;;
+;; The offers table is the live account and forgets a question the moment
+;; it is answered; these records keep that it was put and how it ended.
+
+(defmacro agent-river-test--with-ask (&rest body)
+  "Run BODY with session s1 hosted in a fake shell and empty tables."
+  (declare (indent 0))
+  `(agent-river-test--with-shell '(("*alpha*" "s1" client))
+     (agent-river-test--with-artifacts
+       (let ((agent-river--offers (make-hash-table :test 'equal))
+             (agent-river--responder-before nil))
+         (agent-river-state "s1" "alpha")
+         ,@body))))
+
+(defun agent-river-test--attend (event)
+  "Hand EVENT to `agent-river--attend' in s1's shell buffer."
+  (with-current-buffer (agent-river--shell-buffer "s1")
+    (agent-river--attend event)))
+
+(defun agent-river-test--answer (id &optional option-id cancelled)
+  "Return the `permission-response' event agent-shell emits for ID."
+  (list (cons :event 'permission-response)
+        (cons :data (list (cons :request-id id)
+                          (cons :option-id option-id)
+                          (cons :cancelled cancelled)))))
+
+(ert-deftest agent-river-test-a-question-asked-is-kept-with-its-answer ()
+  (agent-river-test--with-ask
+    (agent-river--responder (agent-river-test--permission))
+    (agent-river-test--attend (agent-river-test--ask "req-1"))
+    (let ((record (agent-river-artifact-at "ask:s1/req-1")))
+      (should record)
+      ;; The domain is the direction: this is what the user owes.
+      (should (eq (plist-get record :domain) 'ask))
+      (should (equal (plist-get record :name) "Run `git push`"))
+      (should (equal (alist-get 'asked-by (plist-get record :context)) "s1"))
+      (should-not (plist-get record :gone))
+      ;; Nobody but the user can be on it, so the asker reaches nothing --
+      ;; a reach would make a question waiting on the user look picked up.
+      (should (= (plist-get record :reached) 0)))
+    ;; Said once: the `ask' line already names it, so declaring adds none.
+    (should (= (with-current-buffer (agent-river--log-buffer)
+                 (how-many "asks: Run" (point-min)))
+               1))
+    (agent-river-test--attend (agent-river-test--answer "req-1" "allow"))
+    (let ((record (agent-river-artifact-at "ask:s1/req-1")))
+      (should (plist-get record :gone))
+      ;; The event names the option by id; the record names it as asked.
+      (should (eq (alist-get 'outcome (plist-get record :context)) 'answered))
+      (should (equal (alist-get 'option (plist-get record :context)) "Allow")))
+    ;; And the answer is in the log, which it never was before.
+    (should (string-match-p "answered: Allow" (agent-river-test--log-text)))))
+
+(ert-deftest agent-river-test-a-cancelled-question-is-not-an-answered-one ()
+  (agent-river-test--with-ask
+    (agent-river--responder (agent-river-test--permission))
+    (agent-river-test--attend (agent-river-test--ask "req-1"))
+    (agent-river-test--attend (agent-river-test--answer "req-1" nil t))
+    (let ((context (plist-get (agent-river-artifact-at "ask:s1/req-1") :context)))
+      (should (eq (alist-get 'outcome context) 'cancelled))
+      (should-not (alist-get 'option context)))))
+
+(ert-deftest agent-river-test-a-question-its-session-leaves-open-is-abandoned ()
+  (agent-river-test--with-ask
+    (agent-river--responder (agent-river-test--permission "req-1"))
+    (agent-river-test--attend (agent-river-test--ask "req-1"))
+    (agent-river--responder (agent-river-test--permission "req-2"))
+    (agent-river-test--attend (agent-river-test--ask "req-2"))
+    (agent-river-test--attend (agent-river-test--answer "req-1" "allow"))
+    (agent-river-test--attend (list (cons :event 'clean-up)))
+    ;; The open one can no longer be answered by anybody, and left open it
+    ;; would sit in the section that says what the user owes.
+    (should (eq (alist-get 'outcome (plist-get (agent-river-artifact-at "ask:s1/req-2")
+                                               :context))
+                'abandoned))
+    ;; The answered one keeps its verdict.
+    (should (eq (alist-get 'outcome (plist-get (agent-river-artifact-at "ask:s1/req-1")
+                                               :context))
+                'answered))))
+
+(ert-deftest agent-river-test-a-question-is-ended-once ()
+  (agent-river-test--with-ask
+    (agent-river--responder (agent-river-test--permission))
+    (agent-river-test--attend (agent-river-test--ask "req-1"))
+    (agent-river-test--attend (agent-river-test--answer "req-1" "allow"))
+    (agent-river-test--attend (agent-river-test--answer "req-1" "reject"))
+    (should (equal (alist-get 'option (plist-get (agent-river-artifact-at "ask:s1/req-1")
+                                                 :context))
+                   "Allow"))
+    (should (= (with-current-buffer (agent-river--log-buffer)
+                 (how-many "answered:" (point-min)))
+               1))))
+
+(ert-deftest agent-river-test-an-answer-to-a-question-never-declared-creates-nothing ()
+  ;; Put before the mode was on: there is nothing to end, and ending it
+  ;; would mean creating a record that says only that it is over.
+  (agent-river-test--with-ask
+    (agent-river-test--attend (agent-river-test--answer "req-9" "allow"))
+    (should (= (hash-table-count agent-river-artifacts) 0))))
+
+(ert-deftest agent-river-test-an-answer-without-its-options-names-the-id ()
+  ;; The `permission-request' half alone: the responder never saw options.
+  (agent-river-test--with-ask
+    (agent-river-test--attend (agent-river-test--ask "req-1"))
+    (agent-river-test--attend (agent-river-test--answer "req-1" "allow"))
+    (should (equal (alist-get 'option (plist-get (agent-river-artifact-at "ask:s1/req-1")
+                                                 :context))
+                   "allow"))))
+
+(ert-deftest agent-river-test-a-question-is-worth-stopping-on ()
+  ;; Its answer ends an artifact and so logs a notable line; without `ask'
+  ;; in the list, `>' would stop on the answer and pass over the question.
+  (should (member "ask" agent-river-notable-kinds)))
 
 
 ;;; The approval queue -- the questions, drawn to be answered by thumb
