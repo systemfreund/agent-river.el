@@ -800,6 +800,48 @@ callback that hands over the new session's id once it is in the registry, and
 `say`/`turn` events on `agent-river-observers` carry `:session` and
 `:stop-reason`, so the next step can be decided on how the last turn ended.
 
+A process built on those three, in outline — a reviewer started beside an
+implementor, looping until a review skill's own state file says nothing
+blocks. Every transition comes from the process, the stop reason or that
+file; nothing reads a reply's text:
+
+```elisp
+(defvar my/runs (make-hash-table :test 'equal))   ; implementor -> (:reviewer :waiting :phase)
+
+(defun my/start (implementor)
+  (agent-river-launch-session
+   implementor "Review"                            ; a session brief whose prompt is /review
+   (lambda (reviewer)
+     (puthash implementor (list :reviewer reviewer :waiting reviewer :phase 'review)
+              my/runs))))
+
+(defun my/observe (_state event)
+  (when (member (plist-get event :kind) '("say" "turn"))
+    (maphash
+     (lambda (implementor run)
+       (when (equal (plist-get run :waiting) (plist-get event :session))
+         (let ((reason (plist-get event :stop-reason)))
+           (cond
+            ((and reason (not (equal reason "end_turn"))) (my/stop implementor reason))
+            ((eq (plist-get run :phase) 'review)
+             (pcase (my/verdict implementor)           ; read from the world, never from text
+               ('blocked (agent-river-send implementor (my/findings implementor))
+                         (plist-put run :waiting implementor) (plist-put run :phase 'fix))
+               ('clean (my/stop implementor "clean; publish is a key"))
+               (_ (my/stop implementor "no verdict"))))
+            ((eq (plist-get run :phase) 'fix)
+             (agent-river-send (plist-get run :reviewer) "/review")
+             (plist-put run :waiting (plist-get run :reviewer)) (plist-put run :phase 'review))))))
+     my/runs)))
+
+(add-hook 'agent-river-observers #'my/observe)
+```
+
+What is left out is what makes it yours: `my/verdict`, `my/findings`, a round
+budget, and a `ship:` record on the map (`agent-river-appeared` / `-ended`).
+Nothing of it belongs in this package — see issue #62 for when the plumbing
+would.
+
 ---
 
 # Design notes
