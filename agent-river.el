@@ -3154,6 +3154,96 @@ buffer never reaches it."
     (message "agent-river: %s" (alist-get :option option)))))
 
 
+;;; Sending text into a session -- the second thing that travels back
+;;
+;; `agent-river--respond' relays a decision the user made; this relays words
+;; the user's own code wrote -- a prompt for a session somebody else started,
+;; the next step of a process they are running between two sessions.  Never
+;; this package's opinion: nothing here calls it with text of its own, and
+;; the launch layer calls it with the brief, which is the user's template.
+;;
+;; One place, so the rules for putting text in front of an agent are kept
+;; once: not into an input already holding what a person is typing, and not
+;; into a busy shell.
+
+(declare-function agent-shell--insert-to-shell-buffer "agent-shell")
+(declare-function shell-maker-busy "shell-maker")
+(defvar comint-last-prompt)
+
+(defcustom agent-river-send-tries 60
+  "How many times text is offered to a session, one a second, before giving up.
+
+A session is not ready the moment its buffer exists -- the ACP handshake
+is still running -- and a busy one is mid-turn; there is no readiness
+signal to subscribe to, so the text is offered once a second until it is
+taken.  Giving up says so in the log rather than dropping it silently."
+  :type 'integer)
+
+(defun agent-river--shell-input (buffer)
+  "Return what BUFFER's input area holds, or nil where it has no prompt yet.
+The input is everything after the last prompt, which is where
+`agent-shell--insert-to-shell-buffer' puts text as well."
+  (with-current-buffer buffer
+    (when (and comint-last-prompt (markerp (cdr comint-last-prompt)))
+      (buffer-substring-no-properties
+       (marker-position (cdr comint-last-prompt)) (point-max)))))
+
+(defun agent-river--send-to-buffer (buffer text then tries)
+  "Offer TEXT to the agent-shell in BUFFER, calling THEN with the outcome.
+
+Sent at once where the shell is idle and its input is empty; otherwise
+offered again once a second, TRIES times, and given up on out loud.  THEN
+is called with t when the text went in and nil when it did not.
+
+Busy means wait rather than queue: a prompt enqueued into a shell that has
+never run one is processed when the *current* prompt completes, and a
+shell still shaking hands has no current prompt for it to wait behind.
+An input holding text means wait too: the insert glues onto whatever is
+there, with no separator when it submits, and that text is somebody's.
+
+Returns non-nil when sent now."
+  (let ((sent (and (buffer-live-p buffer)
+                   (condition-case nil
+                       (with-current-buffer buffer
+                         (unless (or (shell-maker-busy)
+                                     (let ((input (agent-river--shell-input buffer)))
+                                       (and input (not (string-blank-p input)))))
+                           (agent-shell--insert-to-shell-buffer
+                            :text text :submit t :no-focus t)
+                           t))
+                     (error nil)))))
+    (cond
+     (sent (when then (funcall then t)) t)
+     ((and (buffer-live-p buffer) (> tries 0))
+      (run-with-timer 1 nil #'agent-river--send-to-buffer
+                      buffer text then (1- tries))
+      nil)
+     (t
+      (agent-river-log "fail"
+                       (agent-river--log-text
+                        (format "%s never took the text offered to it"
+                                (if (buffer-live-p buffer)
+                                    (buffer-name buffer)
+                                  "a dead session"))))
+      (when then (funcall then nil))
+      nil))))
+
+;;;###autoload
+(defun agent-river-send (session text &optional then)
+  "Offer TEXT to SESSION as a prompt, calling THEN with whether it went in.
+
+For a process a user runs between sessions: what travels back is their
+words, never this package's.  SESSION must be hosted by agent-shell --
+the hooks carry nothing in this direction -- and is answered nil at once
+where it is not.  Otherwise see `agent-river--send-to-buffer' for when
+the text goes in and when it is given up on; the answer there arrives
+through THEN, since a busy session is waited for rather than refused."
+  (let ((buffer (agent-river--shell-buffer session)))
+    (if (not (buffer-live-p buffer))
+        (progn (when then (funcall then nil)) nil)
+      (agent-river--send-to-buffer buffer text then agent-river-send-tries))))
+
+
 ;;; The approval queue -- the questions, on whatever screen is to hand
 ;;
 ;; The panel says which session is holding a door open; this is the buffer

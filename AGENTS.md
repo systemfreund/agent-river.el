@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (412 tests). -L . is required: the tests require all four .el files.
+# Full suite (414 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -155,13 +155,20 @@ Two ways in, one adapter. The right-hand column exists for the agents
 agent-shell hosts that have no hooks; it translates into the payload shape the
 hooks report rather than building events of its own, so everything from
 `agent-river--event` down is shared. Only the hooks can answer the agent —
-nothing this package *observes* is ever put back on the stream. The one
-thing that travels the other way is not ours: `agent-river--respond` relays a
+nothing this package *observes* is ever put back on the stream. What
+travels the other way is never ours: `agent-river--respond` relays a
 permission choice the user made, to the session the line names, and only
-while `agent-river-approvals-mode` is on (see **Approvals** below). Both
-gestures that can make that call — `agent-river-answer` in the HUD and a row
-of the approval queue — go through that one function, so they cannot come to
-different conclusions about when a question may still be answered.
+while `agent-river-approvals-mode` is on (see **Approvals** below); and
+`agent-river-send` relays words the user's own code wrote — the brief a
+launch hands a session, the next step of a process they run between two
+sessions (#61). Each is the one place its kind of thing is sent: both
+gestures that can answer a question — `agent-river-answer` in the HUD and a
+row of the approval queue — go through `--respond`, so they cannot come to
+different conclusions about when a question may still be answered; and
+everything that puts text in front of an agent goes through `--send-to-buffer`,
+so the rules for that — never into an input holding what a person is typing,
+never into a busy shell, waited for rather than refused, given up on out
+loud — are kept once.
 
 A third way in, narrower again, for the one thing neither of those carries:
 
@@ -1323,7 +1330,12 @@ and what each piece prevents, and is closed as not planned.
   subject over. It is late because the session id does not exist when the
   process starts, which is the `:launch`/`:resolve` split: agent-shell
   announces its id after the handshake, a headless CLI can be told one
-  before it starts.
+  before it starts. **What a resolved launch does is its record's `:then`**
+  — the reach for an artifact launch, the caller's `on-session` for
+  `agent-river-launch-session` — so one timer serves both: the wait is the
+  same, only what the session is handed to differs, and a caller that
+  started a session beside another learns who to `agent-river-send` to
+  without a second copy of the "named is not heard from" wait.
 - **Named is not the same as heard from.** The reach waits for the session
   to be in the registry as well as to have an id: agent-shell sets the id at
   the handshake and the hooks fold that session's first event afterwards,

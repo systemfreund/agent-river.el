@@ -110,7 +110,6 @@ and is the brief's."
 
 (declare-function agent-shell--start "agent-shell")
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
-(declare-function shell-maker-busy "shell-maker")
 (declare-function agent-shell-anthropic-make-claude-code-config "agent-shell-anthropic")
 (declare-function shell-maker-set-buffer-name "shell-maker")
 (defvar agent-shell--state)
@@ -212,15 +211,6 @@ reads it to say the launcher cannot run here."
         (setf (alist-get :default-config-options config) (lambda () options))
         config))))
 
-(defcustom agent-river-launch-shell-tries 60
-  "How many times a launched shell is offered its prompt, one a second.
-
-The session is not ready the moment the buffer exists -- the ACP handshake
-is still running -- and there is no readiness signal to subscribe to, so
-the prompt is offered once a second until it is taken.  Giving up says so
-in the log rather than leaving a started agent sitting with nothing to do."
-  :type 'integer)
-
 (defun agent-river-launch--shell-available-p ()
   "Return non-nil if agent-shell can host a session here."
   (and (fboundp 'agent-shell--start)
@@ -232,27 +222,11 @@ in the log rather than leaving a started agent sitting with nothing to do."
            (and (funcall agent-river-launch-shell-config) t)
          (error nil))))
 
-(defun agent-river-launch--shell-send (buffer text tries)
-  "Offer TEXT to the agent-shell in BUFFER, retrying up to TRIES times.
-
-Busy means not ready rather than queue it: a prompt enqueued into a shell
-that has never run one is processed when the *current* prompt completes,
-and a shell still shaking hands has no current prompt for it to wait
-behind."
-  (when (buffer-live-p buffer)
-    (unless (condition-case nil
-                (with-current-buffer buffer
-                  (unless (shell-maker-busy)
-                    (agent-shell--insert-to-shell-buffer
-                     :text text :submit t :no-focus t)
-                    t))
-              (error nil))
-      (if (> tries 0)
-          (run-with-timer 1 nil #'agent-river-launch--shell-send
-                          buffer text (1- tries))
-        (agent-river-log "fail" (agent-river--log-text
-                                 (format "launch: %s never took its prompt"
-                                         (buffer-name buffer))))))))
+(defun agent-river-launch--shell-send (buffer text)
+  "Offer TEXT to the launched shell in BUFFER, through `agent-river-send\='s core.
+The one call that sends the brief, which is the user\='s template and not
+a word of this package\='s."
+  (agent-river--send-to-buffer buffer text nil agent-river-send-tries))
 
 (defun agent-river-launch--shell-config (brief)
   "Return the agent-shell config BRIEF asked for, or the configured default.
@@ -494,8 +468,7 @@ is a working tree, and removing one is not a failed launch's to do."
                  (format "worktree left at %s: " (agent-river-launch--shown-path worktree))
                "")))
     (agent-river-launch--shell-name buffer (plist-get brief :buffer-name))
-    (agent-river-launch--shell-send buffer (plist-get brief :prompt)
-                                    agent-river-launch-shell-tries)
+    (agent-river-launch--shell-send buffer (plist-get brief :prompt))
     buffer))
 
 (defun agent-river-launch--shell-resolve (handle)
@@ -545,9 +518,11 @@ prompted to confirm something that then failed."
 
 (defvar agent-river-launch--launched nil
   "Launches still waiting for a session, newest first.
-Each is (:key :at :launcher :handle).  A record exists only to ask its
-handle what session it became, so that the session can be linked to the
-artifact it was started for; having answered, it is dropped.")
+Each is (:name :at :launcher :handle :then).  A record exists only to ask
+its handle what session it became and hand that to `:then' -- the reach
+for an artifact launch, the caller's `on-session' for one beside a
+session; having answered, it is dropped.  `:name' is what the log calls
+it.")
 
 (defconst agent-river-launch--resolve-window 300
   "Seconds a launch is asked what session it became before it is given up on.
@@ -575,7 +550,11 @@ and goes; one that has not resolved inside
 `agent-river-launch--resolve-window' is said to have never become a
 session, out loud -- a launcher that starts something which never
 announces itself is the failure this layer is least able to see, since
-nothing afterwards contradicts it."
+nothing afterwards contradicts it.
+
+What a resolved launch does is its record's `:then', which is why one
+timer serves both the artifact launch and the one beside a session: the
+wait is the same, only what the session is handed to differs."
   (let (keep)
     (dolist (record agent-river-launch--launched)
       (let* ((launcher (seq-find (lambda (l)
@@ -596,15 +575,16 @@ nothing afterwards contradicts it."
           ;; Guarded, and more strictly than the rest of this file: this
           ;; runs on a repeating timer with no user in front of it, so a
           ;; throw here would skip the `setq' below and repeat forever.  A
-          ;; reach that fails is reported and the record dropped anyway.
-          (condition-case err
-              (agent-river-reach (plist-get record :key) session)
-            (error
-             (agent-river-log
-              "fail" (agent-river--log-text
-                      (format "launch: %s could not be linked to %s (%s)"
-                              (plist-get record :key) session
-                              (error-message-string err)))))))
+          ;; `:then' that fails is reported and the record dropped anyway.
+          (when-let* ((then (plist-get record :then)))
+            (condition-case err
+                (funcall then session)
+              (error
+               (agent-river-log
+                "fail" (agent-river--log-text
+                        (format "launch: %s became %s, which failed (%s)"
+                                (plist-get record :name) session
+                                (error-message-string err))))))))
          ;; Nothing to ask: a launcher with no `:resolve' assigned the id
          ;; up front, so there's nothing to wait for.  Settled, not failed.
          ((null resolve) nil)
@@ -614,7 +594,7 @@ nothing afterwards contradicts it."
           (agent-river-log
            "fail" (agent-river--log-text
                    (format "launch: %s never became a session"
-                           (plist-get record :key)))))
+                           (plist-get record :name)))))
          (t (push record keep)))))
     (setq agent-river-launch--launched (nreverse keep))
     (unless agent-river-launch--launched
@@ -833,10 +813,14 @@ would run -- see `agent-river-launch--confirm-p'."
                              (cdr offer))))
           (condition-case err
               (let ((handle (funcall (plist-get launcher :launch) brief)))
-                (push (list :key key
+                (push (list :name key
                             :at (current-time)
                             :launcher (plist-get launcher :name)
-                            :handle handle)
+                            :handle handle
+                            ;; The edge, recorded by the one caller holding
+                            ;; both ends of it.
+                            :then (lambda (session)
+                                    (agent-river-reach key session)))
                       agent-river-launch--launched)
                 (agent-river-launch--ensure-resolve-timer)
                 (agent-river-log "artifact"
@@ -929,14 +913,20 @@ a prompt, expanded against RECORD like any template."
                     :cwd (alist-get 'cwd (plist-get record :context))))))))
 
 ;;;###autoload
-(defun agent-river-launch-session (session &optional brief-name)
+(defun agent-river-launch-session (session &optional brief-name on-session)
   "Start a new agent in the directory SESSION works in.
 
 SESSION is the one at point -- a block line, an agent-shell buffer --
 and is asked for anywhere else.  What the agent is told is picked from a
 menu of `agent-river-launch-session-briefs' or typed in, and picking it
 is the confirmation.  BRIEF-NAME names a brief from code instead, which
-proves nothing about intent and so is asked about first."
+proves nothing about intent and so is asked about first.
+
+ON-SESSION, when given, is called with the new session\='s id once it has
+one *and* the registry has heard from it -- the same wait an artifact
+launch makes before linking, since an id alone names a state that is not
+there yet.  It is how a caller that started a session beside this one
+learns who to send to (`agent-river-send\=')."
   (interactive (list (or (agent-river-session-at-point)
                          (agent-river--read-session))))
   (let* ((record (agent-river-launch--session-record session))
@@ -959,9 +949,17 @@ proves nothing about intent and so is asked about first."
                                       chosen))))
           (message "agent-river: not started")
         (condition-case err
-            (progn
-              (funcall (plist-get (agent-river-launch--launcher) :launch)
-                       (append (list :key session :name label) (cdr offer)))
+            (let* ((launcher (agent-river-launch--launcher))
+                   (handle (funcall (plist-get launcher :launch)
+                                    (append (list :key session :name label)
+                                            (cdr offer)))))
+              (push (list :name (format "%s beside %s" chosen label)
+                          :at (current-time)
+                          :launcher (plist-get launcher :name)
+                          :handle handle
+                          :then on-session)
+                    agent-river-launch--launched)
+              (agent-river-launch--ensure-resolve-timer)
               (agent-river-log "artifact"
                                (agent-river--log-text
                                 (format "started %s in %s" chosen

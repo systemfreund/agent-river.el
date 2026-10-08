@@ -780,9 +780,25 @@ an artifact in the `ask` domain, keyed `ask:SESSION/REQUEST-ID`, with
 (plus the `option` taken), `cancelled` or `abandoned`. The domain is the
 direction — what the user owes — so the asking session does not reach it.
 
-This is the one gesture in the package that relays something back to a session
-on the user's behalf; it is off by default, and the gesture that turns it on is
+This is one of two things that travel back to a session, and both are the
+user's: a decision here, and words their own code wrote through
+`agent-river-send`. It is off by default, and the gesture that turns it on is
 what turns it off.
+
+## Sending text to a session (`agent-river-send`)
+
+```elisp
+(agent-river-send "s-review" "/ship-it" (lambda (sent) ...))
+```
+
+Offers TEXT to an agent-shell-hosted session as a prompt. Never into an input
+that already holds what somebody is typing, never into a busy shell — both are
+waited for, once a second up to `agent-river-send-tries`, then given up on with
+a log line; the callback gets `t` or `nil`. This is what a process between two
+sessions is written with: `agent-river-launch-session` takes an `on-session`
+callback that hands over the new session's id once it is in the registry, and
+`say`/`turn` events on `agent-river-observers` carry `:session` and
+`:stop-reason`, so the next step can be decided on how the last turn ended.
 
 ---
 

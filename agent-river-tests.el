@@ -5531,9 +5531,59 @@ answered here, which is what lets the argv be the thing asserted."
     (let ((brief (car agent-river-launch-test--started)))
       (should (equal (plist-get brief :prompt) "/ship-it"))
       (should (equal (plist-get brief :cwd) "/work/tree"))
-      (should-not (plist-get brief :worktree)))
-    ;; There is no artifact to link the new session to.
-    (should-not agent-river-launch--launched)))
+      (should-not (plist-get brief :worktree)))))
+
+(ert-deftest agent-river-launch-test-a-caller-is-told-who-the-new-session-is ()
+  ;; Named is not the same as heard from: the id is set at the handshake and
+  ;; the first event folds afterwards, and a caller about to send to the
+  ;; session needs it to be there.  The same wait an artifact launch makes.
+  (agent-river-launch-test--beside (list (list :name "Ship it" :prompt "/ship-it"))
+    (let ((told nil))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Ship it")))
+        (agent-river-launch-session "s1" nil (lambda (id) (setq told id))))
+      (should (= 1 (length agent-river-launch--launched)))
+      (agent-river-launch--resolve-pending)
+      (should-not told)
+      ;; The fake launcher's handle is the id.  Resolving with no fake
+      ;; registry entry waits; with one it answers and the record goes.
+      (let ((agent-river-launch--launched
+             (mapcar (lambda (r) (plist-put (copy-sequence r) :handle "s-review"))
+                     agent-river-launch--launched)))
+        (agent-river-launch--resolve-pending)
+        (should-not told)
+        (agent-river-state "s-review" "review")
+        (agent-river-launch--resolve-pending)
+        (should (equal told "s-review"))
+        (should-not agent-river-launch--launched)))))
+
+(ert-deftest agent-river-test-text-is-sent-only-into-an-idle-empty-input ()
+  (agent-river-test--with-shell '(("*alpha*" "s1" client))
+    (let ((busy nil) (inserted nil) (outcomes nil)
+          (agent-river-send-tries 0))
+      (cl-letf (((symbol-function 'shell-maker-busy) (lambda () busy))
+                ((symbol-function 'agent-shell--insert-to-shell-buffer)
+                 (lambda (&rest args) (push (plist-get args :text) inserted) t)))
+        (with-current-buffer (agent-river--shell-buffer "s1")
+          (insert "> ")
+          (setq-local comint-last-prompt (cons (copy-marker 1) (copy-marker 3))))
+        ;; Idle, empty input: sent now, and the caller is told.
+        (should (agent-river-send "s1" "/ship-it" (lambda (ok) (push ok outcomes))))
+        (should (equal inserted '("/ship-it")))
+        ;; Busy: not sent, and with no tries left, given up on out loud.
+        (setq busy t)
+        (should-not (agent-river-send "s1" "again" (lambda (ok) (push ok outcomes))))
+        (should (equal inserted '("/ship-it")))
+        (should (string-match-p "never took the text" (agent-river-test--log-text)))
+        ;; Somebody is typing: their text would be glued to the front of ours.
+        (setq busy nil)
+        (with-current-buffer (agent-river--shell-buffer "s1")
+          (goto-char (point-max)) (insert "half a thou"))
+        (should-not (agent-river-send "s1" "again"))
+        (should (equal inserted '("/ship-it")))
+        (should (equal outcomes '(nil t)))
+        ;; A session nobody hosts cannot be sent to at all.
+        (should-not (agent-river-send "nobody" "x" (lambda (ok) (push ok outcomes))))
+        (should (equal (car outcomes) nil))))))
 
 (ert-deftest agent-river-launch-test-a-brief-picked-from-several-is-not-asked-again ()
   (agent-river-launch-test--beside
@@ -6727,7 +6777,7 @@ behind it."
       ;; Dropped and reported: a launch that cannot be linked is still a
       ;; launch that happened.
       (should (null agent-river-launch--launched))
-      (should (string-match-p "could not be linked" (agent-river-test--log-text))))))
+      (should (string-match-p "became s-child, which failed" (agent-river-test--log-text))))))
 
 (ert-deftest agent-river-test-one-artifact-is-looked-up-not-walked-for ()
   ;; The same rendering either way, because there is one renderer: two would
