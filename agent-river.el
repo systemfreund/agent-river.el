@@ -996,6 +996,11 @@ replaying a session's events from the start."
   ;; never reads a value out of it, which lets it hold a ticket body, a
   ;; severity or a URL without this file learning about any of them.
   context
+  ;; The record this one is part of, as a key, or nil.  The one edge between
+  ;; artifacts: a finding of a review run, a build of a pull request.  A
+  ;; slot rather than a context cell because the map draws it, and the map
+  ;; reads no value out of a context.
+  under
   ;; When the key first entered this table.  The fact a dedup asks about, and
   ;; the reason it is a slot rather than derived: "have I seen this one" is not
   ;; answerable from an event stream that only carries the events you kept.
@@ -1090,8 +1095,13 @@ second account this table exists to avoid."
       ;; every pass, and the appearance is the *key* entering the table, not
       ;; this event arriving -- see `agent-river-observe-artifact'.
       (let ((name (plist-get event :name))
-            (context (plist-get event :context)))
+            (context (plist-get event :context))
+            (under (plist-get event :under)))
         (when name (setf (agent-river-artifact-name artifact) name))
+        ;; Settable on a repeat, so a record the core declared -- a
+        ;; question put by a session -- can be hung under a run by whoever
+        ;; knows which run that was.
+        (when under (setf (agent-river-artifact-under artifact) under))
         (when context
           (setf (agent-river-artifact-context artifact)
                 (agent-river--artifact-merge
@@ -1215,7 +1225,9 @@ record under no key can be reached, found, ended or dropped by nobody."
 (defun agent-river-appeared (key &rest props)
   "Record that artifact KEY exists, and return it when that is news.
 
-PROPS is a plist of :domain, :name, :context and :text.  The convenience
+PROPS is a plist of :domain, :name, :context, :under and :text -- :under
+being the key of the record this one is part of, which the map lists it
+beneath.  The convenience
 form of `agent-river-observe-artifact' for the case a producer has almost
 always: something showed up, here is what I know about it, tell me whether
 you had already heard.
@@ -1495,6 +1507,7 @@ outside, right only for as long as somebody kept them in step."
         :domain (agent-river-artifact-domain artifact)
         :name (agent-river-artifact-name artifact)
         :context (copy-alist (agent-river-artifact-context artifact))
+        :under (agent-river-artifact-under artifact)
         :gone (and (agent-river-artifact-gone artifact) t)
         :appeared (agent-river--ago (agent-river-artifact-appeared artifact))
         :ago (agent-river--ago (agent-river-artifact-last artifact))
@@ -6272,25 +6285,47 @@ which is precisely backwards for the case this exists for."
         result)
     ;; What the sessions have reached, so a domain somebody is working in
     ;; sorts by that rather than by when its records last changed.
+    ;; A record drawn under another is that record's, not its section's: a
+    ;; domain holding nothing but children heads no section of its own --
+    ;; whether the children were reached or merely declared.
     (dolist (entry entries)
-      (let ((domain (agent-river--key-domain (plist-get entry :file))))
-        (when domain
+      (let* ((key (plist-get entry :file))
+             (domain (agent-river--key-domain key))
+             (artifact (gethash key agent-river-artifacts)))
+        (when (and domain
+                   (not (and artifact (agent-river--artifact-child-p artifact nil))))
           (puthash domain
                    (agent-river--map-later (gethash domain seen)
                                            (plist-get entry :last))
                    seen))))
     (maphash (lambda (_key artifact)
-               (let ((domain (agent-river-artifact-domain artifact)))
-                 (puthash domain
-                          (agent-river--map-later
-                           (gethash domain seen)
-                           (agent-river-artifact-last artifact))
-                          seen)))
+               (unless (agent-river--artifact-child-p artifact nil)
+                 (let ((domain (agent-river-artifact-domain artifact)))
+                   (puthash domain
+                            (agent-river--map-later
+                             (gethash domain seen)
+                             (agent-river-artifact-last artifact))
+                            seen))))
              agent-river-artifacts)
     (maphash (lambda (domain last)
                (push (cons (agent-river--domain-root domain) last) result))
              seen)
     (agent-river--map-by-last result)))
+
+(defun agent-river--artifact-child-p (artifact root)
+  "Return non-nil when ARTIFACT is drawn beneath its parent in the view ROOT.
+
+Beneath it where the parent is on record and would be drawn in this view:
+every parent is, in the overview, and in a section only one of its own
+domain.  Otherwise the record stands in its section as a root -- a child
+whose parent was dropped, or whose parent sits in a section the zoom is
+not showing, is still a record, and a listing that hid it would be losing
+a thing that arrived."
+  (when-let* ((under (agent-river-artifact-under artifact))
+              (parent (gethash under agent-river-artifacts)))
+    (or (null root)
+        (eq (agent-river-artifact-domain parent)
+            (agent-river--map-domain root)))))
 
 (defun agent-river--domain-parties (domain scope)
   "Return a hash of artifact key to the parties that reached it, in DOMAIN.
@@ -6334,6 +6369,8 @@ the two frames the entries were walked from."
        by-key)
       out)))
 
+(defvar agent-river--map-root)
+
 (defun agent-river--map-entries (root &optional scope)
   "Return the records ROOT's section lists, in alphabetical order.
 
@@ -6359,28 +6396,68 @@ saw it: nothing in the section moves because an agent took a step on
 another line.  Case is ignored and the locale decides, since that is what
 alphabetical means to whoever is reading it; the key breaks a tie, being
 the one thing in the section that is unique."
-  (let* ((domain (agent-river--map-domain root))
-         (parties (and domain (agent-river--domain-parties domain scope)))
-         entries)
+  (let ((domain (agent-river--map-domain root))
+        (parties (make-hash-table :test 'eq))
+        ;; Which records are children is a question about the *view*, not
+        ;; the section: in the overview every parent is drawn, zoomed in
+        ;; only those of the one domain shown.
+        (view agent-river--map-root)
+        entries)
     (when domain
       (maphash
        (lambda (key artifact)
-         (when (eq (agent-river-artifact-domain artifact) domain)
-           (push (list :name key
-                       :parties (gethash key parties)
-                       :missing (and (agent-river-artifact-gone artifact) t)
-                       ;; What the line shows, where the key is machinery and
-                       ;; the name is what a human calls it.
-                       :shown (agent-river-artifact-name artifact))
+         (when (and (eq (agent-river-artifact-domain artifact) domain)
+                    (not (agent-river--artifact-child-p artifact view)))
+           (push (agent-river--map-entry key artifact parties scope view)
                  entries)))
        agent-river-artifacts))
-    (sort entries
-          (lambda (a b)
-            (let ((la (or (plist-get a :shown) (plist-get a :name)))
-                  (lb (or (plist-get b :shown) (plist-get b :name))))
-              (if (string-equal-ignore-case la lb)
-                  (string-lessp (plist-get a :name) (plist-get b :name))
-                (string-collate-lessp la lb nil t)))))))
+    (agent-river--map-sort-entries entries)))
+
+(defun agent-river--map-entry (key artifact parties scope view)
+  "Return the entry for ARTIFACT at KEY, its children beneath it, in VIEW.
+
+PARTIES memoises `agent-river--domain-parties\=' per domain for one
+listing, since a child may be of another domain than its parent and the
+reading is per domain.  `:children\=' are the records declared `:under\='
+this one, in the same order a section lists its own -- a run and its
+findings read the way a section and its records do."
+  (let ((domain (agent-river-artifact-domain artifact)))
+    (unless (gethash domain parties)
+      (puthash domain (agent-river--domain-parties domain scope) parties))
+    (list :name key
+          :parties (gethash key (gethash domain parties))
+          :missing (and (agent-river-artifact-gone artifact) t)
+          ;; What the line shows, where the key is machinery and the name
+          ;; is what a human calls it.
+          :shown (agent-river-artifact-name artifact)
+          :children (agent-river--map-children key parties scope view))))
+
+(defun agent-river--map-children (key parties scope view)
+  "Return the entries of the records declared `:under\=' KEY, in listing order."
+  (let (children)
+    (maphash (lambda (child artifact)
+               (when (and (equal (agent-river-artifact-under artifact) key)
+                          (agent-river--artifact-child-p artifact view))
+                 (push (agent-river--map-entry child artifact parties scope view)
+                       children)))
+             agent-river-artifacts)
+    (agent-river--map-sort-entries children)))
+
+(defun agent-river--map-sort-entries (entries)
+  "Return ENTRIES alphabetically by what the line reads, key breaking a tie."
+  (sort entries
+        (lambda (a b)
+          (let ((la (or (plist-get a :shown) (plist-get a :name)))
+                (lb (or (plist-get b :shown) (plist-get b :name))))
+            (if (string-equal-ignore-case la lb)
+                (string-lessp (plist-get a :name) (plist-get b :name))
+              (string-collate-lessp la lb nil t))))))
+
+(defun agent-river--map-flatten (entries)
+  "Return ENTRIES and every entry beneath them, parents first."
+  (mapcan (lambda (entry)
+            (cons entry (agent-river--map-flatten (plist-get entry :children))))
+          entries))
 
 (defun agent-river--rows-artifact (_root nodes)
   "Return one row per thing known about the artifact each of NODES is.
@@ -6755,7 +6832,7 @@ The markup is left visible.  Hiding it is `markdown-ts-view-mode's own
 default and it looks better on prose, but here the marker is the
 indentation -- hidden, a section and the records under it start in the
 same column and the structure stops being one."
-  (pcase level (1 "# ") (2 "## ") (3 "### ") (_ "- ")))
+  (pcase level (1 "# ") (2 "## ") (3 "### ") (4 "#### ") (5 "##### ") (_ "- ")))
 
 (defun agent-river--map-line (level name parties &optional missing rows)
   "Return one map line: NAME at LEVEL, annotated with PARTIES.
@@ -6869,7 +6946,7 @@ and asking again per entry would put its work behind a keystroke."
   (mapcar (lambda (entry)
             (list :path (plist-get entry :name)
                   :parties (plist-get entry :parties)))
-          entries))
+          (agent-river--map-flatten entries)))
 
 (defun agent-river--map-header (root &optional sections)
   "Return the map's own heading for ROOT.
@@ -6931,6 +7008,43 @@ the buffer."
     (unless found
       (goto-char (point-min))
       (forward-line (1- (max 1 (or (nth 2 here) 1)))))))
+
+(defun agent-river--map-insert-entry (entry level rows)
+  "Insert ENTRY as a heading at LEVEL, its rows and children beneath it.
+
+Rows are detail and wait to be asked for, so a node draws closed until
+somebody says otherwise -- unless it has children, which are the listing
+itself one level down and draw open: a run is what the reader came for,
+and its findings are the run.  One fold covers both, read back by TAB off
+the line rather than derived again, so the toggle cannot disagree with
+what is on screen."
+  (let* ((key (plist-get entry :name))
+         ;; What the line reads.  The key is machinery -- `inc:INC-444' --
+         ;; and the record carries what to call it; a record with no name
+         ;; is read by its key.
+         (label (or (plist-get entry :shown) key))
+         (shown (agent-river--map-shown-rows (gethash key rows)))
+         (children (plist-get entry :children))
+         (open (agent-river--map-folded-p key (and children t))))
+    (insert (propertize
+             (concat (agent-river--map-line
+                      level label
+                      (plist-get entry :parties)
+                      (plist-get entry :missing)
+                      (and (or shown children) (if open 'open 'closed)))
+                     "\n")
+             'agent-river-map-name key
+             'agent-river-map-path key
+             'agent-river-map-open open
+             ;; What `agent-river-map-next-active' stops on.  Read off the
+             ;; parties rather than off the annotation text, so the motion
+             ;; and the reading cannot come apart if the line is ever
+             ;; formatted differently.
+             'agent-river-map-active (and (plist-get entry :parties) t)))
+    (when open
+      (agent-river--map-rows-insert shown key)
+      (dolist (child children)
+        (agent-river--map-insert-entry child (1+ level) rows)))))
 
 (defun agent-river--map-draw ()
   "Redraw the map buffer from the state, if it is still alive.
@@ -6996,7 +7110,7 @@ listing to say nothing."
                                     (agent-river--map-merge-parties
                                      (mapcar (lambda (entry)
                                                (list :parties (plist-get entry :parties)))
-                                             entries))
+                                             (agent-river--map-flatten entries)))
                                     ;; No twisty: a contributor is asked
                                     ;; about the nodes a section lists,
                                     ;; never about the section, so a root
@@ -7017,37 +7131,7 @@ listing to say nothing."
                            'agent-river-map-section t
                            'agent-river-map-active (and entries t)))))
               (dolist (entry entries)
-                (let* ((key (plist-get entry :name))
-                       ;; What the line reads.  The key is machinery --
-                       ;; `inc:INC-444' -- and the record carries what to
-                       ;; call it; a record with no name is read by its
-                       ;; key.
-                       (label (or (plist-get entry :shown) key))
-                       (shown (agent-river--map-shown-rows (gethash key rows)))
-                       ;; Rows are detail and wait to be asked for, so a node
-                       ;; draws closed until somebody says otherwise -- with a
-                       ;; twisty saying there is something there.
-                       (open (agent-river--map-folded-p key nil)))
-                  (insert (propertize
-                           (concat (agent-river--map-line
-                                    level label
-                                    (plist-get entry :parties)
-                                    (plist-get entry :missing)
-                                    (and shown (if open 'open 'closed)))
-                                   "\n")
-                           'agent-river-map-name key
-                           'agent-river-map-path key
-                           ;; Whether its children were drawn, read back by TAB.
-                           ;; Off the rendering rather than derived again, so
-                           ;; the toggle cannot disagree with what is on screen.
-                           'agent-river-map-open open
-                           ;; What `agent-river-map-next-active' stops on.  Read
-                           ;; off the parties rather than off the annotation
-                           ;; text, so the motion and the reading cannot come
-                           ;; apart if the line is ever formatted differently.
-                           'agent-river-map-active (and (plist-get entry :parties) t)))
-                  (when open
-                    (agent-river--map-rows-insert shown key))))))
+                (agent-river--map-insert-entry entry level rows))))
           (setq agent-river--map-drawn (current-time))
           (agent-river--map-shade)
           (agent-river--map-goto here)

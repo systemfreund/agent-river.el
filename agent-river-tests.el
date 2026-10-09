@@ -4336,6 +4336,100 @@ the text -- which is all the motion reads -- is the same either way."
        (agent-river--map-draw)
        ,@body)))
 
+;;; A record under another -- the one edge between artifacts
+
+(defun agent-river-test--map-lines ()
+  "Return the map buffer's lines, markup and gutter included."
+  (split-string (buffer-substring-no-properties (point-min) (point-max)) "\n" t))
+
+(defmacro agent-river-test--with-run (root &rest body)
+  "Draw a run with two findings under it, zoomed to ROOT, and run BODY."
+  (declare (indent 1))
+  `(agent-river-test--with-domain
+     (agent-river-appeared "ship:i1" :domain 'ship :name "run one")
+     (agent-river-appeared "finding:b" :domain 'finding :name "B is wrong"
+                           :under "ship:i1")
+     (agent-river-appeared "finding:a" :domain 'finding :name "A is wrong"
+                           :under "ship:i1")
+     (agent-river-appeared "inc:1" :domain 'inc :name "an incident")
+     (agent-river-state "s1" "alpha")
+     (agent-river-reach "finding:a" "s1")
+     (with-temp-buffer
+       (rename-buffer agent-river-map-buffer-name)
+       (agent-river-map-plain-mode)
+       (setq agent-river--map-root ,root)
+       (agent-river--map-draw)
+       ,@body)))
+
+(ert-deftest agent-river-test-a-record-under-another-is-listed-beneath-it ()
+  (agent-river-test--with-run nil
+    ;; The edge is a slot, since the map draws it and reads no context.
+    (should (equal (plist-get (agent-river-artifact-at "finding:a") :under) "ship:i1"))
+    (let ((lines (agent-river-test--map-lines)))
+      ;; The run heads its section and its findings sit one level down,
+      ;; in the listing's own order, with the run drawn open by default --
+      ;; the run is what the reader came for, and its findings are the run.
+      (should (seq-find (lambda (l) (string-match-p "^### .*run one" l)) lines))
+      (let ((a (seq-position lines (seq-find (lambda (l) (string-match-p "^#### .*A is wrong" l)) lines)))
+            (b (seq-position lines (seq-find (lambda (l) (string-match-p "^#### .*B is wrong" l)) lines)))
+            (run (seq-position lines (seq-find (lambda (l) (string-match-p "run one" l)) lines))))
+        (should (and a b run (< run a b))))
+      ;; A domain holding nothing but children heads no section of its own.
+      (should-not (seq-find (lambda (l) (string-match-p "^## .*finding" l)) lines))
+      (should (seq-find (lambda (l) (string-match-p "^## .*inc" l)) lines)))
+    ;; The section heading's reading counts the children's parties too.
+    (should (equal (mapcar #'car (agent-river--map-domain-roots))
+                   (seq-remove (lambda (r) (equal r "finding:"))
+                               (mapcar #'car (agent-river--map-domain-roots)))))
+    ;; And a child is a node like any other, with a party of its own, so
+    ;; `>' stops on it and not on its sibling.
+    (goto-char (point-min))
+    (search-forward "A is wrong")
+    (should (agent-river--map-active-line-p))
+    (search-forward "B is wrong")
+    (should-not (agent-river--map-active-line-p))))
+
+(ert-deftest agent-river-test-a-parent-folds-its-children-away ()
+  (agent-river-test--with-run nil
+    (let ((agent-river--map-folds (list (cons "ship:i1" nil))))
+      (agent-river--map-draw)
+      (should-not (seq-find (lambda (l) (string-match-p "A is wrong" l))
+                            (agent-river-test--map-lines)))
+      ;; Folded is not gone: the twisty says there is something there.
+      (should (seq-find (lambda (l) (and (string-match-p "run one" l)
+                                         (string-match-p (regexp-quote agent-river-map-closed-marker) l)))
+                        (agent-river-test--map-lines))))))
+
+(ert-deftest agent-river-test-a-child-whose-parent-is-not-drawn-stands-on-its-own ()
+  ;; Zoomed into the findings, the run is not on screen, so its findings
+  ;; are the section's roots: a listing that hid them would lose a thing
+  ;; that arrived.
+  (agent-river-test--with-run "finding:"
+    (should (equal (mapcar (lambda (e) (plist-get e :name))
+                           (agent-river--map-entries "finding:"))
+                   '("finding:a" "finding:b"))))
+  ;; Dropped, the parent is not on record at all, and the same holds in
+  ;; the overview.
+  (agent-river-test--with-run nil
+    (agent-river-drop-artifact "ship:i1")
+    (agent-river--map-draw)
+    (should (member "finding:" (mapcar #'car (agent-river--map-domain-roots))))
+    (should (seq-find (lambda (l) (string-match-p "^### .*A is wrong" l))
+                      (agent-river-test--map-lines)))))
+
+(ert-deftest agent-river-test-a-later-appear-may-hang-a-record-under-a-run ()
+  ;; The core declares a question put by a session, and only whoever runs
+  ;; the process knows which run it belongs to -- so the edge may land on
+  ;; a repeat, which the fold treats as the key being told more about.
+  (agent-river-test--with-domain
+    (agent-river-appeared "ship:i1" :domain 'ship :name "run")
+    (agent-river-appeared "ask:s1/r1" :domain 'ask :name "git push?")
+    (should-not (agent-river-appeared "ask:s1/r1" :under "ship:i1"))
+    (should (equal (plist-get (agent-river-artifact-at "ask:s1/r1") :under) "ship:i1"))
+    (should (equal (mapcar (lambda (e) (plist-get e :name))
+                           (plist-get (car (agent-river--map-entries "ship:")) :children))
+                   '("ask:s1/r1")))))
+
 (ert-deftest agent-river-test-map-motion-stops-only-on-a-name ()
   (agent-river-test--with-map
     ;; A fresh map has point on the header, which names nothing -- RET and

@@ -767,6 +767,15 @@ with them, so they are not on the keymap. None of the three touches the
 sessions' tables: the reaching is an edge, and it stays true whatever became of
 the thing at the other end.
 
+A record may be declared **under** another — `(agent-river-appeared
+"finding:a1" :domain 'finding :under "ship:i1" …)` — and the map lists it
+beneath that record, one level down, wherever the parent is drawn; a domain
+holding nothing but children heads no section of its own. `:under` may be set
+by a later `agent-river-appeared` for the same key, which is how a record the
+package declared itself (a permission question) is hung under a run by the
+code that knows which run it was. The parent dropped, the child stands in its
+own section again.
+
 ## The approval queue (`M-x agent-river-approval-queue`)
 
 What each session is waiting to be *allowed*, as a buffer you can answer from

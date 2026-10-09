@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (414 tests). -L . is required: the tests require all four .el files.
+# Full suite (418 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -1866,6 +1866,31 @@ Four things about the map are load-bearing:
   passes `leaf` to `agent-river--map-marker` rather than a number, so that
   pushing records down a level for the section headings cannot push the
   elision and empty-map lines into being headings too.
+- **A record may be part of another, and that is the one edge between
+  artifacts** (`under`, `:under` on `agent-river-appeared`;
+  `agent-river--artifact-child-p`, `agent-river--map-children`). A review
+  run's findings, the questions its sessions put: three domains, one
+  thing. The relationship was already on the records as context cells
+  (`ship`, `asked-by`), and the map could not read it there — it reads no
+  value out of a context, and would not know what the cell meant — so it is
+  a slot, declared by the producer that knows. Four things it owes.
+  **Drawn beneath the parent where the parent is drawn**, one heading
+  level down, with its own rows, parties, motions and actions: a child is a
+  node like any other, and `>` stops on it. Where the parent is *not* drawn
+  — dropped from the table, or in a section a zoom is not showing — the
+  child stands in its own section as a root, because a listing that hid it
+  would lose a thing that arrived; so which records are children is a
+  question about the **view** (`agent-river--map-root`), not the section.
+  **A domain holding nothing but children heads no section**
+  (`agent-river--map-domain-roots`), reached or merely declared, or the
+  overview would list every finding twice. **A parent draws open by
+  default**, where a node with only rows draws closed: rows are detail and
+  wait to be asked for, children are the listing one level down and are
+  what the reader came for; one fold covers both, read back by TAB off the
+  line. And **settable on a repeat `appear`**: the core declares a question
+  the moment it is put, and only whoever runs the process knows which run
+  it belongs to, so the edge may land later from outside — which is also
+  why it is a slot the fold writes rather than a constructor argument.
 - **A section root is an identity, never a path**
   (`agent-river--domain-root`, `agent-river--map-domain`). `inc:` is a
   string built from the domain because everything downstream compares roots
