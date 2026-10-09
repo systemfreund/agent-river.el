@@ -7474,6 +7474,36 @@ is the thing the eye chose."
      ((agent-river--artifact-act (agent-river--map-subject path)))
      (t (user-error "%s: nothing registered to open it with" path)))))
 
+(defun agent-river-map-end ()
+  "Say that the record at point is over, by hand.
+
+The user as the producer, the way `agent-river-link-artifact\=' is: a record
+is over because somebody reported it over, and here that somebody is the
+person looking at the line -- an incident settled out of band, a question
+nobody is going to answer.  Struck through rather than removed, like every
+ending: the record stands until `C\=' or `agent-river-drop-artifact\=' takes
+it away, and the sessions that reached it keep their tables.
+
+No question first.  Ending is the one thing done to a record that is not
+a loss: nothing is thrown away, and a producer that sees the thing again
+reopens it.  On a contributed row, the record the row is under, for
+`agent-river-map-visit\='s reason.  Drawn at once rather than marked dirty,
+since the timer is not running between turns and a keystroke that did
+nothing visible reads as a keystroke that did nothing."
+  (interactive)
+  (let ((path (agent-river--map-line-path)))
+    (when (get-text-property (line-beginning-position) 'agent-river-map-section)
+      (user-error "A section is not a record and cannot end"))
+    (unless path (user-error "No record on this line"))
+    (let ((artifact (gethash path agent-river-artifacts)))
+      (unless artifact (user-error "%s is not on record" path))
+      (when (agent-river-artifact-gone artifact)
+        (user-error "%s is already over" (agent-river-artifact-name artifact)))
+      (agent-river-ended path (agent-river--log-text
+                               (format "%s ended by hand"
+                                       (agent-river-artifact-name artifact))))
+      (agent-river--map-draw))))
+
 (defun agent-river-map-up ()
   "Show every domain again, from a map zoomed into one of them.
 
@@ -7586,7 +7616,10 @@ makes this a degradation rather than a second view to keep in step."
   ;; rather than the record of any work.  The wholesale forgets that drop
   ;; live records are `M-x' commands, since a single keystroke in a view
   ;; buffer is the wrong gesture for those.
-  (define-key map (kbd "C") #'agent-river-drop-gone-artifacts))
+  (define-key map (kbd "C") #'agent-river-drop-gone-artifacts)
+  ;; Not a forget: it says a thing is over, which is what a producer says
+  ;; and what the user may say just as well.  The record stays.
+  (define-key map (kbd "d") #'agent-river-map-end))
 
 (defun agent-river--map-invalidate ()
   "Say the map is out of date and make sure something will redraw it.

@@ -44,7 +44,7 @@ per host — `claude-settings.json`, `codex-hooks.json`,
 ## Commands
 
 ```sh
-# Full suite (418 tests). -L . is required: the tests require all four .el files.
+# Full suite (419 tests). -L . is required: the tests require all four .el files.
 emacs -Q --batch -L . -l agent-river.el -l agent-river-tests.el \
       -f ert-run-tests-batch-and-exit
 
@@ -2063,6 +2063,15 @@ Four things about the map are load-bearing:
   half of the state no event can rebuild. And it leaves the **sessions'
   tables** alone, like the other two, since the reaching is an edge and is
   true whatever became of the thing at the other end.
+- **A record can be ended by hand, and that is not a forget**
+  (`agent-river-map-end`, `d`). A record is over because somebody reported
+  it over, and the person at the line may be that somebody — an incident
+  settled out of band, a question nobody is going to answer. It goes
+  through `agent-river-ended` like a producer's report, so it is folded,
+  logged and struck through the same way, and the sessions' tables are
+  left alone. No question first, where `C` asks: nothing is thrown away,
+  and a producer that sees the thing again reopens it. Drawn at once, since
+  the timer is not running between turns.
 - **The artifact-side forgets ask and report on the same terms**
   (`agent-river-drop-artifact`, `agent-river-artifacts-reset`). Wholesale
   asks, like the one above and for a sharper version of its reason: a

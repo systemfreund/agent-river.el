@@ -758,6 +758,10 @@ full, each entry carrying what had been reached beneath it — and that is gone.
 What an agent did to a file is counted in the session tables and named by no
 view: the block says what a session is doing, not which files it is in.
 
+`d` says the record at point is **over** — you as the producer, for a thing
+settled out of band — and strikes it through; nothing is removed, and a
+producer that sees it again reopens it.
+
 Nothing drops out of this view by getting old. `C` forgets every record that
 has **ended** — the endings are history once a section has filled up with lines
 nobody is going to pick up, and only you know when that moment came. `M-x

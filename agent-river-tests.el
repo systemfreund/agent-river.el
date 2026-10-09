@@ -4430,6 +4430,35 @@ the text -- which is all the motion reads -- is the same either way."
                            (plist-get (car (agent-river--map-entries "ship:")) :children))
                    '("ask:s1/r1")))))
 
+(ert-deftest agent-river-test-a-record-can-be-ended-by-hand ()
+  (agent-river-test--with-map
+    ;; On a record: over, struck through, still on record, and said in the
+    ;; log -- the user is the producer here.
+    (goto-char (point-min))
+    (search-forward "Nobody on it")
+    (agent-river-map-end)
+    (should (plist-get (agent-river-artifact-at "inc:INC-2") :gone))
+    (should (string-match-p "Nobody on it ended by hand" (agent-river-test--log-text)))
+    ;; Drawn at once, not left for a timer that is not running.
+    (should (seq-find (lambda (l) (string-match-p "Nobody on it" l))
+                      (agent-river-test--map-lines)))
+    (should (get-text-property (save-excursion (goto-char (point-min))
+                                               (search-forward "Nobody on it")
+                                               (1- (point)))
+                               'agent-river-map-face))
+    ;; Twice is refused rather than written twice.
+    (goto-char (point-min))
+    (search-forward "Nobody on it")
+    (should-error (agent-river-map-end) :type 'user-error)
+    ;; The sessions' tables are the edge and are left alone.
+    (goto-char (point-min))
+    (search-forward "Disk full")
+    (agent-river-map-end)
+    (should (equal '("s1") (mapcar #'car (agent-river-reaching "inc:INC-1"))))
+    ;; A line that names no record refuses.
+    (goto-char (point-min))
+    (should-error (agent-river-map-end) :type 'user-error)))
+
 (ert-deftest agent-river-test-map-motion-stops-only-on-a-name ()
   (agent-river-test--with-map
     ;; A fresh map has point on the header, which names nothing -- RET and
